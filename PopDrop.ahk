@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2
 #SingleInstance Force
 
 ; PopDrop - a topmost recent-file panel for Windows.
