@@ -92,6 +92,6 @@ RecentFileCount=12
 
 按 `Win+R`，输入 `shell:startup`，把 `PopDrop.ahk` 的快捷方式放进去。
 
-## 编译为 EXE（可选）
+## 编译为 EXE
 
-安装 AutoHotkey v2 时勾选 Ahk2Exe 编译器，然后右键 `PopDrop.ahk` 选择「Compile Script」。编译后的 EXE 需要和 `config.ini` 放在同一目录，配置和固定文件才能正常保存。
+详见 [BUILD.md](BUILD.md) —— 包含编译命令、环境准备、构建经验总结。

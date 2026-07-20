@@ -1,5 +1,8 @@
-#Requires AutoHotkey v2
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
+
+;@Ahk2Exe-SetMainIcon assets\app.ico
+;@Ahk2Exe-AddResource assets\tray.ico, 555
 
 ; PopDrop - a topmost recent-file panel for Windows.
 ; The program intentionally uses only AutoHotkey v2 and Windows Shell APIs.
@@ -233,7 +236,11 @@ BuildPanel() {
 
 BuildTrayMenu() {
     global ActiveHotkey
-    TraySetIcon("icon.ico")
+    if A_IsCompiled {
+        TraySetIcon(A_ScriptFullPath, -555, true)
+    } else {
+        TraySetIcon(A_ScriptDir "\assets\tray.ico", 1, true)
+    }
     A_TrayMenu.Delete()
     A_TrayMenu.Add("显示/隐藏面板 (" ActiveHotkey ")", TogglePanel)
     A_TrayMenu.Add("刷新并显示", ShowAndRefresh)
@@ -290,7 +297,8 @@ ShowAndRefresh(*) {
 
 ApplyWindowIcon() {
     global Panel
-    hIcon := DllCall("LoadImageW", "ptr", 0, "str", A_ScriptDir "\icon.ico",
+    iconPath := A_IsCompiled ? A_ScriptFullPath : A_ScriptDir "\assets\app.ico"
+    hIcon := DllCall("LoadImageW", "ptr", 0, "str", iconPath,
         "uint", 1, "int", 0, "int", 0, "uint", 0x10, "ptr") ; IMAGE_ICON, LR_LOADFROMFILE
     if hIcon {
         SendMessage(0x80, 0, hIcon, , "ahk_id " Panel.Hwnd) ; WM_SETICON, ICON_SMALL

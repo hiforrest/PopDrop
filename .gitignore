@@ -2,3 +2,5 @@
 *.tmp
 *.bak
 *.exe
+build_logs/
+release/
