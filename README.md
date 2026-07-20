@@ -21,7 +21,7 @@
 
 1. 安装 [AutoHotkey v2](https://www.autohotkey.com/)。本项目不能使用 v1 运行。
 2. 双击 `PopDrop.ahk`。
-3. 按 `F3` 打开面板。
+3. 按 `F2` 打开面板。
 
 脚本只调用 AutoHotkey 与 Windows 自带 API，不需要安装其他依赖。它不会修改、移动或删除面板中展示的源文件。
 
@@ -31,12 +31,12 @@
 
 ```ini
 [General]
-Hotkey=F3
+Hotkey=F2
 MaxFilesPerFolder=8
 IncludeSubfolders=0
 ThumbnailSize=96
-WindowWidth=640
-WindowHeight=520
+WindowWidth=980
+WindowHeight=620
 ViewMode=Thumbnail
 ShowRecentSidebar=1
 RecentFileCount=12
