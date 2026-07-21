@@ -2,5 +2,9 @@
 *.tmp
 *.bak
 *.exe
+.mcp.json
+.claude/
+tests/
+cache/
 build_logs/
 release/

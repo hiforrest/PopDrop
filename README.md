@@ -1,6 +1,6 @@
 # PopDrop
 
-![|center](icon-256.webp)
+<img src="assets/logo.webp" width="192px">
 
 按一下 `F2`，一个文件面板出现在屏幕最前面。找到文件，拖走，关掉。全程不到三秒。
 
@@ -50,6 +50,8 @@ WindowHeight=620
 ViewMode=Thumbnail
 ShowRecentSidebar=1
 RecentFileCount=12
+CachePath=
+ThumbnailPolicy=Fast
 
 [Folders]
 文档=%USERPROFILE%\Documents
@@ -68,6 +70,8 @@ RecentFileCount=12
 | `ViewMode` | `Thumbnail`=缩略图，`List`=文件名+修改时间。也可以在面板顶部手动切换。 |
 | `ShowRecentSidebar` | `1`=显示最近打开侧边栏，`0`=关闭。面板顶部按钮也可以随时开关。 |
 | `RecentFileCount` | 侧边栏最多显示多少个近期文件，范围 1～100。 |
+| `CachePath` | 扫描结果缓存目录。留空时使用软件目录下的 `cache` 文件夹；不可写时退化为内存缓存。 |
+| `ThumbnailPolicy` | `Fast`（默认）只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标；`Full` 允许现场生成缩略图，可能造成短暂停顿。 |
 | 快捷键语法 | AutoHotkey v2 格式：`^`=Ctrl，`!`=Alt，`+`=Shift，`#`=Win。例如 `^!Space`=Ctrl+Alt+Space。 |
 
 ### 文件筛选（v0.3+）
@@ -170,6 +174,12 @@ FileExtensions=.png,.jpg,.jpeg,.webp,.gif
 - 如果配置了 Include/Exclude 但没有文件命中，分组标题会显示「没有符合筛选条件的文件」，以区别于目录本身为空的情况。
 
 如果配置的目录不存在，面板会显示「目录不可用」，不会报错退出。
+
+### 刷新与缓存
+
+面板会先显示上次扫描得到的结果，然后在独立后台进程中更新文件夹和 Windows 近期文件；新结果完整写出后才一次性刷新界面。缓存默认位于软件目录下的 `cache\scan-cache-v1.ini`，可以通过 `CachePath` 指定其他目录。缓存只保存路径和修改时间，不保存文件内容或缩略图；删除缓存不会删除任何用户文件。软件目录不可写时，程序仍可运行，但本次只使用内存缓存。
+
+后台刷新改善的是面板响应体验，目录本身仍需要完整枚举；它不是实时文件系统监听，也不会让大目录扫描消失。
 
 ## 固定文件
 
