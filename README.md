@@ -70,6 +70,105 @@ RecentFileCount=12
 | `RecentFileCount` | 侧边栏最多显示多少个近期文件，范围 1～100。 |
 | 快捷键语法 | AutoHotkey v2 格式：`^`=Ctrl，`!`=Alt，`+`=Shift，`#`=Win。例如 `^!Space`=Ctrl+Alt+Space。 |
 
+### 文件筛选（v0.3+）
+
+从 v0.3 开始，PopDrop 支持按文件扩展名筛选，可以在全局和文件夹级别独立配置。
+
+#### 筛选模式
+
+| 模式 | 含义 |
+|---|---|
+| `All` | 显示所有文件（默认，不筛选） |
+| `Include` | 只显示扩展名列表中的文件 |
+| `Exclude` | 排除扩展名列表中的文件 |
+| `Inherit` | 仅文件夹级可用，整体继承全局筛选模式及扩展名列表 |
+
+#### 全局配置
+
+```ini
+[General]
+; All / Include / Exclude
+FilterMode=All
+FileExtensions=
+```
+
+- `FilterMode=All` 时，`FileExtensions` 被忽略，显示所有文件。
+- `FilterMode=Include` 时，只显示扩展名匹配的文件。
+- `FilterMode=Exclude` 时，排除扩展名匹配的文件。
+
+#### 文件夹级独立配置
+
+每个文件夹可以独立覆盖筛选设置。名称必须与 `[Folders]` 中的显示名称一致。
+
+```ini
+[Folder:下载]
+IncludeSubfolders=0
+MaxFilesPerFolder=12
+FilterMode=Exclude
+FileExtensions=.tmp,.part,.crdownload,.download
+
+[Folder:素材]
+FilterMode=Include
+FileExtensions=.png,.jpg,.jpeg,.webp,.gif
+```
+
+**继承规则：**
+
+- 没有 `[Folder:名称]` 配置节：完全继承全局设置。
+- `IncludeSubfolders` 缺失：继承全局值。
+- `MaxFilesPerFolder` 缺失：继承全局值。
+- `FilterMode=Inherit` 或缺失：**整体**继承全局筛选模式及扩展名列表。
+- `FilterMode=All`：该文件夹显示所有文件，忽略 `FileExtensions`。
+- `FilterMode=Include` 或 `Exclude`：使用自己的 `FileExtensions`，不会继承全局扩展名列表。
+
+#### 扩展名规则
+
+- 大小写不敏感：`jpg`、`.JPG`、`.jpg` 都一致对待。
+- 自动补 `.` 前缀：`jpg` 等同于 `.jpg`。
+- 支持多段后缀：`.tar.gz`。
+- 逗号分隔，前后空格自动忽略。
+- 重复扩展名自动去重。
+
+#### 完整示例
+
+```ini
+[General]
+Hotkey=F2
+MaxFilesPerFolder=8
+IncludeSubfolders=0
+ThumbnailSize=96
+; 全局：显示所有文件
+FilterMode=All
+
+[Folders]
+下载=%USERPROFILE%\Downloads
+素材=D:\Assets
+项目=D:\Projects
+
+[Folder:下载]
+; 排除临时文件和下载片段
+IncludeSubfolders=0
+MaxFilesPerFolder=12
+FilterMode=Exclude
+FileExtensions=.tmp,.part,.crdownload,.download
+
+[Folder:素材]
+; 只显示图片文件
+IncludeSubfolders=1
+MaxFilesPerFolder=20
+FilterMode=Include
+FileExtensions=.png,.jpg,.jpeg,.webp,.gif
+
+[Folder:项目]
+; 未配置独立节，完全继承全局设置（All）
+```
+
+#### 注意事项
+
+- 筛选只作用于对应文件夹的扫描结果，不影响固定文件和 Windows 最近打开侧边栏。
+- 筛选发生在文件枚举时，但**不能避免对目录的完整枚举**，因此不能将其作为解决超大目录扫描速度的主要手段。
+- 如果配置了 Include/Exclude 但没有文件命中，分组标题会显示「没有符合筛选条件的文件」，以区别于目录本身为空的情况。
+
 如果配置的目录不存在，面板会显示「目录不可用」，不会报错退出。
 
 ## 固定文件

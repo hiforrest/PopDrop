@@ -1,0 +1,64 @@
+
+===== 测试开始：ConfigFilterTests =====
+
+── NormalizeExtensionList ──
+  ? 空字符串返回空数组
+  ? jpg 规范化为 .jpg
+  ? .jpg 保持为 .jpg
+  ? .JPG 规范化为 .jpg
+  ? 逗号分隔多个扩展名
+  ? 重复扩展名被去重
+  ? 多段后缀 .tar.gz 保留完整
+  ? 前后空格被忽略
+  ? 连续逗号产生的空项被跳过
+  ? jpg 和 .jpg 视为同一扩展名
+
+── ShouldIncludeFile ──
+  ? All 模式始终返回 true
+  ? Include 命中 .jpg
+  ? Include 未命中 .png 返回 false
+  ? Include 大小写不敏感
+  ? Exclude 命中 .tmp 返回 false
+  ? Exclude 未命中返回 true
+  ? Exclude 大小写不敏感
+  ? 多段后缀 .tar.gz 匹配 backup.tar.gz
+  ? .gz 匹配 backup.tar.gz
+  ? .jpg 不匹配 photo.jpg.tmp
+  ? Include 空列表防御性返回 true
+  ? Exclude 空列表防御性返回 true
+  ? 大写文件名匹配小写扩展名
+
+── ParseFilterSettings ──
+  ? 空 mode 等价于 All
+  ? all mode 返回 Mode=All
+  ? Include 模式解析扩展名
+  ? Exclude 模式解析扩展名
+  ? Include 空列表产生错误
+  ? Exclude 空列表产生错误
+  ? 非法模式产生错误
+  ? Inherit 模式返回 Mode=Inherit
+  ? 通配符 * 产生错误
+  ? 通配符 ? 产生错误
+  ? 反斜杠 \\ 产生错误
+
+── 继承逻辑模拟 ──
+  ? 无配置时继承全局 All
+  ? 文件夹 FilterMode=All 覆盖全局 Exclude
+  ? 文件夹 Inherit 使用全局 Exclude
+  ? 文件夹 Inherit 通过非排除文件
+  ? 只覆盖 MaxFilesPerFolder 时筛选继承全局 All
+  ? 文件夹 Include 使用自己的扩展名列表命中 .psd
+  ? 文件夹 Include 使用自己的扩展名列表未命中 .jpg
+
+── 边界情况 ──
+  ? 空前缀 All 通过
+  ? 无后缀文件不匹配 Include
+  ? 无后缀文件在 All 模式通过
+  ? .tar.gz 不匹配 backup.gz
+  ? 点号开头的文件 .hidden 匹配
+  ? 点号开头的文件 .hidden 不匹配 .txt
+
+===== 测试结果 =====
+总计: 47 | 通过: 47 | 失败: 0
+
+全部通过！

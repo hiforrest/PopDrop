@@ -47,6 +47,11 @@ global DropCallbacks := []
 global DataVTable := 0
 global DataCallbacks := []
 global DragDataObjects := Map()
+global FilterMode := "All"
+global FileExtensions := ""
+global ConfigErrors := []
+global LastValidFolderSettings := []
+global ConfigErrorsShown := false
 
 EnsureConfig()
 LoadSettings()
@@ -79,6 +84,9 @@ EnsureConfig() {
     "ViewMode=Thumbnail`n"
     "ShowRecentSidebar=1`n"
     "RecentFileCount=12`n"
+    "; All / Include / Exclude`n"
+    "FilterMode=All`n"
+    "FileExtensions=`n"
     "`n"
     "[Folders]`n"
     "文档=%USERPROFILE%\Documents`n"
@@ -108,6 +116,8 @@ LoadSettings(*) {
     global ConfigPath, ConfiguredHotkey, MaxFilesPerFolder
     global IncludeSubfolders, ThumbnailSize, FolderSettings, PinnedPaths
     global WindowWidth, WindowHeight, ViewMode, ShowRecentSidebar, RecentFileCount
+    global FilterMode, FileExtensions, ConfigErrors, LastValidFolderSettings
+    global ConfigErrorsShown
 
     ConfiguredHotkey := Trim(IniRead(ConfigPath, "General", "Hotkey", "F3"))
     if ConfiguredHotkey = ""
@@ -140,10 +150,41 @@ LoadSettings(*) {
         RecentFileCount := 12
     RecentFileCount := Max(1, Min(RecentFileCount, 100))
 
+    ; 读取全局筛选设置
+    FilterMode := StrLower(Trim(IniRead(ConfigPath, "General", "FilterMode", "All")))
+    FileExtensions := Trim(IniRead(ConfigPath, "General", "FileExtensions", ""))
+
+    ; 读取文件夹列表
     FolderSettings := []
     for entry in ReadIniSection("Folders") {
         if entry.Value != ""
             FolderSettings.Push({Name: entry.Key, Path: NormalizePath(entry.Value)})
+    }
+
+    ; 验证并解析配置，得到每个文件夹的最终设置
+    ConfigErrorsShown := false
+    result := ValidateConfig()
+    if result.Valid {
+        LastValidFolderSettings := result.Settings
+        ConfigErrors := []
+    } else {
+        ConfigErrors := result.Errors
+        ; 有错误时，如果上次有效设置存在则继续使用，否则使用 result.Settings（含默认值）
+        if LastValidFolderSettings.Length {
+            ; 保留 LastValidFolderSettings
+        } else {
+            ; 使用安全默认值
+            LastValidFolderSettings := []
+            for f in FolderSettings {
+                LastValidFolderSettings.Push({
+                    Name: f.Name,
+                    Path: f.Path,
+                    IncludeSubfolders: IncludeSubfolders,
+                    MaxFilesPerFolder: MaxFilesPerFolder,
+                    Filter: {Mode: "All", Extensions: []}
+                })
+            }
+        }
     }
 
     PinnedPaths := []
@@ -151,6 +192,239 @@ LoadSettings(*) {
         path := NormalizePath(entry.Value)
         if path != "" && !ArrayContainsPath(PinnedPaths, path)
             PinnedPaths.Push(path)
+    }
+}
+
+; ──── 配置验证与筛选函数 ────
+
+ValidateConfig() {
+    global ConfigPath, ConfigErrors, FilterMode, FileExtensions, FolderSettings
+    global MaxFilesPerFolder, IncludeSubfolders, LastValidFolderSettings
+    global ConfigErrorsShown
+
+    errors := []
+    tempGlobalFilter := {Mode: "All", Extensions: []}
+    tempGlobalMaxFiles := 8
+    tempGlobalIncludeSubfolders := false
+
+    ; ── 解析全局筛选 ──
+    rawMode := StrLower(Trim(IniRead(ConfigPath, "General", "FilterMode", "All")))
+    rawExt := Trim(IniRead(ConfigPath, "General", "FileExtensions", ""))
+    if rawMode = "inherit"
+        errors.Push("[General] 中 FilterMode 不能为 Inherit（只有文件夹级才支持 Inherit）。")
+    gf := ParseFilterSettings(rawMode, rawExt, "[General]")
+    if HasProp(gf, "Error")
+        errors.Push(gf.Error)
+    else
+        tempGlobalFilter := gf
+
+    ; ── 解析全局数值 ──
+    try tempGlobalMaxFiles := Integer(IniRead(ConfigPath, "General", "MaxFilesPerFolder", "8"))
+    catch
+        tempGlobalMaxFiles := 8
+    tempGlobalMaxFiles := Max(1, Min(tempGlobalMaxFiles, 100))
+
+    tempGlobalIncludeSubfolders := IniRead(ConfigPath, "General", "IncludeSubfolders", "0") = "1"
+
+    ; ── 解析每个文件夹的独立配置 ──
+    resolved := []
+    folderNames := Map()
+    for f in FolderSettings {
+        folderNames[f.Name] := true
+        sectionName := "Folder:" f.Name
+
+        ; 读取该文件夹的独立配置节
+        folderMax := tempGlobalMaxFiles
+        folderRecursive := tempGlobalIncludeSubfolders
+        folderFilter := {Mode: tempGlobalFilter.Mode, Extensions: tempGlobalFilter.Extensions}
+
+        ; 检查是否有独立配置节
+        sectionExists := false
+        try {
+            raw := IniRead(ConfigPath, sectionName)
+            if raw != ""
+                sectionExists := true
+        }
+        catch
+            sectionExists := false
+
+        if sectionExists {
+            ; 读取 MaxFilesPerFolder
+            try {
+                val := IniRead(ConfigPath, sectionName, "MaxFilesPerFolder", "")
+                if val != "" {
+                    folderMax := Integer(val)
+                    folderMax := Max(1, Min(folderMax, 100))
+                }
+            }
+            catch
+                errors.Push("[" sectionName "] 中 MaxFilesPerFolder 值无效。")
+
+            ; 读取 IncludeSubfolders
+            try {
+                val := IniRead(ConfigPath, sectionName, "IncludeSubfolders", "")
+                if val != "" {
+                    if val = "1"
+                        folderRecursive := true
+                    else if val = "0"
+                        folderRecursive := false
+                    else
+                        errors.Push("[" sectionName "] 中 IncludeSubfolders 只能为 0 或 1，实际值为：" val "。")
+                }
+            }
+
+            ; 读取筛选模式 FileExtensions
+            rawMode := StrLower(Trim(IniRead(ConfigPath, sectionName, "FilterMode", "inherit")))
+            rawExt := Trim(IniRead(ConfigPath, sectionName, "FileExtensions", ""))
+            if rawMode = "inherit" {
+                ; 整体继承全局筛选
+                folderFilter := {Mode: tempGlobalFilter.Mode, Extensions: tempGlobalFilter.Extensions}
+            } else {
+                pf := ParseFilterSettings(rawMode, rawExt, "[" sectionName "]")
+                if HasProp(pf, "Error")
+                    errors.Push(pf.Error)
+                else
+                    folderFilter := pf
+            }
+        }
+
+        resolved.Push({
+            Name: f.Name,
+            Path: f.Path,
+            IncludeSubfolders: folderRecursive,
+            MaxFilesPerFolder: folderMax,
+            Filter: folderFilter
+        })
+    }
+
+    ; ── 检查 [Folder:xxx] 节是否对应存在的文件夹 ──
+    knownNames := Map()
+    for f in FolderSettings
+        knownNames[f.Name] := true
+    try {
+        Loop Read, ConfigPath {
+            if RegExMatch(A_LoopReadLine, "i)^\[Folder:(.+)\]$", &m) {
+                folderName := m[1]
+                if !knownNames.Has(folderName) {
+                    errors.Push("配置节 [Folder:" folderName "] 引用了不存在的文件夹名称，[Folders] 中未定义。")
+                }
+            }
+        }
+    }
+
+    if errors.Length {
+        ConfigErrors := errors
+        return {Valid: false, Errors: errors, Settings: resolved}
+    }
+
+    ; 验证通过，返回设置
+    return {Valid: true, Settings: resolved}
+}
+
+ParseFilterSettings(mode, rawExtensions, context) {
+    ; mode: 小写，已 trim
+    ; 返回 {Mode: "...", Extensions: [...], Error: ""} 或 {Error: "..."}
+
+    if mode = "" || mode = "all"
+        return {Mode: "All", Extensions: []}
+
+    if mode = "include" || mode = "exclude" {
+        if rawExtensions = "" {
+            return {Error: context " 中 FilterMode=" mode " 但 FileExtensions 为空。请提供至少一个扩展名。"}
+        }
+        exts := NormalizeExtensionList(rawExtensions)
+        invalid := []
+        for ext in exts {
+            if RegExMatch(ext, "[*?\\/]") {
+                invalid.Push(ext)
+            }
+        }
+        if invalid.Length {
+            return {Error: context " 中 FileExtensions 包含非法字符（* ? \ /）：" JoinArray(invalid, ", ")}
+        }
+        return {Mode: mode, Extensions: exts}
+    }
+
+    if mode = "inherit"
+        return {Mode: "Inherit", Extensions: []}
+
+    return {Error: context " 中 FilterMode 值无效：" mode "。允许的值：All, Include, Exclude（文件夹级还支持 Inherit）。"}
+}
+
+NormalizeExtensionList(raw) {
+    ; 解析逗号分隔的扩展名列表
+    ; 返回规范化后的小写扩展名数组（含 . 前缀），去重
+    if raw = ""
+        return []
+
+    seen := Map()
+    result := []
+    parts := StrSplit(raw, ",", " `t")
+
+    for part in parts {
+        p := Trim(part)
+        if p = ""
+            continue
+
+        ; 确保以 . 开头
+        ext := SubStr(p, 1, 1) = "." ? p : "." p
+        ext := StrLower(ext)
+
+        if seen.Has(ext)
+            continue
+        seen[ext] := true
+        result.Push(ext)
+    }
+    return result
+}
+
+ShouldIncludeFile(filename, filter) {
+    ; filter: {Mode: "All"|"Include"|"Exclude", Extensions: [...]}
+    if filter.Mode = "All"
+        return true
+
+    if filter.Mode = "Include" {
+        if !filter.Extensions.Length
+            return true ; 无扩展名列表则通过（防御性）
+        for ext in filter.Extensions {
+            if StrLower(SubStr(filename, -StrLen(ext))) = ext
+                return true
+        }
+        return false
+    }
+
+    if filter.Mode = "Exclude" {
+        if !filter.Extensions.Length
+            return true ; 无扩展名列表则不排除
+        for ext in filter.Extensions {
+            if StrLower(SubStr(filename, -StrLen(ext))) = ext
+                return false
+        }
+        return true
+    }
+
+    return true ; 未知模式，安全通过
+}
+
+JoinArray(arr, sep) {
+    s := ""
+    for i, v in arr {
+        if i > 1
+            s .= sep
+        s .= v
+    }
+    return s
+}
+
+ShowConfigErrorDialog() {
+    global ConfigErrors, ConfigErrorsShown
+    if ConfigErrors.Length && !ConfigErrorsShown {
+        msg := "配置有 " ConfigErrors.Length " 处问题，已继续使用上一次有效设置。`n`n"
+        msg .= "详细错误信息：`n"
+        for i, err in ConfigErrors
+            msg .= "  " i ". " err "`n"
+        MsgBox(msg, "PopDrop 配置错误", "Icon!")
+        ConfigErrorsShown := true
     }
 }
 
@@ -406,7 +680,7 @@ ApplyViewMode() {
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x108E,
             "ptr", 0, "ptr", 0, "ptr") ; LVM_SETVIEW, LV_VIEW_ICON
         FileView.ModifyCol(1, ThumbnailSize + 32)
-        spacing := (ThumbnailSize + 32) | ((ThumbnailSize + 18) << 16)
+        spacing := (ThumbnailSize + 24) | ((ThumbnailSize + 96) << 16)
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1035,
             "ptr", 0, "ptr", spacing, "ptr")
     }
@@ -415,7 +689,8 @@ ApplyViewMode() {
 PopulatePanel() {
     global FileView, ItemPaths, PinnedPaths, FolderSettings, StatusText
     global MaxFilesPerFolder, IncludeSubfolders, ThumbnailSize, ThumbnailImageList
-    global SelectedFilePaths
+    global SelectedFilePaths, LastValidFolderSettings, ConfigErrors
+    global ConfigErrorsShown
 
     SelectedFilePaths := []
     FileView.Opt("-Redraw")
@@ -433,7 +708,7 @@ PopulatePanel() {
     ThumbnailImageList := newImageList
     if oldImageList && oldImageList != newImageList
         DllCall("comctl32\ImageList_Destroy", "ptr", oldImageList)
-    spacing := (ThumbnailSize + 52) | ((ThumbnailSize + 58) << 16)
+    spacing := (ThumbnailSize + 24) | ((ThumbnailSize + 96) << 16)
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1035,
         "ptr", 0, "ptr", spacing, "ptr") ; LVM_SETICONSPACING
 
@@ -456,10 +731,32 @@ PopulatePanel() {
         groupId += 1
     }
 
-    for folder in FolderSettings {
+    ; 使用验证后的文件夹设置
+    folderSettings := LastValidFolderSettings.Length ? LastValidFolderSettings : FolderSettings
+    ; 如果没有验证过的设置，为每个文件夹构建默认设置
+    if !LastValidFolderSettings.Length {
+        folderSettings := []
+        for f in FolderSettings {
+            folderSettings.Push({
+                Name: f.Name,
+                Path: f.Path,
+                IncludeSubfolders: IncludeSubfolders,
+                MaxFilesPerFolder: MaxFilesPerFolder,
+                Filter: {Mode: "All", Extensions: []}
+            })
+        }
+    }
+
+    for folder in folderSettings {
         exists := DirExist(folder.Path)
-        files := exists ? GetLatestFiles(folder.Path, MaxFilesPerFolder, IncludeSubfolders) : []
-        suffix := exists ? " (" files.Length ")" : " [目录不可用]"
+        filterMode := folder.Filter.Mode
+        files := exists ? GetLatestFiles(folder.Path, folder.MaxFilesPerFolder, folder.IncludeSubfolders, folder.Filter) : []
+
+        countLabel := " (" files.Length ")"
+        if exists && files.Length = 0 && filterMode != "All"
+            countLabel := " [没有符合筛选条件的文件]"
+
+        suffix := exists ? countLabel : " [目录不可用]"
         InsertListGroup(groupId, folder.Name suffix "  —  " folder.Path)
         if !exists {
             AddPlaceholderTile("目录不可用", groupId)
@@ -468,7 +765,10 @@ PopulatePanel() {
             continue
         }
         if !files.Length {
-            AddPlaceholderTile("暂无文件", groupId)
+            if filterMode != "All"
+                AddPlaceholderTile("没有符合筛选条件的文件", groupId)
+            else
+                AddPlaceholderTile("暂无文件", groupId)
             groupId += 1
             continue
         }
@@ -491,7 +791,13 @@ PopulatePanel() {
     status := "共显示 " displayedCount " 个文件"
     if unavailableCount
         status .= "；" unavailableCount " 个目录不可用"
+    if ConfigErrors.Length
+        status .= "。配置有 " ConfigErrors.Length " 处问题"
     StatusText.Text := status "。缩略图由 Windows Shell 生成；双击打开，拖拽发送。"
+
+    ; 在 GUI 完全更新后显示错误对话框
+    if ConfigErrors.Length
+        SetTimer(ShowConfigErrorDialog, -100)
 }
 
 InsertListGroup(groupId, header) {
@@ -541,7 +847,7 @@ AddShellThumbnail(path) {
         if DllCall("shell32\SHCreateItemFromParsingName", "wstr", path, "ptr", 0,
             "ptr", iidImageFactory.Ptr, "ptr*", &factory) = 0 {
             requestedSize := (ThumbnailSize & 0xFFFFFFFF) | (ThumbnailSize << 32)
-            ; SIIGBF_CROPTOSQUARE keeps every bitmap compatible with the
+            ; SIIGBF_CROPTOSQUARE (0x20) keeps every bitmap compatible with the
             ; fixed-size image list while preserving Shell thumbnail quality.
             try ComCall(3, factory, "int64", requestedSize, "uint", 0x20,
                 "ptr*", &bitmap)
@@ -647,11 +953,15 @@ GetWindowsRecentFiles(limit) {
     return results
 }
 
-GetLatestFiles(folderPath, limit, recursive) {
+GetLatestFiles(folderPath, limit, recursive, filter?) {
     files := []
     mode := recursive ? "FR" : "F"
     try {
         Loop Files, folderPath "\*", mode {
+            ; 文件筛选：在创建 candidate 之前
+            if IsSet(filter) && !ShouldIncludeFile(A_LoopFileName, filter)
+                continue
+
             candidate := {
                 Path: A_LoopFileFullPath,
                 Name: A_LoopFileName,
