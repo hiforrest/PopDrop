@@ -219,7 +219,7 @@ BuildPanel() {
     ; LVS_EX_DOUBLEBUFFER reduces flicker while rebuilding thumbnail groups.
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1036,
         "ptr", 0x10000, "ptr", 0x10000, "ptr")
-
+    
     RecentLabel := Panel.AddText("x740 y50 w220 h22 +0x200", "最近打开")
     RecentLabel.SetFont("s10 Bold")
     RecentView := Panel.AddListView("x740 y76 w220 h442 Report -Hdr -Multi", ["文件"])
@@ -405,7 +405,8 @@ ApplyViewMode() {
     } else {
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x108E,
             "ptr", 0, "ptr", 0, "ptr") ; LVM_SETVIEW, LV_VIEW_ICON
-        spacing := (ThumbnailSize + 52) | ((ThumbnailSize + 58) << 16)
+        FileView.ModifyCol(1, ThumbnailSize + 32)
+        spacing := (ThumbnailSize + 32) | ((ThumbnailSize + 18) << 16)
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1035,
             "ptr", 0, "ptr", spacing, "ptr")
     }
