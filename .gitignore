@@ -8,3 +8,4 @@ tests/
 cache/
 build_logs/
 release/
+config.ini
