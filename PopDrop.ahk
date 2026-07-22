@@ -18,6 +18,9 @@ global MODE_FILES := "Files"
 global MODE_LAUNCHER := "Launcher"
 
 if A_Args.Length && A_Args[1] = "--scan-worker" {
+    ; 纯后台扫描进程：立即隐藏窗口和托盘图标，避免任务栏闪烁
+    A_IconHidden := true
+    try WinHide("ahk_id " A_ScriptHwnd)
     RunScanWorkerMode()
     ExitApp
 }
@@ -784,7 +787,7 @@ PanelActivationChanged(wParam, lParam, msg, hwnd) {
     global Panel, WindowMode
     global WINDOW_MODE_TEMPORARY
 
-    if !IsObject(Panel) || hwnd != Panel.Hwnd
+    if !IsSet(Panel) || !IsObject(Panel) || hwnd != Panel.Hwnd
         return
 
     if WindowMode != WINDOW_MODE_TEMPORARY
@@ -971,6 +974,10 @@ ShowAndRefresh(forceRefresh := false, *) {
     StatusKind := "default"
     PopulatePanel()
     PopulateRecentSidebar()
+    ; 清除 ListView 添加过程中可能因自动选中触发的文件路径更新
+    SetTimer(UpdateSelectionStatus, 0)
+    StatusKind := "default"
+    StatusText.Text := "正在加载…"
     UpdateViewButtons()
     LastRenderedFingerprint := CurrentConfigFingerprint
     StartBackgroundScan(forceRefresh)
@@ -1211,8 +1218,8 @@ PopulatePanel() {
         status .= "。配置有 " ConfigErrors.Length " 处问题"
     if !ScanResultLoaded
         status := "正在加载文件…"
-    if StatusKind != "user"
-        StatusText.Text := status "。缩略图由 Windows Shell 生成；双击打开，拖拽发送。"
+    StatusKind := "default"
+    StatusText.Text := status
 
     ; 在 GUI 完全更新后显示错误对话框
     if ConfigErrors.Length
@@ -1326,6 +1333,7 @@ PopulateRecentSidebar() {
         RecentView.Add("", "暂无系统近期记录")
     RecentLabel.Text := "最近打开  (" recentFiles.Length ")"
     RecentView.ModifyCol(1, 230)
+    RecentView.Modify(0, "-Select -Focus")
     RecentView.Opt("+Redraw")
 }
 
@@ -1802,10 +1810,12 @@ PollWorkerResult() {
             changed := !ScanResultsEqual(CurrentScanResult, result)
             CurrentScanResult := result
             ScanResultLoaded := true
-            if changed && IsObject(Panel) && PanelVisible
+            if changed && IsObject(Panel) && PanelVisible {
                 PopulatePanel()
-            if IsObject(Panel) && PanelVisible && changed
                 PopulateRecentSidebar()
+                SetTimer(UpdateSelectionStatus, 0)
+                StatusKind := "default"
+            }
             if CacheWritable {
                 try {
                     cacheTemp := CacheFilePath ".writing"
@@ -2094,6 +2104,8 @@ OpenConfig(*) {
 FileViewNotify(wParam, lParam, msg, hwnd) {
     global FileView, GroupFolderPaths
     ; NMHDR structure: hwndFrom, idFrom, code
+    if !IsSet(FileView) || !IsObject(FileView)
+        return
     hwndFrom := NumGet(lParam + 0, "ptr")
     if hwndFrom != FileView.Hwnd
         return
