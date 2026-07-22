@@ -18,10 +18,10 @@
 
 | 文件 | 说明 |
 |---|---|
-| `PopDrop.exe` | 编译后的程序，可以和 `config.ini` 一起分发 |
+| `PopDrop.exe` | 编译后的程序，可以和 `config.ini`（从 `config.example.ini` 复制）一起分发 |
 | `build_logs/build_yyyyMMdd_HHmmss.log` | 每次编译的完整日志 |
 
-编译后的 EXE 需要和 `config.ini` 放在同一目录，配置和固定文件才能正常保存。
+编译后的 EXE 需要和 `config.ini` 放在同一目录，配置和固定文件才能正常保存。从源码构建时，请先将 `config.example.ini` 复制为 `config.ini`。
 
 ## 两次编译的意义
 

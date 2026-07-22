@@ -175,7 +175,7 @@ EnsureConfig() {
     "CachePath=`n"
     "ThumbnailPolicy=Fast`n"
     "; 窗口模式：always_on_top（默认）| temporary（失焦自动隐藏）| normal（普通窗口）`n"
-    "WindowMode=always_on_top`n"
+    "WindowMode=temporary`n"
     "; ModifiedDesc（默认，从新到旧）| NameAsc（文件名自然升序）`n"
     "SortMode=ModifiedDesc`n"
     "; All / Include / Exclude`n"
@@ -225,12 +225,12 @@ LoadSettings(*) {
         ConfiguredHotkey := "F2"
 
     ; 读取窗口模式
-    rawMode := StrLower(Trim(IniRead(ConfigPath, "General", "WindowMode", "always_on_top")))
+    rawMode := StrLower(Trim(IniRead(ConfigPath, "General", "WindowMode", "temporary")))
     if rawMode = WINDOW_MODE_ALWAYS_ON_TOP || rawMode = WINDOW_MODE_TEMPORARY || rawMode = WINDOW_MODE_NORMAL {
         WindowMode := rawMode
     } else {
         WindowMode := WINDOW_MODE_ALWAYS_ON_TOP
-        settingErrors.Push("WindowMode 配置值无效：" rawMode "，已使用默认模式 always_on_top。")
+        settingErrors.Push("WindowMode 配置值无效：" rawMode "，已使用默认模式 temporary。")
     }
 
     try MaxFilesPerFolder := Integer(IniRead(ConfigPath, "General", "MaxFilesPerFolder", "8"))
