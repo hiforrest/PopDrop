@@ -86,14 +86,43 @@ global ScanGeneration := 0
 global StatusKind := "default"
 global StatusTimerToken := 0
 
+; ──── 窗口模式 ────
+global WINDOW_MODE_ALWAYS_ON_TOP := "always_on_top"
+global WINDOW_MODE_TEMPORARY     := "temporary"
+global WINDOW_MODE_NORMAL        := "normal"
+
+global WindowMode := WINDOW_MODE_ALWAYS_ON_TOP
+global AutoHidePauseDepth := 0
+
 EnsureConfig()
 LoadSettings()
 BuildPanel()
+ApplyWindowMode()
 InstallHotkey(ConfiguredHotkey)
 BuildTrayMenu()
 InitDropSource()
 OnMessage(0x0201, FileViewLeftButtonDown) ; WM_LBUTTONDOWN
 OnMessage(0x0200, FileViewMouseMove)      ; WM_MOUSEMOVE
+OnMessage(0x0006, PanelActivationChanged) ; WM_ACTIVATE
+
+; 用 Owner 模式弹出 MsgBox，确保弹窗保持在置顶主面板之上
+ShowPanelMsgBox(Text, Title?, Options?) {
+    global Panel
+
+    BeginAutoHidePause()
+
+    try {
+        ; 仅当面板可见时指定 Owner
+        if IsObject(Panel)
+            && DllCall("user32\IsWindowVisible", "ptr", Panel.Hwnd, "int") {
+            opts := Trim(Options " Owner" Panel.Hwnd)
+            return MsgBox(Text, Title?, opts)
+        }
+        return MsgBox(Text, Title?, Options?)
+    } finally {
+        EndAutoHidePause()
+    }
+}
 
 EnsureConfig() {
     global ConfigPath
@@ -119,6 +148,8 @@ EnsureConfig() {
     "RecentFileCount=12`n"
     "CachePath=`n"
     "ThumbnailPolicy=Fast`n"
+    "; 窗口模式：always_on_top（默认）| temporary（失焦自动隐藏）| normal（普通窗口）`n"
+    "WindowMode=always_on_top`n"
     "; All / Include / Exclude`n"
     "FilterMode=All`n"
     "FileExtensions=`n"
@@ -155,10 +186,20 @@ LoadSettings(*) {
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
     global FilterMode, FileExtensions, ConfigErrors, LastValidFolderSettings
     global ConfigErrorsShown
+    global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
 
     ConfiguredHotkey := Trim(IniRead(ConfigPath, "General", "Hotkey", "F3"))
     if ConfiguredHotkey = ""
         ConfiguredHotkey := "F3"
+
+    ; 读取窗口模式
+    rawMode := StrLower(Trim(IniRead(ConfigPath, "General", "WindowMode", "always_on_top")))
+    if rawMode = WINDOW_MODE_ALWAYS_ON_TOP || rawMode = WINDOW_MODE_TEMPORARY || rawMode = WINDOW_MODE_NORMAL {
+        WindowMode := rawMode
+    } else {
+        WindowMode := WINDOW_MODE_ALWAYS_ON_TOP
+        ConfigErrors.Push("WindowMode 配置值无效：" rawMode "，已使用默认模式 always_on_top。")
+    }
 
     try MaxFilesPerFolder := Integer(IniRead(ConfigPath, "General", "MaxFilesPerFolder", "8"))
     catch
@@ -474,7 +515,7 @@ ShowConfigErrorDialog() {
         msg .= "详细错误信息：`n"
         for i, err in ConfigErrors
             msg .= "  " i ". " err "`n"
-        MsgBox(msg, "PopDrop 配置错误", "Icon!")
+        ShowPanelMsgBox(msg, "PopDrop 配置错误", "Icon!")
         ConfigErrorsShown := true
     }
 }
@@ -520,20 +561,20 @@ NormalizePath(path) {
 BuildPanel() {
     global Panel, FileView, RecentLabel, RecentView, ViewButton, RecentButton, StatusText
 
-    Panel := Gui("+AlwaysOnTop +Resize +MinSize620x380", "PopDrop")
+    Panel := Gui("+Resize +MinSize620x380", "PopDrop")
     Panel.MarginX := 12
     Panel.MarginY := 10
     Panel.SetFont("s9", "Microsoft YaHei UI")
 
-    Panel.AddButton("xm ym w68 h30", "刷新").OnEvent("Click", RefreshPanel)
-    Panel.AddButton("x+6 yp w90 h30", "添加固定文件").OnEvent("Click", AddPinnedFiles)
-    Panel.AddButton("x+6 yp w80 h30", "取消固定").OnEvent("Click", RemovePinnedFile)
+    Panel.AddButton("xm ym w68 h30", "🔄 刷新").OnEvent("Click", RefreshPanel)
+    Panel.AddButton("x+6 yp w100 h30", "📌 添加固定文件").OnEvent("Click", AddPinnedFiles)
+    Panel.AddButton("x+6 yp w70 h30", "取消固定").OnEvent("Click", RemovePinnedFile)
     ViewButton := Panel.AddButton("x+6 yp w95 h30", "视图")
     ViewButton.OnEvent("Click", ToggleViewMode)
     RecentButton := Panel.AddButton("x+6 yp w90 h30", "近期栏")
     RecentButton.OnEvent("Click", ToggleRecentSidebar)
-    Panel.AddButton("x+6 yp w65 h30", "配置").OnEvent("Click", OpenConfig)
-    Panel.AddButton("x+6 yp w55 h30", "关闭").OnEvent("Click", HidePanel)
+    Panel.AddButton("x+6 yp w65 h30", "⚙️ 配置").OnEvent("Click", OpenConfig)
+    Panel.AddButton("x+6 yp w68 h30", "❌ 关闭").OnEvent("Click", HidePanel)
 
     ; Multi-select is the native ListView default. In icon view this enables
     ; Ctrl-click, Shift range selection and marquee selection on blank space.
@@ -557,6 +598,144 @@ BuildPanel() {
     Panel.OnEvent("Escape", HandlePanelClose)
     Panel.OnEvent("Size", ResizePanel)
     UpdateViewButtons()
+}
+
+ApplyWindowMode() {
+    global Panel, WindowMode
+    global WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
+
+    if !IsObject(Panel)
+        return
+
+    switch WindowMode {
+        case WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY:
+            Panel.Opt("+AlwaysOnTop")
+
+        case WINDOW_MODE_NORMAL:
+            Panel.Opt("-AlwaysOnTop")
+
+        default:
+            Panel.Opt("+AlwaysOnTop")
+    }
+
+    if WindowMode != WINDOW_MODE_TEMPORARY
+        CancelAutoHideCheck()
+}
+
+; ──── 临时面板自动隐藏 ────
+
+PanelActivationChanged(wParam, lParam, msg, hwnd) {
+    global Panel, WindowMode
+    global WINDOW_MODE_TEMPORARY
+
+    if !IsObject(Panel) || hwnd != Panel.Hwnd
+        return
+
+    if WindowMode != WINDOW_MODE_TEMPORARY
+        return
+
+    activationState := wParam & 0xFFFF
+
+    ; WA_INACTIVE = 0
+    if activationState = 0
+        ScheduleAutoHideCheck(150)
+}
+
+ScheduleAutoHideCheck(delayMs := 150) {
+    global WindowMode, PanelVisible
+    global WINDOW_MODE_TEMPORARY
+
+    if WindowMode != WINDOW_MODE_TEMPORARY || !PanelVisible
+        return
+
+    SetTimer(TryAutoHidePanel, -Abs(delayMs))
+}
+
+CancelAutoHideCheck() {
+    SetTimer(TryAutoHidePanel, 0)
+}
+
+TryAutoHidePanel() {
+    global Panel, PanelVisible, WindowMode, AutoHidePauseDepth
+    global WINDOW_MODE_TEMPORARY
+
+    if WindowMode != WINDOW_MODE_TEMPORARY
+        return
+
+    if !PanelVisible || !IsObject(Panel)
+        return
+
+    if AutoHidePauseDepth > 0
+        return
+
+    ; 焦点已经回到主面板
+    if WinActive("ahk_id " Panel.Hwnd)
+        return
+
+    activeHwnd := WinExist("A")
+
+    ; 当前活动窗口是主面板自己的从属弹窗
+    if activeHwnd && IsOwnedByPanel(activeHwnd)
+        return
+
+    ; 用户可能正在点击或刚开始拖动，等待物理按键释放
+    if GetKeyState("LButton", "P")
+        || GetKeyState("RButton", "P")
+        || GetKeyState("MButton", "P") {
+        ScheduleAutoHideCheck(100)
+        return
+    }
+
+    HidePanel()
+}
+
+IsOwnedByPanel(hwnd) {
+    global Panel
+
+    if !hwnd || !IsObject(Panel)
+        return false
+
+    if hwnd = Panel.Hwnd
+        return true
+
+    static GW_OWNER := 4
+    current := hwnd
+
+    ; 设置上限，避免异常窗口关系造成无限循环
+    Loop 16 {
+        current := DllCall(
+            "user32\GetWindow",
+            "ptr", current,
+            "uint", GW_OWNER,
+            "ptr"
+        )
+
+        if !current
+            return false
+
+        if current = Panel.Hwnd
+            return true
+    }
+
+    return false
+}
+
+; ──── 自动隐藏暂停机制 ────
+
+BeginAutoHidePause() {
+    global AutoHidePauseDepth
+
+    AutoHidePauseDepth += 1
+    CancelAutoHideCheck()
+}
+
+EndAutoHidePause() {
+    global AutoHidePauseDepth
+
+    AutoHidePauseDepth := Max(0, AutoHidePauseDepth - 1)
+
+    if AutoHidePauseDepth = 0
+        ScheduleAutoHideCheck(100)
 }
 
 BuildTrayMenu() {
@@ -583,7 +762,7 @@ InstallHotkey(newHotkey) {
 
     try Hotkey(newHotkey, TogglePanel, "On")
     catch as err {
-        MsgBox("快捷键配置无效：" newHotkey "`n已改用 F3。`n`n" err.Message,
+        ShowPanelMsgBox("快捷键配置无效：" newHotkey "`n已改用 F3。`n`n" err.Message,
             "PopDrop", "Icon!")
         newHotkey := "F3"
         ConfiguredHotkey := newHotkey
@@ -597,17 +776,30 @@ InstallHotkey(newHotkey) {
 }
 
 TogglePanel(*) {
-    global PanelVisible
-    if PanelVisible
-        HidePanel()
-    else
+    global PanelVisible, Panel, WindowMode
+    global WINDOW_MODE_NORMAL
+
+    if !PanelVisible {
         ShowAndRefresh()
+        return
+    }
+
+    ; 普通窗口模式：面板被覆盖或最小化时，第一次按快捷键应恢复并带到前台
+    if WindowMode = WINDOW_MODE_NORMAL
+        && !WinActive("ahk_id " Panel.Hwnd) {
+        try WinRestore("ahk_id " Panel.Hwnd)
+        WinActivate("ahk_id " Panel.Hwnd)
+        return
+    }
+
+    HidePanel()
 }
 
 ShowAndRefresh(forceRefresh := false, *) {
     global Panel, PanelVisible, ConfiguredHotkey, ActiveHotkey, WindowWidth, WindowHeight
     global ScanResultLoaded, CurrentScanResult, LastRenderedFingerprint, StatusKind
     LoadSettings()
+    ApplyWindowMode()
     if ConfiguredHotkey != ActiveHotkey {
         InstallHotkey(ConfiguredHotkey)
         BuildTrayMenu()
@@ -645,6 +837,7 @@ RefreshPanel(*) {
 
 HidePanel(*) {
     global Panel, PanelVisible
+    CancelAutoHideCheck()
     Panel.Hide()
     PanelVisible := false
 }
@@ -713,9 +906,9 @@ ToggleRecentSidebar(*) {
 UpdateViewButtons() {
     global ViewButton, RecentButton, ViewMode, ShowRecentSidebar
     if IsObject(ViewButton)
-        ViewButton.Text := ViewMode = "Thumbnail" ? "视图：缩略图" : "视图：列表"
+        ViewButton.Text := ViewMode = "Thumbnail" ? "👀 缩略图：开" : "👀 缩略图：关"
     if IsObject(RecentButton)
-        RecentButton.Text := ShowRecentSidebar ? "近期栏：开" : "近期栏：关"
+        RecentButton.Text := ShowRecentSidebar ? "🕒 近期栏：开" : "🕒 近期栏：关"
 }
 
 ApplyViewMode() {
@@ -1417,12 +1610,12 @@ OpenRecentItem(list, row) {
 
 OpenFilePath(path) {
     if !FileExist(path) {
-        MsgBox("文件不存在或当前无法访问：`n" path, "无法打开", "Icon!")
+        ShowPanelMsgBox("文件不存在或当前无法访问：`n" path, "无法打开", "Icon!")
         return
     }
     try Run(path)
     catch as err
-        MsgBox("无法打开文件：`n" path "`n`n" err.Message, "打开失败", "Iconx")
+        ShowPanelMsgBox("无法打开文件：`n" path "`n`n" err.Message, "打开失败", "Iconx")
 }
 
 RecentItemSelect(list, row, selected) {
@@ -1440,7 +1633,7 @@ RecentContextMenu(list, row, isRightClick, x, y) {
     list.Modify(row, "Select Focus Vis")
     path := RecentItemPaths[row]
     if !FileExist(path) {
-        MsgBox("文件不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
+        ShowPanelMsgBox("文件不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
         return
     }
     ShowShellContextMenu(path, list.Gui.Hwnd, x, y)
@@ -1481,12 +1674,20 @@ GetSelectedFileRows() {
 }
 
 AddPinnedFiles(*) {
-    global PinnedPaths
-    try selected := FileSelect("M3", , "选择要固定显示的文件")
-    catch
-        return
-    if !IsObject(selected)
-        return
+    global PinnedPaths, Panel
+
+    BeginAutoHidePause()
+    try {
+        if Panel && Panel.Hwnd
+            Panel.Opt("+OwnDialogs")
+        try selected := FileSelect("M3", , "选择要固定显示的文件")
+        catch
+            return
+        if !IsObject(selected)
+            return
+    } finally {
+        EndAutoHidePause()
+    }
 
     added := 0
     for path in selected {
@@ -1506,7 +1707,7 @@ RemovePinnedFile(*) {
     global FileView, ItemPaths, PinnedPaths
     rows := GetSelectedFileRows()
     if !rows.Length {
-        MsgBox("请先在“固定文件”分组中选择一个或多个文件。", "取消固定", "Iconi")
+        ShowPanelMsgBox("请先在“固定文件”分组中选择一个或多个文件。", "取消固定", "Iconi")
         return
     }
 
@@ -1517,7 +1718,7 @@ RemovePinnedFile(*) {
             indexes.Push(index)
     }
     if !indexes.Length {
-        MsgBox("选择的文件中没有固定文件。", "取消固定", "Iconi")
+        ShowPanelMsgBox("选择的文件中没有固定文件。", "取消固定", "Iconi")
         return
     }
     ; Remove from the end so earlier array indexes remain valid.
@@ -1568,7 +1769,7 @@ FileViewContextMenu(list, row, isRightClick, x, y) {
     list.Modify(row, "Select Focus Vis")
     path := ItemPaths[row]
     if !FileExist(path) {
-        MsgBox("文件不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
+        ShowPanelMsgBox("文件不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
         return
     }
     ShowShellContextMenu(path, list.Gui.Hwnd, x, y)
@@ -1579,6 +1780,9 @@ ShowShellContextMenu(path, ownerHwnd, x, y) {
     parentFolder := 0
     contextMenu := 0
     menuHandle := 0
+
+    BeginAutoHidePause()
+
     try {
         if DllCall("shell32\SHParseDisplayName", "wstr", path, "ptr", 0, "ptr*", &pidl,
             "uint", 0, "ptr", 0) != 0
@@ -1635,8 +1839,9 @@ ShowShellContextMenu(path, ownerHwnd, x, y) {
         }
         DllCall("user32\PostMessageW", "ptr", ownerHwnd, "uint", 0, "ptr", 0, "ptr", 0)
     } catch as err {
-        MsgBox("无法显示系统右键菜单：`n" err.Message, "右键菜单", "Iconx")
+        ShowPanelMsgBox("无法显示系统右键菜单：`n" err.Message, "右键菜单", "Iconx")
     } finally {
+        EndAutoHidePause()
         if menuHandle
             DllCall("user32\DestroyMenu", "ptr", menuHandle)
         if contextMenu
@@ -1753,10 +1958,16 @@ InitDropSource() {
 }
 
 BeginShellDrag(paths, ownerHwnd) {
-    if paths.Length = 1
-        BeginSingleShellDrag(paths[1], ownerHwnd)
-    else
-        BeginMultiShellDrag(paths, ownerHwnd)
+    BeginAutoHidePause()
+
+    try {
+        if paths.Length = 1
+            BeginSingleShellDrag(paths[1], ownerHwnd)
+        else
+            BeginMultiShellDrag(paths, ownerHwnd)
+    } finally {
+        EndAutoHidePause()
+    }
 }
 
 BeginSingleShellDrag(path, ownerHwnd) {

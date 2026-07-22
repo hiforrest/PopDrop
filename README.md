@@ -4,7 +4,7 @@
 
 按一下 `F2`，一个文件面板出现在屏幕最前面。找到文件，拖走，关掉。全程不到三秒。
 
-PopDrop 是一个 Windows 小工具，把你常用的文件夹、最近打开的文件、固定好的文件集中在一个置顶面板里，随时取用，用完就关。
+PopDrop 是一个 Windows 小工具，把你常用的文件夹、最近打开的文件、固定好的文件集中在一个面板里，随时取用，用完就关。面板的窗口行为可通过 `WindowMode` 配置。
 
 ## 为什么要用它？
 
@@ -52,6 +52,7 @@ ShowRecentSidebar=1
 RecentFileCount=12
 CachePath=
 ThumbnailPolicy=Fast
+WindowMode=always_on_top
 
 [Folders]
 文档=%USERPROFILE%\Documents
@@ -72,6 +73,7 @@ ThumbnailPolicy=Fast
 | `RecentFileCount` | 侧边栏最多显示多少个近期文件，范围 1～100。 |
 | `CachePath` | 扫描结果缓存目录。留空时使用软件目录下的 `cache` 文件夹；不可写时退化为内存缓存。 |
 | `ThumbnailPolicy` | `Fast`（默认）只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标；`Full` 允许现场生成缩略图，可能造成短暂停顿。 |
+| `WindowMode` | 窗口显示模式：`always_on_top`（始终置顶，默认）、`temporary`（置顶，切换到其他窗口后自动隐藏）、`normal`（普通窗口，不置顶）。 |
 | 快捷键语法 | AutoHotkey v2 格式：`^`=Ctrl，`!`=Alt，`+`=Shift，`#`=Win。例如 `^!Space`=Ctrl+Alt+Space。 |
 
 ### 文件筛选（v0.3+）
@@ -141,6 +143,8 @@ Hotkey=F2
 MaxFilesPerFolder=8
 IncludeSubfolders=0
 ThumbnailSize=96
+; 窗口模式：always_on_top（默认）| temporary（失焦自动隐藏）| normal（普通窗口）
+WindowMode=always_on_top
 ; 全局：显示所有文件
 FilterMode=All
 
@@ -174,6 +178,20 @@ FileExtensions=.png,.jpg,.jpeg,.webp,.gif
 - 如果配置了 Include/Exclude 但没有文件命中，分组标题会显示「没有符合筛选条件的文件」，以区别于目录本身为空的情况。
 
 如果配置的目录不存在，面板会显示「目录不可用」，不会报错退出。
+
+### 窗口模式（v0.4+）
+
+从 v0.4 开始，PopDrop 支持三种窗口模式，通过 `[General]` 中的 `WindowMode` 配置：
+
+```ini
+WindowMode=always_on_top
+```
+
+| 模式 | 说明 |
+|---|---|
+| `always_on_top` | **默认值**。始终置顶，面板保持在其他窗口上方，直到手动隐藏。 |
+| `temporary` | 临时面板。面板置顶，但当您切换到其他窗口、点击桌面或 Alt+Tab 后，面板自动隐藏。软件自身的消息框、文件选择对话框、右键菜单和拖放操作不会触发自动隐藏。 |
+| `normal` | 普通窗口。不置顶，按照普通 Windows 窗口方式显示。被其他窗口覆盖时按快捷键先恢复面板，再按一次才隐藏。 |
 
 ### 刷新与缓存
 
