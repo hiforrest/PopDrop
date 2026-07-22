@@ -1,4 +1,5 @@
 ﻿#Requires AutoHotkey v2.0
+#NoTrayIcon
 #SingleInstance Off
 
 ;@Ahk2Exe-SetMainIcon assets\app.ico
@@ -18,12 +19,16 @@ global MODE_FILES := "Files"
 global MODE_LAUNCHER := "Launcher"
 
 if A_Args.Length && A_Args[1] = "--scan-worker" {
-    ; 纯后台扫描进程：立即隐藏窗口和托盘图标，避免任务栏闪烁
-    A_IconHidden := true
+    ; #NoTrayIcon 在脚本执行前生效，worker 从一开始就不会创建托盘图标。
+    ; WinHide 作为解释器隐藏主窗口的第二层防护保留。
     try WinHide("ahk_id " A_ScriptHwnd)
     RunScanWorkerMode()
     ExitApp
 }
+
+; 只有主界面进程拥有托盘图标。必须在 worker 分流之后再打开，
+; 才能消除启动和刷新时短命 worker 图标的一闪而过。
+A_IconHidden := false
 
 ; #SingleInstance cannot distinguish the worker from the main process. Keep a
 ; small named mutex for the main UI instead, while allowing worker instances.
@@ -62,7 +67,7 @@ global WindowHeight := 620
 global ViewMode := "Thumbnail"
 global ShowRecentSidebar := true
 global RecentFileCount := 12
-global ConfiguredHotkey := "F3"
+global ConfiguredHotkey := "F2"
 global ActiveHotkey := ""
 global PanelVisible := false
 global DragPaths := []
@@ -76,8 +81,6 @@ global DropCallbacks := []
 global DataVTable := 0
 global DataCallbacks := []
 global DragDataObjects := Map()
-global FilterMode := "All"
-global FileExtensions := ""
 global ConfigErrors := []
 global LastValidFolderSettings := []
 global ConfigErrorsShown := false
@@ -90,7 +93,6 @@ global CacheWriteWarningShown := false
 global CurrentConfigFingerprint := ""
 global CurrentScanResult := {Folders: [], Recent: []}
 global ScanResultLoaded := false
-global LastRenderedFingerprint := ""
 global WorkerRunning := false
 global WorkerPid := 0
 global WorkerGeneration := ""
@@ -100,12 +102,9 @@ global PendingRefresh := false
 global ScanGeneration := 0
 global StatusKind := "default"
 global StatusTimerToken := 0
+global PanelIconHandle := 0
 
 global SortMode := SORT_MODIFIED_DESC
-
-; ──── 文件夹级显示属性 ────
-global StripOrderPrefix := 0
-global HideExtensions := 0
 
 ; ──── 每个行对应的分组文件夹路径（双击分组标题使用） ────
 global ItemFolderPaths := Map()
@@ -122,6 +121,7 @@ global AutoHidePauseDepth := 0
 EnsureConfig()
 LoadSettings()
 BuildPanel()
+ApplyWindowIcon()
 ApplyWindowMode()
 InstallHotkey(ConfiguredHotkey)
 BuildTrayMenu()
@@ -163,7 +163,7 @@ EnsureConfig() {
     "; 修改后，在面板中点“刷新”即可重新读取。`n"
     "`n"
     "[General]`n"
-    "Hotkey=F3`n"
+    "Hotkey=F2`n"
     "MaxFilesPerFolder=8`n"
     "IncludeSubfolders=0`n"
     "ThumbnailSize=96`n"
@@ -212,15 +212,17 @@ LoadSettings(*) {
     global WindowWidth, WindowHeight, ViewMode, ShowRecentSidebar, RecentFileCount
     global ThumbnailPolicy, CachePathSetting, CacheDir, CacheFilePath, CacheWritable
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
-    global FilterMode, FileExtensions, ConfigErrors, LastValidFolderSettings
+    global ConfigErrors, LastValidFolderSettings
     global ConfigErrorsShown
     global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
     global SortMode, SORT_MODIFIED_DESC, SORT_NAME_ASC
     global MODE_FILES, MODE_LAUNCHER
 
-    ConfiguredHotkey := Trim(IniRead(ConfigPath, "General", "Hotkey", "F3"))
+    settingErrors := []
+
+    ConfiguredHotkey := Trim(IniRead(ConfigPath, "General", "Hotkey", "F2"))
     if ConfiguredHotkey = ""
-        ConfiguredHotkey := "F3"
+        ConfiguredHotkey := "F2"
 
     ; 读取窗口模式
     rawMode := StrLower(Trim(IniRead(ConfigPath, "General", "WindowMode", "always_on_top")))
@@ -228,7 +230,7 @@ LoadSettings(*) {
         WindowMode := rawMode
     } else {
         WindowMode := WINDOW_MODE_ALWAYS_ON_TOP
-        ConfigErrors.Push("WindowMode 配置值无效：" rawMode "，已使用默认模式 always_on_top。")
+        settingErrors.Push("WindowMode 配置值无效：" rawMode "，已使用默认模式 always_on_top。")
     }
 
     try MaxFilesPerFolder := Integer(IniRead(ConfigPath, "General", "MaxFilesPerFolder", "8"))
@@ -271,10 +273,6 @@ LoadSettings(*) {
     else
         SortMode := SORT_MODIFIED_DESC
 
-    ; 读取全局筛选设置
-    FilterMode := StrLower(Trim(IniRead(ConfigPath, "General", "FilterMode", "All")))
-    FileExtensions := Trim(IniRead(ConfigPath, "General", "FileExtensions", ""))
-
     ; 读取文件夹列表
     FolderSettings := []
     for entry in ReadIniSection("Folders") {
@@ -287,9 +285,11 @@ LoadSettings(*) {
     result := ValidateConfig()
     if result.Valid {
         LastValidFolderSettings := result.Settings
-        ConfigErrors := []
+        ConfigErrors := settingErrors
     } else {
-        ConfigErrors := result.Errors
+        ConfigErrors := settingErrors.Clone()
+        for errorMessage in result.Errors
+            ConfigErrors.Push(errorMessage)
         ; 有错误时，如果上次有效设置存在则继续使用，否则使用 result.Settings（含默认值）
         if LastValidFolderSettings.Length {
             ; 保留 LastValidFolderSettings
@@ -333,9 +333,8 @@ LoadSettings(*) {
 ; ──── 配置验证与筛选函数 ────
 
 ValidateConfig() {
-    global ConfigPath, ConfigErrors, FilterMode, FileExtensions, FolderSettings
-    global MaxFilesPerFolder, IncludeSubfolders, LastValidFolderSettings
-    global ConfigErrorsShown, SortMode, SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global ConfigPath, ConfigErrors, FolderSettings
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC
     global MODE_FILES, MODE_LAUNCHER
 
     errors := []
@@ -374,9 +373,7 @@ ValidateConfig() {
 
     ; ── 解析每个文件夹的独立配置 ──
     resolved := []
-    folderNames := Map()
     for f in FolderSettings {
-        folderNames[f.Name] := true
         sectionName := "Folder:" f.Name
 
         ; 读取该文件夹的独立配置节
@@ -420,6 +417,7 @@ ValidateConfig() {
             }
 
             ; ── 读取 MaxFilesPerFolder ──
+            rawVal := ""
             try {
                 val := Trim(IniRead(ConfigPath, sectionName, "MaxFilesPerFolder", ""))
                 if val != "" {
@@ -468,7 +466,6 @@ ValidateConfig() {
             ; ── 读取筛选模式 FileExtensions ──
             rawMode := StrLower(Trim(IniRead(ConfigPath, sectionName, "FilterMode", "")))
             rawExt := Trim(IniRead(ConfigPath, sectionName, "FileExtensions", ""))
-            filterExplicit := rawMode != "" || rawExt != ""
 
             if folderMode = MODE_LAUNCHER {
                 ; Launcher 模式特殊筛选逻辑
@@ -921,9 +918,9 @@ InstallHotkey(newHotkey) {
 
     try Hotkey(newHotkey, TogglePanel, "On")
     catch as err {
-        ShowPanelMsgBox("快捷键配置无效：" newHotkey "`n已改用 F3。`n`n" err.Message,
+        ShowPanelMsgBox("快捷键配置无效：" newHotkey "`n已改用 F2。`n`n" err.Message,
             "PopDrop", "Icon!")
-        newHotkey := "F3"
+        newHotkey := "F2"
         ConfiguredHotkey := newHotkey
         IniWrite(newHotkey, ConfigPath, "General", "Hotkey")
         Hotkey(newHotkey, TogglePanel, "On")
@@ -954,10 +951,9 @@ TogglePanel(*) {
     HidePanel()
 }
 
-ShowAndRefresh(forceRefresh := false, *) {
+ShowAndRefresh(*) {
     global Panel, PanelVisible, ConfiguredHotkey, ActiveHotkey, WindowWidth, WindowHeight
-    global ScanResultLoaded, CurrentScanResult, LastRenderedFingerprint, StatusKind
-    global SortMode
+    global ScanResultLoaded, StatusKind
     LoadSettings()
     ApplyWindowMode()
     if ConfiguredHotkey != ActiveHotkey {
@@ -966,7 +962,6 @@ ShowAndRefresh(forceRefresh := false, *) {
     }
     Panel.Show("w" WindowWidth " h" WindowHeight)
     PanelVisible := true
-    ApplyWindowIcon()
     WinActivate("ahk_id " Panel.Hwnd)
 
     if !ScanResultLoaded
@@ -979,24 +974,33 @@ ShowAndRefresh(forceRefresh := false, *) {
     StatusKind := "default"
     StatusText.Text := "正在加载…"
     UpdateViewButtons()
-    LastRenderedFingerprint := CurrentConfigFingerprint
-    StartBackgroundScan(forceRefresh)
+    StartBackgroundScan()
 }
 
 ApplyWindowIcon() {
-    global Panel
-    iconPath := A_IsCompiled ? A_ScriptFullPath : A_ScriptDir "\assets\app.ico"
+    global Panel, PanelIconHandle
+    ; 编译版已经使用 Ahk2Exe 嵌入的主图标。源码模式只加载一次 .ico；
+    ; 旧实现每次刷新都重新 LoadImage，造成图标句柄泄漏。
+    if A_IsCompiled || PanelIconHandle
+        return
+    iconPath := A_ScriptDir "\assets\app.ico"
+    if !FileExist(iconPath)
+        return
     hIcon := DllCall("LoadImageW", "ptr", 0, "str", iconPath,
         "uint", 1, "int", 0, "int", 0, "uint", 0x10, "ptr") ; IMAGE_ICON, LR_LOADFROMFILE
     if hIcon {
-        SendMessage(0x80, 0, hIcon, , "ahk_id " Panel.Hwnd) ; WM_SETICON, ICON_SMALL
-        SendMessage(0x80, 1, hIcon, , "ahk_id " Panel.Hwnd) ; WM_SETICON, ICON_BIG
-        ; The window takes ownership of the icon handle; do not destroy.
+        PanelIconHandle := hIcon
+        ; The GUI is still hidden here. AutoHotkey's SendMessage window lookup
+        ; ignores hidden windows by default, so address the HWND directly.
+        DllCall("user32\SendMessageW", "ptr", Panel.Hwnd,
+            "uint", 0x80, "ptr", 0, "ptr", hIcon, "ptr") ; WM_SETICON, ICON_SMALL
+        DllCall("user32\SendMessageW", "ptr", Panel.Hwnd,
+            "uint", 0x80, "ptr", 1, "ptr", hIcon, "ptr") ; WM_SETICON, ICON_BIG
     }
 }
 
 RefreshPanel(*) {
-    ShowAndRefresh(true)
+    ShowAndRefresh()
 }
 
 HidePanel(*) {
@@ -1407,17 +1411,8 @@ GetSortedFiles(folderPath, limit, recursive, sortMode, filter?) {
             }
         }
         ; 无限模式：收集完毕后统一排序
-        if limit = 0 && files.Length > 0 {
-            sorted := []
-            for f in files {
-                pos := 1
-                while pos <= sorted.Length
-                    && CompareFiles(f, sorted[pos], sortMode) > 0
-                    pos += 1
-                sorted.InsertAt(pos, f)
-            }
-            files := sorted
-        }
+        if limit = 0
+            SortFileArray(&files, sortMode)
     }
     return files
 }
@@ -1458,23 +1453,36 @@ CompareFiles(a, b, sortMode) {
 }
 
 SortFileArray(&files, sortMode) {
-    ; AHK v2.0 的 Array.Sort 不支持自定义比较函数。
-    ; 使用稳定插入排序。对于 PopDrop 的文件数量（通常 < 1000）性能足够。
+    ; 自底向上的稳定归并排序，让 Launcher/All 文件夹保持 O(n log n)。
+    ; AHK v2.0 没有支持自定义比较器的内置 Array.Sort。
     if files.Length <= 1
         return
-    sorted := []
-    for f in files {
-        insertAt := 1
-        while insertAt <= sorted.Length
-            && CompareFiles(f, sorted[insertAt], sortMode) > 0
-            insertAt += 1
-        sorted.InsertAt(insertAt, f)
+    width := 1
+    itemCount := files.Length
+    while width < itemCount {
+        merged := []
+        left := 1
+        while left <= itemCount {
+            middle := Min(left + width, itemCount + 1)
+            rightEnd := Min(left + width * 2, itemCount + 1)
+            leftIndex := left
+            rightIndex := middle
+            while leftIndex < middle || rightIndex < rightEnd {
+                if rightIndex >= rightEnd
+                    || (leftIndex < middle
+                        && CompareFiles(files[leftIndex], files[rightIndex], sortMode) <= 0) {
+                    merged.Push(files[leftIndex])
+                    leftIndex += 1
+                } else {
+                    merged.Push(files[rightIndex])
+                    rightIndex += 1
+                }
+            }
+            left := rightEnd
+        }
+        files := merged
+        width *= 2
     }
-    files := sorted
-}
-
-CompareFilesForSort(sortMode, a, b) {
-    return CompareFiles(a, b, sortMode)
 }
 
 ; ──── 显示名称处理 ────
@@ -1766,7 +1774,7 @@ BuildWorkerCommand(requestPath, readyPath) {
     return executable " --scan-worker " QuoteCommandArg(requestPath) " " QuoteCommandArg(readyPath)
 }
 
-StartBackgroundScan(force := false) {
+StartBackgroundScan() {
     global WorkerRunning, PendingRefresh, ScanGeneration, WorkerGeneration
     global WorkerRequestPath, WorkerReadyPath, WorkerPid, CacheDir, CacheWritable
     if WorkerRunning {
@@ -1859,7 +1867,7 @@ FinishWorker() {
 }
 
 StartPendingRefresh() {
-    StartBackgroundScan(true)
+    StartBackgroundScan()
 }
 
 ScanResultsEqual(left, right) {
@@ -2600,12 +2608,21 @@ DropGiveFeedback(this, effect) {
 
 Cleanup(*) {
     global DropCallbacks, DataCallbacks, ThumbnailImageList, MainInstanceMutex
+    global WorkerRunning, WorkerPid, WorkerRequestPath, WorkerReadyPath, PanelIconHandle
+    SetTimer(PollWorkerResult, 0)
+    if WorkerRunning && WorkerPid && ProcessExist(WorkerPid)
+        try ProcessClose(WorkerPid)
+    try FileDelete(WorkerRequestPath)
+    try FileDelete(WorkerReadyPath)
+    try FileDelete(WorkerReadyPath ".writing")
     for callbackPtr in DropCallbacks
         CallbackFree(callbackPtr)
     for callbackPtr in DataCallbacks
         CallbackFree(callbackPtr)
     if ThumbnailImageList
         DllCall("comctl32\ImageList_Destroy", "ptr", ThumbnailImageList)
+    if PanelIconHandle
+        DllCall("user32\DestroyIcon", "ptr", PanelIconHandle)
     if MainInstanceMutex
         DllCall("kernel32\CloseHandle", "ptr", MainInstanceMutex)
     DllCall("ole32\OleUninitialize")
