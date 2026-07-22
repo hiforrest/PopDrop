@@ -5,6 +5,18 @@
 ;@Ahk2Exe-AddResource assets\tray.ico, 555
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
+;
+; IMPORTANT: All constants that worker functions depend on must be defined
+; before this block, because the worker calls ExitApp right after routing.
+
+; ──── 排序模式常量 ────
+global SORT_MODIFIED_DESC := "ModifiedDesc"
+global SORT_NAME_ASC := "NameAsc"
+
+; ──── 文件夹模式常量 ────
+global MODE_FILES := "Files"
+global MODE_LAUNCHER := "Launcher"
+
 if A_Args.Length && A_Args[1] = "--scan-worker" {
     RunScanWorkerMode()
     ExitApp
@@ -86,6 +98,16 @@ global ScanGeneration := 0
 global StatusKind := "default"
 global StatusTimerToken := 0
 
+global SortMode := SORT_MODIFIED_DESC
+
+; ──── 文件夹级显示属性 ────
+global StripOrderPrefix := 0
+global HideExtensions := 0
+
+; ──── 每个行对应的分组文件夹路径（双击分组标题使用） ────
+global ItemFolderPaths := Map()
+global GroupFolderPaths := Map()
+
 ; ──── 窗口模式 ────
 global WINDOW_MODE_ALWAYS_ON_TOP := "always_on_top"
 global WINDOW_MODE_TEMPORARY     := "temporary"
@@ -104,6 +126,7 @@ InitDropSource()
 OnMessage(0x0201, FileViewLeftButtonDown) ; WM_LBUTTONDOWN
 OnMessage(0x0200, FileViewMouseMove)      ; WM_MOUSEMOVE
 OnMessage(0x0006, PanelActivationChanged) ; WM_ACTIVATE
+OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 
 ; 用 Owner 模式弹出 MsgBox，确保弹窗保持在置顶主面板之上
 ShowPanelMsgBox(Text, Title?, Options?) {
@@ -150,6 +173,8 @@ EnsureConfig() {
     "ThumbnailPolicy=Fast`n"
     "; 窗口模式：always_on_top（默认）| temporary（失焦自动隐藏）| normal（普通窗口）`n"
     "WindowMode=always_on_top`n"
+    "; ModifiedDesc（默认，从新到旧）| NameAsc（文件名自然升序）`n"
+    "SortMode=ModifiedDesc`n"
     "; All / Include / Exclude`n"
     "FilterMode=All`n"
     "FileExtensions=`n"
@@ -187,6 +212,8 @@ LoadSettings(*) {
     global FilterMode, FileExtensions, ConfigErrors, LastValidFolderSettings
     global ConfigErrorsShown
     global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
+    global SortMode, SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global MODE_FILES, MODE_LAUNCHER
 
     ConfiguredHotkey := Trim(IniRead(ConfigPath, "General", "Hotkey", "F3"))
     if ConfiguredHotkey = ""
@@ -232,6 +259,15 @@ LoadSettings(*) {
         ? "Full" : "Fast"
     CachePathSetting := Trim(IniRead(ConfigPath, "General", "CachePath", ""))
 
+    ; 读取全局排序模式
+    rawSort := StrLower(Trim(IniRead(ConfigPath, "General", "SortMode", "ModifiedDesc")))
+    if rawSort = StrLower(SORT_MODIFIED_DESC)
+        SortMode := SORT_MODIFIED_DESC
+    else if rawSort = StrLower(SORT_NAME_ASC)
+        SortMode := SORT_NAME_ASC
+    else
+        SortMode := SORT_MODIFIED_DESC
+
     ; 读取全局筛选设置
     FilterMode := StrLower(Trim(IniRead(ConfigPath, "General", "FilterMode", "All")))
     FileExtensions := Trim(IniRead(ConfigPath, "General", "FileExtensions", ""))
@@ -261,16 +297,20 @@ LoadSettings(*) {
                 LastValidFolderSettings.Push({
                     Name: f.Name,
                     Path: f.Path,
+                    Mode: MODE_FILES,
                     IncludeSubfolders: IncludeSubfolders,
                     MaxFilesPerFolder: MaxFilesPerFolder,
-                    Filter: {Mode: "All", Extensions: []}
+                    SortMode: SortMode,
+                    Filter: {Mode: "All", Extensions: []},
+                    StripOrderPrefix: 0,
+                    HideExtensions: 0
                 })
             }
         }
     }
 
     CacheDir := ResolveCacheDirectory(CachePathSetting)
-    CacheFilePath := CacheDir "\scan-cache-v1.ini"
+    CacheFilePath := CacheDir "\scan-cache-v2.ini"
     CacheWritable := EnsureCacheDirectory(CacheDir)
     newFingerprint := ComputeConfigFingerprint(LastValidFolderSettings)
     if CurrentConfigFingerprint != newFingerprint {
@@ -292,12 +332,23 @@ LoadSettings(*) {
 ValidateConfig() {
     global ConfigPath, ConfigErrors, FilterMode, FileExtensions, FolderSettings
     global MaxFilesPerFolder, IncludeSubfolders, LastValidFolderSettings
-    global ConfigErrorsShown
+    global ConfigErrorsShown, SortMode, SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global MODE_FILES, MODE_LAUNCHER
 
     errors := []
     tempGlobalFilter := {Mode: "All", Extensions: []}
     tempGlobalMaxFiles := 8
     tempGlobalIncludeSubfolders := false
+    tempGlobalSortMode := SORT_MODIFIED_DESC
+
+    ; ── 解析全局排序 ──
+    rawSort := StrLower(Trim(IniRead(ConfigPath, "General", "SortMode", "ModifiedDesc")))
+    if rawSort = StrLower(SORT_MODIFIED_DESC)
+        tempGlobalSortMode := SORT_MODIFIED_DESC
+    else if rawSort = StrLower(SORT_NAME_ASC)
+        tempGlobalSortMode := SORT_NAME_ASC
+    else
+        errors.Push("[General] 中 SortMode 值无效：" rawSort "。允许的值：ModifiedDesc, NameAsc。")
 
     ; ── 解析全局筛选 ──
     rawMode := StrLower(Trim(IniRead(ConfigPath, "General", "FilterMode", "All")))
@@ -329,6 +380,10 @@ ValidateConfig() {
         folderMax := tempGlobalMaxFiles
         folderRecursive := tempGlobalIncludeSubfolders
         folderFilter := {Mode: tempGlobalFilter.Mode, Extensions: tempGlobalFilter.Extensions}
+        folderSortMode := tempGlobalSortMode
+        folderMode := MODE_FILES
+        folderStripOrderPrefix := 0
+        folderHideExtensions := 0
 
         ; 检查是否有独立配置节
         sectionExists := false
@@ -341,18 +396,44 @@ ValidateConfig() {
             sectionExists := false
 
         if sectionExists {
-            ; 读取 MaxFilesPerFolder
+            ; ── 读取 Mode ──
+            rawModeV := StrLower(Trim(IniRead(ConfigPath, sectionName, "Mode", "Files")))
+            if rawModeV = "files"
+                folderMode := MODE_FILES
+            else if rawModeV = "launcher"
+                folderMode := MODE_LAUNCHER
+            else if rawModeV != ""
+                errors.Push("[" sectionName "] 中 Mode 值无效：" rawModeV "。允许的值：Files, Launcher。")
+
+            ; ── 应用 Launcher 默认值 ──
+            if folderMode = MODE_LAUNCHER {
+                ; 为 Launcher 设置默认值，用户显式配置会覆盖
+                folderRecursive := false
+                folderMax := 0  ; 0 = 无限
+                folderSortMode := SORT_NAME_ASC
+                folderFilter := {Mode: "Include", Extensions: [".lnk", ".url", ".exe"]}
+                folderStripOrderPrefix := 1
+                folderHideExtensions := 1
+            }
+
+            ; ── 读取 MaxFilesPerFolder ──
             try {
-                val := IniRead(ConfigPath, sectionName, "MaxFilesPerFolder", "")
+                val := Trim(IniRead(ConfigPath, sectionName, "MaxFilesPerFolder", ""))
                 if val != "" {
-                    folderMax := Integer(val)
-                    folderMax := Max(1, Min(folderMax, 100))
+                    rawVal := val
+                    if StrLower(val) = "all" || val = "0" {
+                        folderMax := 0
+                    } else {
+                        folderMax := Integer(val)
+                        if folderMax < 1
+                            folderMax := 1
+                    }
                 }
             }
             catch
-                errors.Push("[" sectionName "] 中 MaxFilesPerFolder 值无效。")
+                errors.Push("[" sectionName "] 中 MaxFilesPerFolder 值无效：" rawVal "。")
 
-            ; 读取 IncludeSubfolders
+            ; ── 读取 IncludeSubfolders ──
             try {
                 val := IniRead(ConfigPath, sectionName, "IncludeSubfolders", "")
                 if val != "" {
@@ -365,27 +446,101 @@ ValidateConfig() {
                 }
             }
 
-            ; 读取筛选模式 FileExtensions
-            rawMode := StrLower(Trim(IniRead(ConfigPath, sectionName, "FilterMode", "inherit")))
+            ; ── 读取 SortMode ──
+            try {
+                val := Trim(IniRead(ConfigPath, sectionName, "SortMode", ""))
+                if val != "" {
+                    rawSortV := StrLower(val)
+                    if rawSortV = StrLower(SORT_MODIFIED_DESC)
+                        folderSortMode := SORT_MODIFIED_DESC
+                    else if rawSortV = StrLower(SORT_NAME_ASC)
+                        folderSortMode := SORT_NAME_ASC
+                    else if rawSortV = "inherit"
+                        folderSortMode := tempGlobalSortMode
+                    else
+                        errors.Push("[" sectionName "] 中 SortMode 值无效：" val "。")
+                }
+            }
+
+            ; ── 读取筛选模式 FileExtensions ──
+            rawMode := StrLower(Trim(IniRead(ConfigPath, sectionName, "FilterMode", "")))
             rawExt := Trim(IniRead(ConfigPath, sectionName, "FileExtensions", ""))
-            if rawMode = "inherit" {
-                ; 整体继承全局筛选
-                folderFilter := {Mode: tempGlobalFilter.Mode, Extensions: tempGlobalFilter.Extensions}
+            filterExplicit := rawMode != "" || rawExt != ""
+
+            if folderMode = MODE_LAUNCHER {
+                ; Launcher 模式特殊筛选逻辑
+                if rawMode = "inherit" {
+                    ; 继承全局
+                    folderFilter := {Mode: tempGlobalFilter.Mode, Extensions: tempGlobalFilter.Extensions}
+                } else if rawMode = "all" {
+                    folderFilter := {Mode: "All", Extensions: []}
+                } else if rawMode = "include" || rawMode = "exclude" {
+                    pf := ParseFilterSettings(rawMode, rawExt, "[" sectionName "]")
+                    if HasProp(pf, "Error")
+                        errors.Push(pf.Error)
+                    else
+                        folderFilter := pf
+                } else if rawMode = "" && rawExt != "" {
+                    ; 仅填写 FileExtensions 时自动使用 Include
+                    pf := ParseFilterSettings("include", rawExt, "[" sectionName "]")
+                    if HasProp(pf, "Error")
+                        errors.Push(pf.Error)
+                    else
+                        folderFilter := pf
+                } else {
+                    ; 未配置筛选，使用 Launcher 默认（已在上面设置）
+                }
             } else {
-                pf := ParseFilterSettings(rawMode, rawExt, "[" sectionName "]")
-                if HasProp(pf, "Error")
-                    errors.Push(pf.Error)
-                else
-                    folderFilter := pf
+                ; Files 模式
+                if rawMode = "inherit" || rawMode = "" {
+                    ; 整体继承全局筛选
+                    folderFilter := {Mode: tempGlobalFilter.Mode, Extensions: tempGlobalFilter.Extensions}
+                } else {
+                    pf := ParseFilterSettings(rawMode, rawExt, "[" sectionName "]")
+                    if HasProp(pf, "Error")
+                        errors.Push(pf.Error)
+                    else
+                        folderFilter := pf
+                }
+            }
+
+            ; ── 读取 StripOrderPrefix ──
+            try {
+                val := Trim(IniRead(ConfigPath, sectionName, "StripOrderPrefix", ""))
+                if val != "" {
+                    if val = "1"
+                        folderStripOrderPrefix := 1
+                    else if val = "0"
+                        folderStripOrderPrefix := 0
+                    else
+                        errors.Push("[" sectionName "] 中 StripOrderPrefix 只能为 0 或 1，实际值为：" val "。")
+                }
+            }
+
+            ; ── 读取 HideExtensions ──
+            try {
+                val := Trim(IniRead(ConfigPath, sectionName, "HideExtensions", ""))
+                if val != "" {
+                    if val = "1"
+                        folderHideExtensions := 1
+                    else if val = "0"
+                        folderHideExtensions := 0
+                    else
+                        errors.Push("[" sectionName "] 中 HideExtensions 只能为 0 或 1，实际值为：" val "。")
+                }
             }
         }
 
         resolved.Push({
             Name: f.Name,
             Path: f.Path,
+            Mode: folderMode,
             IncludeSubfolders: folderRecursive,
             MaxFilesPerFolder: folderMax,
-            Filter: folderFilter
+            SortMode: folderSortMode,
+            Filter: folderFilter,
+            StripOrderPrefix: folderStripOrderPrefix,
+            HideExtensions: folderHideExtensions
         })
     }
 
@@ -582,9 +737,10 @@ BuildPanel() {
     FileView.OnEvent("DoubleClick", OpenFileViewItem)
     FileView.OnEvent("ContextMenu", FileViewContextMenu)
     FileView.OnEvent("ItemSelect", FileViewItemSelect)
-    ; LVS_EX_DOUBLEBUFFER reduces flicker while rebuilding thumbnail groups.
+    ; LVS_EX_DOUBLEBUFFER | LVS_EX_GROUPHEADERCLICK reduces flicker and
+    ; enables clicking group headers to open folders.
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1036,
-        "ptr", 0x10000, "ptr", 0x10000, "ptr")
+        "ptr", 0x410000, "ptr", 0x410000, "ptr")
     
     RecentLabel := Panel.AddText("x740 y50 w220 h22 +0x200", "最近打开")
     RecentLabel.SetFont("s10 Bold")
@@ -798,6 +954,7 @@ TogglePanel(*) {
 ShowAndRefresh(forceRefresh := false, *) {
     global Panel, PanelVisible, ConfiguredHotkey, ActiveHotkey, WindowWidth, WindowHeight
     global ScanResultLoaded, CurrentScanResult, LastRenderedFingerprint, StatusKind
+    global SortMode
     LoadSettings()
     ApplyWindowMode()
     if ConfiguredHotkey != ActiveHotkey {
@@ -929,10 +1086,10 @@ ApplyViewMode() {
 }
 
 PopulatePanel() {
-    global FileView, ItemPaths, PinnedPaths, FolderSettings, StatusText
+    global FileView, ItemPaths, ItemFolderPaths, PinnedPaths, FolderSettings, StatusText
     global ThumbnailSize, ThumbnailImageList, SelectedFilePaths, LastValidFolderSettings, ConfigErrors
     global CurrentScanResult, ScanResultLoaded, StatusKind
-    global ConfigErrorsShown
+    global ConfigErrorsShown, MODE_FILES, GroupFolderPaths
 
     SelectedFilePaths := []
     FileView.Opt("-Redraw")
@@ -955,6 +1112,8 @@ PopulatePanel() {
         "ptr", 0, "ptr", spacing, "ptr") ; LVM_SETICONSPACING
 
     ItemPaths := Map()
+    ItemFolderPaths := Map()
+    GroupFolderPaths := Map()
     displayedCount := 0
     unavailableCount := 0
     groupId := 1
@@ -983,15 +1142,19 @@ PopulatePanel() {
             folderSettings.Push({
                 Name: f.Name,
                 Path: f.Path,
+                Mode: MODE_FILES,
                 IncludeSubfolders: IncludeSubfolders,
                 MaxFilesPerFolder: MaxFilesPerFolder,
-                Filter: {Mode: "All", Extensions: []}
+                SortMode: SortMode,
+                Filter: {Mode: "All", Extensions: []},
+                StripOrderPrefix: 0,
+                HideExtensions: 0
             })
         }
     }
 
     for index, folder in folderSettings {
-        scan := FindFolderScanResult(CurrentScanResult.Folders, folder.Path)
+        scan := FindFolderScanResult(CurrentScanResult.Folders, folder.Path, folder.Name, index)
         state := IsObject(scan) ? scan.State : "Pending"
         files := IsObject(scan) ? scan.Files : []
         filterMode := folder.Filter.Mode
@@ -1004,24 +1167,31 @@ PopulatePanel() {
         else
             suffix := " (" files.Length ")"
         InsertListGroup(groupId, folder.Name suffix "  —  " folder.Path)
+        GroupFolderPaths[groupId] := folder.Path
         if state = "Unavailable" {
-            AddPlaceholderTile("目录不可用", groupId)
+            row := AddPlaceholderTile("目录不可用", groupId)
+            ItemPaths[row] := folder.Path
+            ItemFolderPaths[row] := folder.Path
             unavailableCount += 1
             groupId += 1
             continue
         }
         if state != "Pending" && !files.Length {
             if filterMode != "All"
-                AddPlaceholderTile("没有符合筛选条件的文件", groupId)
+                row := AddPlaceholderTile("没有符合筛选条件的文件", groupId)
             else
-                AddPlaceholderTile("暂无文件", groupId)
+                row := AddPlaceholderTile("暂无文件", groupId)
+            ItemPaths[row] := folder.Path
+            ItemFolderPaths[row] := folder.Path
             groupId += 1
             continue
         }
         for file in files {
+            displayName := GetDisplayName(file.Name, folder)
             modifiedText := FormatTime(file.Modified, "yyyy-MM-dd HH:mm")
-            row := AddFileTile(file.Path, file.Name, modifiedText, groupId)
+            row := AddFileTile(file.Path, displayName, modifiedText, groupId)
             ItemPaths[row] := file.Path
+            ItemFolderPaths[row] := folder.Path
             displayedCount += 1
         }
         groupId += 1
@@ -1203,29 +1373,137 @@ GetWindowsRecentFiles(limit) {
     return results
 }
 
-GetLatestFiles(folderPath, limit, recursive, filter?) {
+GetSortedFiles(folderPath, limit, recursive, sortMode, filter?) {
     files := []
-    mode := recursive ? "FR" : "F"
     try {
+        mode := recursive ? "FR" : "F"
         Loop Files, folderPath "\*", mode {
-            ; 文件筛选：在创建 candidate 之前
             if IsSet(filter) && !ShouldIncludeFile(A_LoopFileName, filter)
                 continue
-
             candidate := {
                 Path: A_LoopFileFullPath,
                 Name: A_LoopFileName,
                 Modified: A_LoopFileTimeModified
             }
-            insertAt := 1
-            while insertAt <= files.Length && files[insertAt].Modified >= candidate.Modified
-                insertAt += 1
-            files.InsertAt(insertAt, candidate)
-            if files.Length > limit
-                files.Pop()
+            if limit > 0 {
+                ; 有界模式：保持排序的候选列表，超过时移除最不合适的
+                insertAt := 1
+                while insertAt <= files.Length
+                    && CompareFiles(candidate, files[insertAt], sortMode) > 0
+                    insertAt += 1
+                files.InsertAt(insertAt, candidate)
+                if files.Length > limit
+                    files.Pop()
+            } else {
+                files.Push(candidate)
+            }
+        }
+        ; 无限模式：收集完毕后统一排序
+        if limit = 0 && files.Length > 0 {
+            sorted := []
+            for f in files {
+                pos := 1
+                while pos <= sorted.Length
+                    && CompareFiles(f, sorted[pos], sortMode) > 0
+                    pos += 1
+                sorted.InsertAt(pos, f)
+            }
+            files := sorted
         }
     }
     return files
+}
+
+; ──── 自然排序 (StrCmpLogicalW) ────
+
+StrCmpLogicalW(a, b) {
+    result := DllCall("shlwapi\StrCmpLogicalW", "wstr", a, "wstr", b, "int")
+    return result
+}
+
+CompareFiles(a, b, sortMode) {
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC
+
+    if sortMode = SORT_NAME_ASC {
+        cmp := StrCmpLogicalW(a.Name, b.Name)
+        if cmp != 0
+            return cmp
+        ; 名称相同，按路径确定性排序
+        return StrCompare(a.Path, b.Path, true)
+    }
+
+    ; ModifiedDesc
+    if sortMode = SORT_MODIFIED_DESC {
+        if a.Modified < b.Modified
+            return 1
+        if a.Modified > b.Modified
+            return -1
+        ; 修改时间相同，按自然文件名升序
+        cmp := StrCmpLogicalW(a.Name, b.Name)
+        if cmp != 0
+            return cmp
+        ; 仍相同，按路径确定性排序
+        return StrCompare(a.Path, b.Path, true)
+    }
+
+    return 0
+}
+
+SortFileArray(&files, sortMode) {
+    ; AHK v2.0 的 Array.Sort 不支持自定义比较函数。
+    ; 使用稳定插入排序。对于 PopDrop 的文件数量（通常 < 1000）性能足够。
+    if files.Length <= 1
+        return
+    sorted := []
+    for f in files {
+        insertAt := 1
+        while insertAt <= sorted.Length
+            && CompareFiles(f, sorted[insertAt], sortMode) > 0
+            insertAt += 1
+        sorted.InsertAt(insertAt, f)
+    }
+    files := sorted
+}
+
+CompareFilesForSort(sortMode, a, b) {
+    return CompareFiles(a, b, sortMode)
+}
+
+; ──── 显示名称处理 ────
+
+GetDisplayName(originalName, folder) {
+    name := originalName
+
+    ; 1. 如果 HideExtensions=1，移除最后一个扩展名
+    if folder.HideExtensions {
+        dotPos := InStr(name, ".",, -1) ; 从末尾搜索最后一个 .
+        if dotPos > 1
+            name := SubStr(name, 1, dotPos - 1)
+    }
+
+    ; 2. 如果 StripOrderPrefix=1，移除数字前缀（^\d+[ \t]+）
+    if folder.StripOrderPrefix {
+        name := RegExReplace(name, "^\d+[ \t]+")
+    }
+
+    ; 3. Trim
+    name := Trim(name)
+
+    ; 4. 如果结果为空，回退到原始名称
+    if name = ""
+        name := originalName
+
+    return name
+}
+
+OpenFolderPath(folderPath) {
+    if !DirExist(folderPath) {
+        ShowPanelMsgBox("文件夹不存在或当前无法访问：`n" folderPath, "无法打开", "Icon!")
+        return
+    }
+    try Run(folderPath)
+    catch as err
+        ShowPanelMsgBox("无法打开文件夹：`n" folderPath "`n`n" err.Message, "打开失败", "Iconx")
 }
 
 ; ──── 后台扫描、缓存与 worker IPC ────
@@ -1237,27 +1515,35 @@ RunScanWorkerMode() {
     readyPath := A_Args[3]
     try {
         request := ReadWorkerRequest(requestPath)
-        result := {Version: 1, Generation: request.Generation,
+        result := {Version: 2, Generation: request.Generation,
             Fingerprint: request.Fingerprint, Folders: [], Recent: []}
         for folder in request.Folders {
             state := DirExist(folder.Path) ? "OK" : "Unavailable"
-            files := state = "OK" ? GetLatestFiles(folder.Path,
-                folder.MaxFilesPerFolder, folder.IncludeSubfolders, folder.Filter) : []
+            files := state = "OK" ? GetSortedFiles(folder.Path,
+                folder.MaxFilesPerFolder, folder.IncludeSubfolders, folder.SortMode, folder.Filter) : []
             result.Folders.Push({Name: folder.Name, Path: folder.Path,
                 State: state, Files: files})
         }
         result.Recent := GetWindowsRecentFiles(request.RecentFileCount)
         WriteScanResultAtomic(result, readyPath)
-    } catch {
-        ; A malformed request must not damage the previous cache. Leaving no
-        ; ready file lets the main process retain its old result.
+    } catch as err {
+        try {
+            logPath := A_ScriptDir "\worker-error.txt"
+            FileAppend("Worker error at " A_Now "`n"
+                . "  Message: " err.Message "`n"
+                . "  What: " err.What "`n"
+                . "  Extra: " err.Extra "`n"
+                . "  File: " err.File "`n"
+                . "  Line: " err.Line "`n`n", logPath)
+        }
         try FileDelete(readyPath ".writing")
     }
 }
 
 ReadWorkerRequest(path) {
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC
     version := Integer(IniRead(path, "Meta", "Version", "0"))
-    if version != 1
+    if version != 1 && version != 2
         throw Error("unsupported request version")
     request := {Generation: IniRead(path, "Meta", "Generation", ""),
         Fingerprint: IniRead(path, "Meta", "Fingerprint", ""), Folders: [],
@@ -1270,12 +1556,30 @@ ReadWorkerRequest(path) {
         filter := ParseFilterSettings(mode, ext, "[" section "]")
         if HasProp(filter, "Error")
             throw Error(filter.Error)
+
+        ; 读取 MaxFilesPerFolder（支持 0 = 无限）
+        rawMax := IniRead(path, section, "MaxFilesPerFolder", "8")
+        folderMax := 8
+        if rawMax = "0" || StrLower(Trim(rawMax)) = "all"
+            folderMax := 0
+        else
+            folderMax := Max(1, Min(Integer(rawMax), 999999))
+
+        ; 读取 SortMode
+        rawSort := StrLower(Trim(IniRead(path, section, "SortMode", "ModifiedDesc")))
+        folderSort := SORT_MODIFIED_DESC
+        if rawSort = StrLower(SORT_MODIFIED_DESC)
+            folderSort := SORT_MODIFIED_DESC
+        else if rawSort = StrLower(SORT_NAME_ASC)
+            folderSort := SORT_NAME_ASC
+
         request.Folders.Push({
             Name: IniRead(path, section, "Name", ""),
             Path: IniRead(path, section, "Path", ""),
             IncludeSubfolders: IniRead(path, section, "IncludeSubfolders", "0") = "1",
-            MaxFilesPerFolder: Max(1, Min(Integer(IniRead(path, section,
-                "MaxFilesPerFolder", "8")), 100)), Filter: filter
+            MaxFilesPerFolder: folderMax,
+            SortMode: folderSort,
+            Filter: filter
         })
     }
     return request
@@ -1285,7 +1589,7 @@ WriteScanResultAtomic(result, readyPath) {
     tempPath := readyPath ".writing"
     try FileDelete(tempPath)
     try FileDelete(readyPath)
-    IniWrite("1", tempPath, "Meta", "Version")
+    IniWrite("2", tempPath, "Meta", "Version")
     IniWrite(result.Generation, tempPath, "Meta", "Generation")
     IniWrite(result.Fingerprint, tempPath, "Meta", "Fingerprint")
     IniWrite(A_Now, tempPath, "Meta", "CompletedAt")
@@ -1333,11 +1637,13 @@ EnsureCacheDirectory(path) {
 
 ComputeConfigFingerprint(settings) {
     global RecentFileCount
-    raw := "v1|recent=" RecentFileCount
+    raw := "v2|recent=" RecentFileCount
     for folder in settings {
         raw .= "|" folder.Name "|" StrLower(RTrim(folder.Path, "\"))
+        raw .= "|mode=" folder.Mode
         raw .= "|sub=" (folder.IncludeSubfolders ? 1 : 0)
-        raw .= "|max=" folder.MaxFilesPerFolder "|mode=" folder.Filter.Mode
+        raw .= "|max=" folder.MaxFilesPerFolder "|sort=" folder.SortMode
+        raw .= "|filter=" folder.Filter.Mode
         raw .= "|ext=" JoinArray(folder.Filter.Extensions, ",")
     }
     return HashString(raw)
@@ -1366,7 +1672,8 @@ LoadDiskScanCache() {
 
 ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
     try {
-        if Integer(IniRead(path, "Meta", "Version", "0")) != 1
+        version := Integer(IniRead(path, "Meta", "Version", "0"))
+        if version != 1 && version != 2
             return 0
         generation := IniRead(path, "Meta", "Generation", "")
         fingerprint := IniRead(path, "Meta", "Fingerprint", "")
@@ -1374,7 +1681,7 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
             return 0
         if expectedFingerprint != "" && fingerprint != expectedFingerprint
             return 0
-        result := {Version: 1, Generation: generation, Fingerprint: fingerprint,
+        result := {Version: version, Generation: generation, Fingerprint: fingerprint,
             Folders: [], Recent: []}
         folderCount := Integer(IniRead(path, "Meta", "FolderCount", "0"))
         if folderCount < 0 || folderCount > 1000
@@ -1387,7 +1694,9 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
                 State: IniRead(path, section, "State", "Unavailable"), Files: []}
             if folder.Path = "" || (folder.State != "OK" && folder.State != "Unavailable")
                 return 0
-            if itemCount < 0 || itemCount > 100
+            ; v1 cache had a 100-item limit. v2 allows any count.
+            ; Keep a defensive sanity check against malicious/corrupt cache (10000).
+            if itemCount < 0 || itemCount > 10000
                 return 0
             Loop itemCount {
                 key := "Item" Format("{:03}", A_Index)
@@ -1420,7 +1729,7 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
 WriteScanRequest(path, generation) {
     global LastValidFolderSettings, CurrentConfigFingerprint, RecentFileCount
     try FileDelete(path)
-    IniWrite("1", path, "Meta", "Version")
+    IniWrite("2", path, "Meta", "Version")
     IniWrite(generation, path, "Meta", "Generation")
     IniWrite(CurrentConfigFingerprint, path, "Meta", "Fingerprint")
     IniWrite(LastValidFolderSettings.Length, path, "Meta", "FolderCount")
@@ -1431,6 +1740,7 @@ WriteScanRequest(path, generation) {
         IniWrite(folder.Path, path, section, "Path")
         IniWrite(folder.IncludeSubfolders ? "1" : "0", path, section, "IncludeSubfolders")
         IniWrite(folder.MaxFilesPerFolder, path, section, "MaxFilesPerFolder")
+        IniWrite(folder.SortMode, path, section, "SortMode")
         IniWrite(folder.Filter.Mode, path, section, "FilterMode")
         IniWrite(JoinArray(folder.Filter.Extensions, ","), path, section, "FileExtensions")
     }
@@ -1474,7 +1784,7 @@ StartBackgroundScan(force := false) {
     WorkerGeneration := generation
     WorkerRequestPath := requestPath
     WorkerReadyPath := readyPath
-    SetBackgroundStatus(ScanResultLoaded ? "正在后台更新…" : "正在加载文件…")
+    SetBackgroundStatus(ScanResultLoaded ? "正在更新" : "正在加载")
     SetTimer(PollWorkerResult, 100)
 }
 
@@ -1560,11 +1870,24 @@ ResultSignature(result) {
     return signature
 }
 
-FindFolderScanResult(results, path) {
-    key := StrLower(RTrim(path, "\"))
-    for result in results {
-        if StrLower(RTrim(result.Path, "\")) = key
+FindFolderScanResult(results, folderPath, folderName := "", index := 0) {
+    ; 优先使用索引匹配（worker 结果顺序与文件夹配置顺序一致）
+    if index > 0 && index <= results.Length {
+        result := results[index]
+        ; 验证名称和路径都匹配
+        if StrLower(result.Name) = StrLower(folderName)
+            && StrLower(RTrim(result.Path, "\")) = StrLower(RTrim(folderPath, "\")) {
             return result
+        }
+    }
+
+    ; 回退：Name + Path 联合匹配
+    key := StrLower(RTrim(folderPath, "\"))
+    for result in results {
+        if StrLower(result.Name) = StrLower(folderName) {
+            if StrLower(RTrim(result.Path, "\")) = key
+                return result
+        }
     }
     return 0
 }
@@ -1596,10 +1919,16 @@ GetFileName(path) {
 }
 
 OpenFileViewItem(list, row) {
-    global ItemPaths
+    global ItemPaths, ItemFolderPaths
     if !ItemPaths.Has(row)
         return
-    OpenFilePath(ItemPaths[row])
+    path := ItemPaths[row]
+    ; 占位行（目录路径本身）或目录 → 打开分组文件夹
+    if ItemFolderPaths.Has(row) && DirExist(path) {
+        OpenFolderPath(path)
+        return
+    }
+    OpenFilePath(path)
 }
 
 OpenRecentItem(list, row) {
@@ -1760,6 +2089,29 @@ OpenConfig(*) {
     try Run('notepad.exe "' ConfigPath '"')
     catch
         Run(ConfigPath)
+}
+
+FileViewNotify(wParam, lParam, msg, hwnd) {
+    global FileView, GroupFolderPaths
+    ; NMHDR structure: hwndFrom, idFrom, code
+    hwndFrom := NumGet(lParam + 0, "ptr")
+    if hwndFrom != FileView.Hwnd
+        return
+
+    ; NMHDR structure: hwndFrom, idFrom, code
+    code := NumGet(lParam + 0, A_PtrSize * 2, "int")
+    ; LVN_GROUPHEADERCLICK = -150 (0xFFFFFF6A)
+    if code != -150
+        return
+
+    ; NMLVGROUP: nmhdr (hwndFrom + idFrom + code), mask (4), iGroupId (4)
+    ; NMHDR size = A_PtrSize * 2 + 4
+    groupId := NumGet(lParam + A_PtrSize * 2 + 8, "int")
+    if GroupFolderPaths.Has(groupId) {
+        folderPath := GroupFolderPaths[groupId]
+        if DirExist(folderPath)
+            SetTimer(() => OpenFolderPath(folderPath), -10)
+    }
 }
 
 FileViewContextMenu(list, row, isRightClick, x, y) {
