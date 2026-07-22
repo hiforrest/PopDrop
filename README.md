@@ -74,6 +74,7 @@ WindowMode=always_on_top
 | `CachePath` | 扫描结果缓存目录。留空时使用软件目录下的 `cache` 文件夹；不可写时退化为内存缓存。 |
 | `ThumbnailPolicy` | `Fast`（默认）只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标；`Full` 允许现场生成缩略图，可能造成短暂停顿。 |
 | `WindowMode` | 窗口显示模式：`always_on_top`（始终置顶，默认）、`temporary`（置顶，切换到其他窗口后自动隐藏）、`normal`（普通窗口，不置顶）。 |
+| `SortMode` | 排序模式：`ModifiedDesc`（修改时间从新到旧，默认）、`NameAsc`（文件名自然升序）。支持文件夹级覆盖。 |
 | 快捷键语法 | AutoHotkey v2 格式：`^`=Ctrl，`!`=Alt，`+`=Shift，`#`=Win。例如 `^!Space`=Ctrl+Alt+Space。 |
 
 ### 文件筛选（v0.3+）
@@ -178,6 +179,85 @@ FileExtensions=.png,.jpg,.jpeg,.webp,.gif
 - 如果配置了 Include/Exclude 但没有文件命中，分组标题会显示「没有符合筛选条件的文件」，以区别于目录本身为空的情况。
 
 如果配置的目录不存在，面板会显示「目录不可用」，不会报错退出。
+
+### 快捷启动文件夹（Launcher 模式，v0.5+）
+
+从 v0.5 开始，PopDrop 支持 `Mode=Launcher` 模式，将普通文件夹变成快捷启动面板。
+
+#### 基本用法
+
+在 `config.ini` 中配置：
+
+```ini
+[Folders]
+工具=D:\Launcher\工具
+网络=D:\Launcher\网络
+
+[Folder:工具]
+Mode=Launcher
+
+[Folder:网络]
+Mode=Launcher
+FileExtensions=.lnk,.url,.exe
+```
+
+在 `D:\Launcher\工具` 目录中放入快捷方式：
+
+```
+010 Chrome.lnk
+020 Firefox.lnk
+030 7-Zip.lnk
+040 Everything Search.url
+```
+
+界面显示为：
+
+```
+Chrome
+Firefox
+7-Zip
+Everything Search
+```
+
+#### Launcher 默认值
+
+当 `Mode=Launcher` 且未显式配置对应选项时，使用以下默认值：
+
+| 配置项 | Launcher 默认值 | 说明 |
+|---|---|---|
+| `IncludeSubfolders` | `0` | 不递归子目录 |
+| `MaxFilesPerFolder` | `All` | 显示所有匹配项目 |
+| `SortMode` | `NameAsc` | 按文件名自然升序 |
+| `FilterMode` | `Include` | 只显示扩展名列表中的文件 |
+| `FileExtensions` | `.lnk,.url,.exe` | 只显示快捷方式和可执行文件 |
+| `StripOrderPrefix` | `1` | 隐藏数字排序前缀 |
+| `HideExtensions` | `1` | 隐藏文件扩展名 |
+
+用户显式配置的选项会覆盖这些默认值。
+
+#### 数字前缀排序
+
+文件名中的数字前缀用于自定义排序，界面不显示数字和扩展名：
+
+```text
+010 Chrome.lnk     → Chrome
+020 7-Zip.lnk      → 7-Zip
+7-Zip.lnk          → 7-Zip          （无前缀，保留原名）
+3D Viewer.lnk      → 3D Viewer      （3D 不是前缀，保留原名）
+```
+
+排序始终使用原始文件名，前缀只影响显示。规则：只移除 `^\d+[ \t]+` 模式（数字开头，后面至少一个空格或制表符）。
+
+#### 右键打开分组文件夹
+
+Launcher 项目（及其他文件夹分组）右键菜单中增加「打开分组文件夹」选项，可以快速打开配置的根目录添加快捷方式。空目录或没有符合筛选条件的占位项也支持此功能。
+
+#### 注意事项
+
+- 分类由 `[Folders]` 中的分组承担，项目顺序由数字前缀决定。
+- `.exe` 适合便携软件，普通安装软件推荐使用 `.lnk`。
+- Launcher 模式不会改变 `WindowMode` 行为；窗口是否在打开软件后隐藏完全由 `WindowMode` 配置决定。
+- 固定文件和最近打开侧边栏不受 Launcher 模式影响。
 
 ### 窗口模式（v0.4+）
 
