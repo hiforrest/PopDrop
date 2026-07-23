@@ -77,6 +77,8 @@ global DragSourceHwnd := 0
 global DragStartX := 0
 global DragStartY := 0
 global DragStarted := false
+global PinnedReorderActive := false
+global PinnedReorderPath := ""
 global DropVTable := 0
 global DropCallbacks := []
 global DataVTable := 0
@@ -129,6 +131,7 @@ BuildTrayMenu()
 InitDropSource()
 OnMessage(0x0201, FileViewLeftButtonDown) ; WM_LBUTTONDOWN
 OnMessage(0x0200, FileViewMouseMove)      ; WM_MOUSEMOVE
+OnMessage(0x0202, FileViewLeftButtonUp)   ; WM_LBUTTONUP
 OnMessage(0x0006, PanelActivationChanged) ; WM_ACTIVATE
 OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 
@@ -723,9 +726,9 @@ BuildPanel() {
     Panel.MarginY := 10
     Panel.SetFont("s9", "Microsoft YaHei UI")
 
-    Panel.AddButton("xm ym w62 h30", "🔄 刷新").OnEvent("Click", RefreshPanel)
-    Panel.AddButton("x+6 yp w80 h30", "➕ 固定项").OnEvent("Click", AddPinnedFiles)
-    Panel.AddButton("x+6 yp w80 h30", "➖ 固定项").OnEvent("Click", RemovePinnedFile)
+    Panel.AddButton("xm ym w60 h30", "🔄 刷新").OnEvent("Click", RefreshPanel)
+    Panel.AddButton("x+6 yp w76 h30", "＋ 固定项").OnEvent("Click", AddPinnedFiles)
+    Panel.AddButton("x+6 yp w76 h30", "－ 固定项").OnEvent("Click", RemovePinnedFile)
     ViewButton := Panel.AddButton("x+6 yp w80 h30", "视图")
     ViewButton.OnEvent("Click", ToggleViewMode)
     RecentButton := Panel.AddButton("x+6 yp w76 h30", "近期栏")
@@ -2067,7 +2070,7 @@ AddPinnedFiles(*) {
     try {
         if Panel && Panel.Hwnd
             Panel.Opt("+OwnDialogs")
-        try selected := FileSelect("M3", , "选择要固定显示的文件")
+        try selected := FileSelect("M3", , "选择要加入固定项的文件")
         catch
             return
         if !IsObject(selected)
@@ -2076,23 +2079,22 @@ AddPinnedFiles(*) {
         EndAutoHidePause()
     }
 
-    added := 0
+    newPaths := []
     for path in selected {
         path := NormalizePath(path)
-        if path != "" && !ArrayContainsPath(PinnedPaths, path) {
-            PinnedPaths.Push(path)
-            added += 1
-        }
+        if path != ""
+            && !ArrayContainsPath(PinnedPaths, path)
+            && !ArrayContainsPath(newPaths, path)
+            newPaths.Push(path)
     }
-    if added {
+    if newPaths.Length {
+        PrependPinnedPaths(newPaths)
         SavePinnedFiles()
         PopulatePanel()
     }
 }
 
 PinDroppedFiles(guiObj, guiCtrlObj, fileArray, x, y) {
-    global Panel, PanelVisible
-
     ; WM_DROPFILES arrives immediately after the mouse button is released,
     ; which is also when a pending temporary-mode timer may try to hide the
     ; panel. Pause that timer for the whole save/render operation.
@@ -2104,27 +2106,36 @@ PinDroppedFiles(guiObj, guiCtrlObj, fileArray, x, y) {
             ; A successful drop is an interaction with PopDrop. Bring the
             ; panel back if a previously queued timer won the race, then keep
             ; it active so temporary mode does not immediately hide it again.
-            if IsObject(Panel) {
-                if !DllCall("user32\IsWindowVisible", "ptr", Panel.Hwnd, "int")
-                    try Panel.Show("NA")
-                PanelVisible := DllCall(
-                    "user32\IsWindowVisible",
-                    "ptr", Panel.Hwnd,
-                    "int"
-                )
-                if PanelVisible
-                    try WinActivate("ahk_id " Panel.Hwnd)
-            }
+            KeepTemporaryPanelVisibleAfterDrag()
         } finally {
             EndAutoHidePause()
         }
     }
 }
 
+KeepTemporaryPanelVisibleAfterDrag() {
+    global Panel, PanelVisible, WindowMode, WINDOW_MODE_TEMPORARY
+
+    if WindowMode != WINDOW_MODE_TEMPORARY || !IsObject(Panel)
+        return
+
+    if !DllCall("user32\IsWindowVisible", "ptr", Panel.Hwnd, "int")
+        try Panel.Show("NA")
+
+    PanelVisible := DllCall(
+        "user32\IsWindowVisible",
+        "ptr", Panel.Hwnd,
+        "int"
+    )
+    if PanelVisible
+        try WinActivate("ahk_id " Panel.Hwnd)
+}
+
 PinDroppedItems(fileArray) {
     global PinnedPaths, StatusKind
 
-    added := 0
+    originalPinnedPaths := PinnedPaths.Clone()
+    newPaths := []
     addedFileCount := 0
     addedFolderCount := 0
     duplicateCount := 0
@@ -2142,30 +2153,28 @@ PinDroppedItems(fileArray) {
             unavailableCount += 1
             continue
         }
-        if ArrayContainsPath(PinnedPaths, path) {
+        if ArrayContainsPath(PinnedPaths, path)
+            || ArrayContainsPath(newPaths, path) {
             duplicateCount += 1
             continue
         }
 
-        PinnedPaths.Push(path)
-        added += 1
+        newPaths.Push(path)
         if InStr(attributes, "D")
             addedFolderCount += 1
         else
             addedFileCount += 1
     }
 
-    if added {
+    if newPaths.Length {
+        PrependPinnedPaths(newPaths)
         try SavePinnedFiles()
         catch as err {
-            ; The paths added by this drop are always at the end. Roll them
-            ; back in memory and make a best-effort repair of the INI section.
-            Loop added
-                PinnedPaths.Pop()
+            PinnedPaths := originalPinnedPaths
             try SavePinnedFiles()
             ShowPanelMsgBox(
-                "无法保存拖入的固定项目：`n" err.Message,
-                "固定项目失败",
+                "无法保存拖入的固定项：`n" err.Message,
+                "固定项失败",
                 "Iconx"
             )
             return
@@ -2175,16 +2184,16 @@ PinDroppedItems(fileArray) {
 
     message := ""
     if addedFileCount
-        message := "已固定 " addedFileCount " 个文件"
+        message := "已加入固定项：" addedFileCount " 个文件"
     if addedFolderCount {
         if message != ""
             message .= "、"
         else
-            message := "已固定 "
+            message := "已加入固定项："
         message .= addedFolderCount " 个文件夹"
     }
     if message = ""
-        message := "没有新增固定项目"
+        message := "没有新增固定项"
     if duplicateCount
         message .= "；" duplicateCount " 个重复项已跳过"
     if unavailableCount
@@ -2199,7 +2208,7 @@ RemovePinnedFile(*) {
     global FileView, ItemPaths, PinnedPaths
     rows := GetSelectedFileRows()
     if !rows.Length {
-        ShowPanelMsgBox("请先在“固定项目”分组中选择一个或多个项目。", "取消固定", "Iconi")
+        ShowPanelMsgBox("请先在“固定项”分组中选择一个或多个项目。", "移出固定项", "Iconi")
         return
     }
 
@@ -2210,7 +2219,7 @@ RemovePinnedFile(*) {
             indexes.Push(index)
     }
     if !indexes.Length {
-        ShowPanelMsgBox("选择的项目中没有固定项目。", "取消固定", "Iconi")
+        ShowPanelMsgBox("选择的项目中没有固定项。", "移出固定项", "Iconi")
         return
     }
     ; Remove from the end so earlier array indexes remain valid.
@@ -2225,6 +2234,15 @@ RemovePinnedFile(*) {
     }
     SavePinnedFiles()
     PopulatePanel()
+}
+
+PrependPinnedPaths(paths) {
+    global PinnedPaths
+    ; Insert in reverse so the incoming batch keeps its original order.
+    Loop paths.Length {
+        sourceIndex := paths.Length - A_Index + 1
+        PinnedPaths.InsertAt(1, paths[sourceIndex])
+    }
 }
 
 SavePinnedFiles() {
@@ -2378,8 +2396,9 @@ GuidBuffer(text) {
 }
 
 FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
-    global FileView, RecentView, ItemPaths, RecentItemPaths
+    global FileView, RecentView, ItemPaths, RecentItemPaths, PinnedPaths
     global DragPaths, SelectedFilePaths, DragSourceHwnd, DragStartX, DragStartY, DragStarted
+    global PinnedReorderActive, PinnedReorderPath
     isMainView := IsObject(FileView) && hwnd = FileView.Hwnd
     if isMainView
         pathMap := ItemPaths
@@ -2387,14 +2406,9 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
         pathMap := RecentItemPaths
     else
         return
-    x := lParam & 0xFFFF
-    y := (lParam >> 16) & 0xFFFF
-    hitInfo := Buffer(24, 0)
-    NumPut("int", x, hitInfo, 0)
-    NumPut("int", y, hitInfo, 4)
-    zeroBasedRow := DllCall("user32\SendMessageW", "ptr", hwnd,
-        "uint", 0x1012, "ptr", 0, "ptr", hitInfo.Ptr, "int") ; LVM_HITTEST
-    row := zeroBasedRow >= 0 ? zeroBasedRow + 1 : 0
+    x := SignedMouseCoordinate(lParam & 0xFFFF)
+    y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
+    row := HitTestListRow(hwnd, x, y)
     DragPaths := []
     if row && pathMap.Has(row) {
         ; WM_LBUTTONDOWN can collapse a multi-selection before a drag reaches
@@ -2410,18 +2424,42 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     DragStartX := x
     DragStartY := y
     DragStarted := false
+    PinnedReorderActive := false
+    PinnedReorderPath := ""
+    if isMainView && DragPaths.Length = 1
+        && FindPathIndex(PinnedPaths, DragPaths[1])
+        PinnedReorderPath := DragPaths[1]
 }
 
 FileViewMouseMove(wParam, lParam, msg, hwnd) {
     global DragPaths, DragSourceHwnd, DragStartX, DragStartY, DragStarted, StatusText, StatusKind
+    global PinnedReorderActive, PinnedReorderPath
     if !DragPaths.Length || DragStarted || hwnd != DragSourceHwnd || !GetKeyState("LButton", "P")
         return
-    x := lParam & 0xFFFF
-    y := (lParam >> 16) & 0xFFFF
+    x := SignedMouseCoordinate(lParam & 0xFFFF)
+    y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
     thresholdX := DllCall("user32\GetSystemMetrics", "int", 68, "int") ; SM_CXDRAG
     thresholdY := DllCall("user32\GetSystemMetrics", "int", 69, "int") ; SM_CYDRAG
     if Abs(x - DragStartX) < thresholdX && Abs(y - DragStartY) < thresholdY
         return
+
+    ; A single pinned item dragged inside the main list is a reorder gesture.
+    ; If the pointer leaves the list, release capture and continue with the
+    ; existing Shell drag so the item can still be dropped into other apps.
+    if PinnedReorderPath != "" && PointInsideControl(hwnd, x, y) {
+        if !PinnedReorderActive {
+            PinnedReorderActive := true
+            DllCall("user32\SetCapture", "ptr", hwnd, "ptr")
+            StatusKind := "user"
+            StatusText.Text := "拖到另一个固定项上可调整顺序；拖出窗口可发送项目。"
+        }
+        return
+    }
+    if PinnedReorderActive {
+        PinnedReorderActive := false
+        DllCall("user32\ReleaseCapture")
+    }
+    PinnedReorderPath := ""
 
     DragStarted := true
     paths := DragPaths
@@ -2437,6 +2475,122 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
         DllCall("user32\UpdateWindow", "ptr", StatusText.Hwnd)
         BeginShellDrag(existingPaths, DragSourceHwnd)
     }
+}
+
+FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
+    global FileView, ItemPaths, PinnedPaths, PinnedReorderActive, PinnedReorderPath
+    global DragPaths, DragStarted, StatusKind, ViewMode
+
+    if !PinnedReorderActive
+        return
+
+    PinnedReorderActive := false
+    DllCall("user32\ReleaseCapture")
+    sourcePath := PinnedReorderPath
+    PinnedReorderPath := ""
+    DragPaths := []
+    DragStarted := false
+    StatusKind := "default"
+    SetBackgroundStatus("固定项顺序未更改", 1500)
+
+    if !IsObject(FileView) || hwnd != FileView.Hwnd
+        return
+
+    x := SignedMouseCoordinate(lParam & 0xFFFF)
+    y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
+    targetRow := HitTestListRow(hwnd, x, y)
+    if !targetRow || !ItemPaths.Has(targetRow)
+        return
+
+    targetPath := ItemPaths[targetRow]
+    if !FindPathIndex(PinnedPaths, targetPath)
+        return
+
+    placeAfter := false
+    itemRect := Buffer(16, 0)
+    NumPut("int", 0, itemRect, 0) ; LVIR_BOUNDS
+    if DllCall("user32\SendMessageW", "ptr", hwnd, "uint", 0x100E,
+        "ptr", targetRow - 1, "ptr", itemRect.Ptr, "ptr") {
+        if ViewMode = "Thumbnail" {
+            left := NumGet(itemRect, 0, "int")
+            right := NumGet(itemRect, 8, "int")
+            placeAfter := x >= Floor((left + right) / 2)
+        } else {
+            top := NumGet(itemRect, 4, "int")
+            bottom := NumGet(itemRect, 12, "int")
+            placeAfter := y >= Floor((top + bottom) / 2)
+        }
+    }
+
+    if ReorderPinnedPath(sourcePath, targetPath, placeAfter) {
+        StatusKind := "default"
+        SetBackgroundStatus("已保存固定项顺序", 3000)
+    }
+}
+
+SignedMouseCoordinate(value) {
+    return value >= 0x8000 ? value - 0x10000 : value
+}
+
+PointInsideControl(hwnd, x, y) {
+    if x < 0 || y < 0
+        return false
+    rect := Buffer(16, 0)
+    if !DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect.Ptr)
+        return false
+    return x < NumGet(rect, 8, "int") && y < NumGet(rect, 12, "int")
+}
+
+HitTestListRow(hwnd, x, y) {
+    hitInfo := Buffer(24, 0)
+    NumPut("int", x, hitInfo, 0)
+    NumPut("int", y, hitInfo, 4)
+    zeroBasedRow := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1012, "ptr", 0, "ptr", hitInfo.Ptr, "int") ; LVM_HITTEST
+    return zeroBasedRow >= 0 ? zeroBasedRow + 1 : 0
+}
+
+ReorderPinnedPath(sourcePath, targetPath, placeAfter) {
+    global PinnedPaths
+
+    sourceIndex := FindPathIndex(PinnedPaths, sourcePath)
+    targetIndex := FindPathIndex(PinnedPaths, targetPath)
+    if !sourceIndex || !targetIndex || sourceIndex = targetIndex
+        return false
+
+    originalPaths := PinnedPaths.Clone()
+    PinnedPaths.RemoveAt(sourceIndex)
+    targetIndex := FindPathIndex(PinnedPaths, targetPath)
+    insertAt := targetIndex + (placeAfter ? 1 : 0)
+    PinnedPaths.InsertAt(insertAt, sourcePath)
+
+    if PathArraysEqual(PinnedPaths, originalPaths)
+        return false
+
+    try SavePinnedFiles()
+    catch as err {
+        PinnedPaths := originalPaths
+        try SavePinnedFiles()
+        ShowPanelMsgBox(
+            "无法保存固定项顺序：`n" err.Message,
+            "固定项排序失败",
+            "Iconx"
+        )
+        return false
+    }
+
+    PopulatePanel()
+    return true
+}
+
+PathArraysEqual(left, right) {
+    if left.Length != right.Length
+        return false
+    for index, path in left {
+        if StrLower(RTrim(path, "\")) != StrLower(RTrim(right[index], "\"))
+            return false
+    }
+    return true
 }
 
 InitDropSource() {
@@ -2483,7 +2637,15 @@ BeginShellDrag(paths, ownerHwnd) {
         else
             BeginMultiShellDrag(paths, ownerHwnd)
     } finally {
-        EndAutoHidePause()
+        try {
+            ; Completing an outbound drop can transfer focus to the target
+            ; application. In temporary mode the user may still want another
+            ; item, so restore PopDrop before resuming automatic hiding. The
+            ; next explicit click or Alt+Tab away will hide it normally.
+            KeepTemporaryPanelVisibleAfterDrag()
+        } finally {
+            EndAutoHidePause()
+        }
     }
 }
 
