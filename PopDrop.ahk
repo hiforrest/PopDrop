@@ -53,6 +53,7 @@ global RecentLabel := 0
 global RecentView := 0
 global ViewButton := 0
 global RecentButton := 0
+global WindowModeButton := 0
 global StatusText := 0
 global ItemPaths := Map()
 global RecentItemPaths := Map()
@@ -229,7 +230,7 @@ LoadSettings(*) {
     if rawMode = WINDOW_MODE_ALWAYS_ON_TOP || rawMode = WINDOW_MODE_TEMPORARY || rawMode = WINDOW_MODE_NORMAL {
         WindowMode := rawMode
     } else {
-        WindowMode := WINDOW_MODE_ALWAYS_ON_TOP
+        WindowMode := WINDOW_MODE_TEMPORARY
         settingErrors.Push("WindowMode 配置值无效：" rawMode "，已使用默认模式 temporary。")
     }
 
@@ -714,22 +715,25 @@ NormalizePath(path) {
 }
 
 BuildPanel() {
-    global Panel, FileView, RecentLabel, RecentView, ViewButton, RecentButton, StatusText
+    global Panel, FileView, RecentLabel, RecentView
+    global ViewButton, RecentButton, WindowModeButton, StatusText
 
     Panel := Gui("+Resize +MinSize620x380", "PopDrop")
     Panel.MarginX := 12
     Panel.MarginY := 10
     Panel.SetFont("s9", "Microsoft YaHei UI")
 
-    Panel.AddButton("xm ym w68 h30", "🔄 刷新").OnEvent("Click", RefreshPanel)
-    Panel.AddButton("x+6 yp w100 h30", "📌 添加固定文件").OnEvent("Click", AddPinnedFiles)
-    Panel.AddButton("x+6 yp w70 h30", "取消固定").OnEvent("Click", RemovePinnedFile)
-    ViewButton := Panel.AddButton("x+6 yp w95 h30", "视图")
+    Panel.AddButton("xm ym w62 h30", "🔄 刷新").OnEvent("Click", RefreshPanel)
+    Panel.AddButton("x+6 yp w80 h30", "➕ 固定项").OnEvent("Click", AddPinnedFiles)
+    Panel.AddButton("x+6 yp w80 h30", "➖ 固定项").OnEvent("Click", RemovePinnedFile)
+    ViewButton := Panel.AddButton("x+6 yp w80 h30", "视图")
     ViewButton.OnEvent("Click", ToggleViewMode)
-    RecentButton := Panel.AddButton("x+6 yp w90 h30", "近期栏")
+    RecentButton := Panel.AddButton("x+6 yp w76 h30", "近期栏")
     RecentButton.OnEvent("Click", ToggleRecentSidebar)
-    Panel.AddButton("x+6 yp w65 h30", "⚙️ 配置").OnEvent("Click", OpenConfig)
-    Panel.AddButton("x+6 yp w68 h30", "❌ 关闭").OnEvent("Click", HidePanel)
+    Panel.AddButton("x+6 yp w60 h30", "⚙️ 配置").OnEvent("Click", OpenConfig)
+    WindowModeButton := Panel.AddButton("x+6 yp w76 h30", "置顶：关")
+    WindowModeButton.OnEvent("Click", ToggleWindowMode)
+    Panel.AddButton("x+6 yp w60 h30", "❌ 关闭").OnEvent("Click", HidePanel)
 
     ; Multi-select is the native ListView default. In icon view this enables
     ; Ctrl-click, Shift range selection and marquee selection on blank space.
@@ -753,6 +757,8 @@ BuildPanel() {
     Panel.OnEvent("Close", HandlePanelClose)
     Panel.OnEvent("Escape", HandlePanelClose)
     Panel.OnEvent("Size", ResizePanel)
+    ; Filesystem items dropped anywhere in the window are added as pinned items.
+    Panel.OnEvent("DropFiles", PinDroppedFiles)
     UpdateViewButtons()
 }
 
@@ -1071,12 +1077,41 @@ ToggleRecentSidebar(*) {
     RequestNativeLayout()
 }
 
+ToggleWindowMode(*) {
+    global WindowMode, ConfigPath
+    global WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY
+
+    previousMode := WindowMode
+    WindowMode := WindowMode = WINDOW_MODE_ALWAYS_ON_TOP
+        ? WINDOW_MODE_TEMPORARY
+        : WINDOW_MODE_ALWAYS_ON_TOP
+
+    try IniWrite(WindowMode, ConfigPath, "General", "WindowMode")
+    catch as err {
+        WindowMode := previousMode
+        ShowPanelMsgBox(
+            "无法保存窗口模式：`n" err.Message,
+            "切换置顶模式失败",
+            "Iconx"
+        )
+        return
+    }
+
+    ApplyWindowMode()
+    UpdateViewButtons()
+}
+
 UpdateViewButtons() {
-    global ViewButton, RecentButton, ViewMode, ShowRecentSidebar
+    global ViewButton, RecentButton, WindowModeButton
+    global ViewMode, ShowRecentSidebar, WindowMode, WINDOW_MODE_ALWAYS_ON_TOP
     if IsObject(ViewButton)
-        ViewButton.Text := ViewMode = "Thumbnail" ? "👀 缩略图：开" : "👀 缩略图：关"
+        ViewButton.Text := ViewMode = "Thumbnail" ? "缩略图：开" : "缩略图：关"
     if IsObject(RecentButton)
-        RecentButton.Text := ShowRecentSidebar ? "🕒 近期栏：开" : "🕒 近期栏：关"
+        RecentButton.Text := ShowRecentSidebar ? "近期栏：开" : "近期栏：关"
+    if IsObject(WindowModeButton)
+        WindowModeButton.Text := WindowMode = WINDOW_MODE_ALWAYS_ON_TOP
+            ? "置顶：开"
+            : "置顶：关"
 }
 
 ApplyViewMode() {
@@ -1130,12 +1165,12 @@ PopulatePanel() {
     groupId := 1
 
     if PinnedPaths.Length {
-        InsertListGroup(groupId, "固定文件  (" PinnedPaths.Length ")")
+        InsertListGroup(groupId, "固定项  (" PinnedPaths.Length ")")
         for path in PinnedPaths {
             exists := FileExist(path)
             label := GetFileName(path)
             if !exists
-                label .= "  [文件不存在]"
+                label .= "  [项目不存在]"
             row := AddFileTile(path, label, "", groupId)
             ItemPaths[row] := path
             displayedCount += 1
@@ -1270,6 +1305,11 @@ AddPlaceholderTile(label, groupId) {
 
 AddShellThumbnail(path) {
     global ThumbnailSize, ThumbnailImageList, ThumbnailPolicy
+    ; Folders are pinned as single shortcuts. Always use their Shell icon
+    ; instead of asking Windows to inspect their contents for a thumbnail.
+    if DirExist(path)
+        return AddShellFileIcon(path)
+
     factory := 0
     bitmap := 0
     try {
@@ -1941,8 +1981,8 @@ OpenFileViewItem(list, row) {
     if !ItemPaths.Has(row)
         return
     path := ItemPaths[row]
-    ; 占位行（目录路径本身）或目录 → 打开分组文件夹
-    if ItemFolderPaths.Has(row) && DirExist(path) {
+    ; Configured-folder placeholders and pinned folders both open in Explorer.
+    if DirExist(path) {
         OpenFolderPath(path)
         return
     }
@@ -2003,7 +2043,7 @@ UpdateSelectionStatus() {
         StatusText.Text := ItemPaths[selectedRows[1]]
     } else if selectedRows.Length > 1 {
         StatusKind := "user"
-        StatusText.Text := "已选择 " selectedRows.Length " 个文件；可继续 Ctrl/Shift 选择。"
+        StatusText.Text := "已选择 " selectedRows.Length " 个项目；可继续 Ctrl/Shift 选择。"
     } else if StatusKind = "user" {
         StatusKind := "default"
     }
@@ -2050,11 +2090,116 @@ AddPinnedFiles(*) {
     }
 }
 
+PinDroppedFiles(guiObj, guiCtrlObj, fileArray, x, y) {
+    global Panel, PanelVisible
+
+    ; WM_DROPFILES arrives immediately after the mouse button is released,
+    ; which is also when a pending temporary-mode timer may try to hide the
+    ; panel. Pause that timer for the whole save/render operation.
+    BeginAutoHidePause()
+    try {
+        PinDroppedItems(fileArray)
+    } finally {
+        try {
+            ; A successful drop is an interaction with PopDrop. Bring the
+            ; panel back if a previously queued timer won the race, then keep
+            ; it active so temporary mode does not immediately hide it again.
+            if IsObject(Panel) {
+                if !DllCall("user32\IsWindowVisible", "ptr", Panel.Hwnd, "int")
+                    try Panel.Show("NA")
+                PanelVisible := DllCall(
+                    "user32\IsWindowVisible",
+                    "ptr", Panel.Hwnd,
+                    "int"
+                )
+                if PanelVisible
+                    try WinActivate("ahk_id " Panel.Hwnd)
+            }
+        } finally {
+            EndAutoHidePause()
+        }
+    }
+}
+
+PinDroppedItems(fileArray) {
+    global PinnedPaths, StatusKind
+
+    added := 0
+    addedFileCount := 0
+    addedFolderCount := 0
+    duplicateCount := 0
+    unavailableCount := 0
+
+    for droppedPath in fileArray {
+        path := NormalizePath(droppedPath)
+        if path = "" {
+            unavailableCount += 1
+            continue
+        }
+
+        attributes := FileExist(path)
+        if !attributes {
+            unavailableCount += 1
+            continue
+        }
+        if ArrayContainsPath(PinnedPaths, path) {
+            duplicateCount += 1
+            continue
+        }
+
+        PinnedPaths.Push(path)
+        added += 1
+        if InStr(attributes, "D")
+            addedFolderCount += 1
+        else
+            addedFileCount += 1
+    }
+
+    if added {
+        try SavePinnedFiles()
+        catch as err {
+            ; The paths added by this drop are always at the end. Roll them
+            ; back in memory and make a best-effort repair of the INI section.
+            Loop added
+                PinnedPaths.Pop()
+            try SavePinnedFiles()
+            ShowPanelMsgBox(
+                "无法保存拖入的固定项目：`n" err.Message,
+                "固定项目失败",
+                "Iconx"
+            )
+            return
+        }
+        PopulatePanel()
+    }
+
+    message := ""
+    if addedFileCount
+        message := "已固定 " addedFileCount " 个文件"
+    if addedFolderCount {
+        if message != ""
+            message .= "、"
+        else
+            message := "已固定 "
+        message .= addedFolderCount " 个文件夹"
+    }
+    if message = ""
+        message := "没有新增固定项目"
+    if duplicateCount
+        message .= "；" duplicateCount " 个重复项已跳过"
+    if unavailableCount
+        message .= "；" unavailableCount " 个路径不可用"
+
+    ; A drop result is more important than a previous selection-path message.
+    StatusKind := "default"
+    SetBackgroundStatus(message, 5000)
+}
+
 RemovePinnedFile(*) {
     global FileView, ItemPaths, PinnedPaths
     rows := GetSelectedFileRows()
     if !rows.Length {
-        ShowPanelMsgBox("请先在“固定文件”分组中选择一个或多个文件。", "取消固定", "Iconi")
+        ShowPanelMsgBox("请先在“固定项目”分组中选择一个或多个项目。", "取消固定", "Iconi")
         return
     }
 
@@ -2065,7 +2210,7 @@ RemovePinnedFile(*) {
             indexes.Push(index)
     }
     if !indexes.Length {
-        ShowPanelMsgBox("选择的文件中没有固定文件。", "取消固定", "Iconi")
+        ShowPanelMsgBox("选择的项目中没有固定项目。", "取消固定", "Iconi")
         return
     }
     ; Remove from the end so earlier array indexes remain valid.
@@ -2141,7 +2286,7 @@ FileViewContextMenu(list, row, isRightClick, x, y) {
     list.Modify(row, "Select Focus Vis")
     path := ItemPaths[row]
     if !FileExist(path) {
-        ShowPanelMsgBox("文件不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
+        ShowPanelMsgBox("项目不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
         return
     }
     ShowShellContextMenu(path, list.Gui.Hwnd, x, y)
@@ -2288,7 +2433,7 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
     }
     if existingPaths.Length {
         StatusKind := "user"
-        StatusText.Text := "本次拖拽包含 " existingPaths.Length " 个文件。"
+        StatusText.Text := "本次拖拽包含 " existingPaths.Length " 个项目。"
         DllCall("user32\UpdateWindow", "ptr", StatusText.Hwnd)
         BeginShellDrag(existingPaths, DragSourceHwnd)
     }
