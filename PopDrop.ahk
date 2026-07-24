@@ -56,12 +56,16 @@ global RecentButton := 0
 global WindowModeButton := 0
 global StatusText := 0
 global ItemPaths := Map()
+global ItemLabels := Map()
 global RecentItemPaths := Map()
 global PinnedPaths := []
 global FolderSettings := []
 global MaxFilesPerFolder := 8
 global IncludeSubfolders := false
 global ThumbnailSize := 96
+global ThumbnailHorizontalGap := 24
+global ThumbnailVerticalGap := 4
+global ThumbnailTextLines := 2
 global ThumbnailImageList := 0
 global WindowWidth := 980
 global WindowHeight := 620
@@ -171,6 +175,9 @@ EnsureConfig() {
     "MaxFilesPerFolder=8`n"
     "IncludeSubfolders=0`n"
     "ThumbnailSize=96`n"
+    "ThumbnailHorizontalGap=24`n"
+    "ThumbnailVerticalGap=4`n"
+    "ThumbnailTextLines=2`n"
     "WindowWidth=980`n"
     "WindowHeight=620`n"
     "ViewMode=Thumbnail`n"
@@ -212,7 +219,9 @@ EnsureConfigEncoding() {
 
 LoadSettings(*) {
     global ConfigPath, ConfiguredHotkey, MaxFilesPerFolder
-    global IncludeSubfolders, ThumbnailSize, FolderSettings, PinnedPaths
+    global IncludeSubfolders, ThumbnailSize, ThumbnailHorizontalGap, ThumbnailVerticalGap
+    global ThumbnailTextLines
+    global FolderSettings, PinnedPaths
     global WindowWidth, WindowHeight, ViewMode, ShowRecentSidebar, RecentFileCount
     global ThumbnailPolicy, CachePathSetting, CacheDir, CacheFilePath, CacheWritable
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
@@ -246,6 +255,21 @@ LoadSettings(*) {
     catch
         ThumbnailSize := 96
     ThumbnailSize := Max(48, Min(ThumbnailSize, 256))
+    try ThumbnailHorizontalGap := Integer(
+        IniRead(ConfigPath, "General", "ThumbnailHorizontalGap", "24"))
+    catch
+        ThumbnailHorizontalGap := 24
+    ThumbnailHorizontalGap := Max(0, Min(ThumbnailHorizontalGap, 128))
+    try ThumbnailVerticalGap := Integer(
+        IniRead(ConfigPath, "General", "ThumbnailVerticalGap", "4"))
+    catch
+        ThumbnailVerticalGap := 4
+    ThumbnailVerticalGap := Max(0, Min(ThumbnailVerticalGap, 128))
+    try ThumbnailTextLines := Integer(
+        IniRead(ConfigPath, "General", "ThumbnailTextLines", "2"))
+    catch
+        ThumbnailTextLines := 2
+    ThumbnailTextLines := Max(1, Min(ThumbnailTextLines, 2))
 
     try WindowWidth := Integer(IniRead(ConfigPath, "General", "WindowWidth", "980"))
     catch
@@ -1118,24 +1142,152 @@ UpdateViewButtons() {
 }
 
 ApplyViewMode() {
-    global FileView, ViewMode, ThumbnailSize
+    global FileView, ViewMode
     if ViewMode = "List" {
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x108E,
             "ptr", 1, "ptr", 0, "ptr") ; LVM_SETVIEW, LV_VIEW_DETAILS
         FileView.ModifyCol(1, 360)
         FileView.ModifyCol(2, 132)
+        ApplyFileViewLabels(false)
     } else {
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x108E,
             "ptr", 0, "ptr", 0, "ptr") ; LVM_SETVIEW, LV_VIEW_ICON
-        FileView.ModifyCol(1, ThumbnailSize + 32)
-        spacing := (ThumbnailSize + 24) | ((ThumbnailSize + 96) << 16)
-        DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1035,
-            "ptr", 0, "ptr", spacing, "ptr")
+        ApplyThumbnailLayout()
+        ApplyFileViewLabels(true)
     }
 }
 
+ApplyThumbnailLayout() {
+    global FileView, ThumbnailSize, ThumbnailHorizontalGap, ThumbnailVerticalGap
+    global ThumbnailTextLines
+
+    ; LVM_SETICONSPACING expects the distance from one icon origin to the next,
+    ; not the amount of blank space. Reserve the configured number of label
+    ; lines separately so a small gap cannot clip or distort square images.
+    ; LVS_NOLABELWRAP makes the one-line setting control actual label wrapping,
+    ; instead of merely reducing the reserved height and clipping line two.
+    FileView.Opt(ThumbnailTextLines = 1 ? "+0x80" : "-0x80")
+    horizontalSpacing := ThumbnailSize + ThumbnailHorizontalGap
+    verticalSpacing := ThumbnailSize + GetThumbnailLabelReserve()
+        + ThumbnailVerticalGap
+    horizontalSpacing := Max(4, Min(horizontalSpacing, 0xFFFF))
+    verticalSpacing := Max(4, Min(verticalSpacing, 0xFFFF))
+    packedSpacing := (horizontalSpacing & 0xFFFF)
+        | ((verticalSpacing & 0xFFFF) << 16)
+
+    FileView.ModifyCol(1, horizontalSpacing)
+    DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1035,
+        "ptr", 0, "ptr", packedSpacing, "ptr") ; LVM_SETICONSPACING
+}
+
+GetThumbnailLabelReserve() {
+    global FileView, ThumbnailTextLines
+
+    ; Use the ListView's real font metrics so the safety reserve also follows
+    ; Windows DPI/font scaling. The fallback matches the 9 pt UI font.
+    lineHeight := 20
+    hdc := DllCall("user32\GetDC", "ptr", FileView.Hwnd, "ptr")
+    if hdc {
+        hFont := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+            "uint", 0x31, "ptr", 0, "ptr", 0, "ptr") ; WM_GETFONT
+        oldFont := hFont
+            ? DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", hFont, "ptr")
+            : 0
+        metrics := Buffer(64, 0)
+        if DllCall("gdi32\GetTextMetricsW", "ptr", hdc, "ptr", metrics.Ptr, "int")
+            lineHeight := Max(1, NumGet(metrics, 0, "int")
+                + NumGet(metrics, 16, "int"))
+        if oldFont
+            DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", oldFont, "ptr")
+        DllCall("user32\ReleaseDC", "ptr", FileView.Hwnd, "ptr", hdc)
+    }
+    return lineHeight * ThumbnailTextLines + Max(8, Round(lineHeight * 0.4))
+}
+
+ApplyFileViewLabels(thumbnailMode) {
+    global FileView, ItemLabels, ThumbnailTextLines
+
+    shortenLabels := thumbnailMode && ThumbnailTextLines = 1
+    hdc := 0
+    oldFont := 0
+    if shortenLabels {
+        hdc := DllCall("user32\GetDC", "ptr", FileView.Hwnd, "ptr")
+        if hdc {
+            hFont := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+                "uint", 0x31, "ptr", 0, "ptr", 0, "ptr") ; WM_GETFONT
+            if hFont
+                oldFont := DllCall("gdi32\SelectObject",
+                    "ptr", hdc, "ptr", hFont, "ptr")
+        }
+    }
+
+    try {
+        for row, fullLabel in ItemLabels {
+            visibleLabel := shortenLabels
+                ? FitThumbnailLabel(fullLabel, hdc)
+                : fullLabel
+            FileView.Modify(row, "", visibleLabel)
+        }
+    } finally {
+        if hdc {
+            if oldFont
+                DllCall("gdi32\SelectObject",
+                    "ptr", hdc, "ptr", oldFont, "ptr")
+            DllCall("user32\ReleaseDC", "ptr", FileView.Hwnd, "ptr", hdc)
+        }
+    }
+}
+
+FitThumbnailLabel(label, hdc) {
+    global ThumbnailSize
+
+    ; Native icon labels add a small horizontal margin around the measured
+    ; text. Leave six pixels on each side so the complete painted label stays
+    ; within the square thumbnail width and cannot touch a neighbouring item.
+    maxTextWidth := Max(8, ThumbnailSize - 12)
+    measuredWidth := MeasureListViewText(label, hdc)
+    if measuredWidth >= 0 && measuredWidth <= maxTextWidth
+        return label
+
+    ellipsis := "…"
+    ellipsisWidth := MeasureListViewText(ellipsis, hdc)
+    if measuredWidth < 0 || ellipsisWidth < 0 {
+        ; GetDC is expected to succeed for a live ListView. Keep a conservative
+        ; fallback for unusual themes or teardown timing.
+        fallbackLength := Max(1, Floor(maxTextWidth / 14))
+        return StrLen(label) <= fallbackLength
+            ? label
+            : SubStr(label, 1, Max(0, fallbackLength - 1)) ellipsis
+    }
+    if ellipsisWidth > maxTextWidth
+        return ellipsis
+
+    low := 0
+    high := StrLen(label)
+    while low < high {
+        middle := Ceil((low + high) / 2)
+        candidate := SubStr(label, 1, middle) ellipsis
+        if MeasureListViewText(candidate, hdc) <= maxTextWidth
+            low := middle
+        else
+            high := middle - 1
+    }
+    return SubStr(label, 1, low) ellipsis
+}
+
+MeasureListViewText(text, hdc) {
+    if !hdc
+        return -1
+    size := Buffer(8, 0)
+    if !DllCall("gdi32\GetTextExtentPoint32W", "ptr", hdc, "wstr", text,
+        "int", StrLen(text), "ptr", size.Ptr, "int")
+        return -1
+    return NumGet(size, 0, "int")
+}
+
 PopulatePanel() {
-    global FileView, ItemPaths, ItemFolderPaths, PinnedPaths, FolderSettings, StatusText
+    global FileView, ItemPaths, ItemLabels, ItemFolderPaths
+    global PinnedPaths, FolderSettings, StatusText
     global ThumbnailSize, ThumbnailImageList, SelectedFilePaths, LastValidFolderSettings, ConfigErrors
     global CurrentScanResult, ScanResultLoaded, StatusKind
     global ConfigErrorsShown, MODE_FILES, GroupFolderPaths
@@ -1156,11 +1308,8 @@ PopulatePanel() {
     ThumbnailImageList := newImageList
     if oldImageList && oldImageList != newImageList
         DllCall("comctl32\ImageList_Destroy", "ptr", oldImageList)
-    spacing := (ThumbnailSize + 24) | ((ThumbnailSize + 96) << 16)
-    DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1035,
-        "ptr", 0, "ptr", spacing, "ptr") ; LVM_SETICONSPACING
-
     ItemPaths := Map()
+    ItemLabels := Map()
     ItemFolderPaths := Map()
     GroupFolderPaths := Map()
     displayedCount := 0
@@ -1291,17 +1440,19 @@ SetListItemGroup(row, groupId) {
 }
 
 AddFileTile(path, label, modifiedText, groupId) {
-    global FileView
+    global FileView, ItemLabels
     imageIndex := AddShellThumbnail(path)
     options := imageIndex ? "Icon" imageIndex : ""
     row := FileView.Add(options, label, modifiedText)
+    ItemLabels[row] := label
     SetListItemGroup(row, groupId)
     return row
 }
 
 AddPlaceholderTile(label, groupId) {
-    global FileView
+    global FileView, ItemLabels
     row := FileView.Add("", label, "")
+    ItemLabels[row] := label
     SetListItemGroup(row, groupId)
     return row
 }
