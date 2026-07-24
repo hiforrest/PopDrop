@@ -16,7 +16,8 @@
 3. 双击 `PopDrop.ahk`
 4. 按 `F2` 试试看
 
-不需要装其他东西。脚本只调用 AutoHotkey 和 Windows 自带的 API。**它不会修改、移动、删除你的文件**——只负责展示和操作。
+不需要装其他东西。脚本只调用 AutoHotkey 和 Windows 自带的 API。只有在你明确执行
+“复制到…”或“移动到…”后，PopDrop 才会请求 Windows Shell 操作真实文件。
 
 ### 配置示例
 
@@ -24,10 +25,17 @@
 
 ```ini
 [General]
+ConfigVersion=8
 Hotkey=F2
+OpenFileMode=DoubleClick
 MaxFilesPerFolder=8
+DisplayScope=FilesOnly
+FolderTimeMode=DirectoryModified
 IncludeSubfolders=0
 ThumbnailSize=96
+ThumbnailHorizontalGap=24
+ThumbnailVerticalGap=4
+ThumbnailTextLines=2
 WindowWidth=980
 WindowHeight=620
 ViewMode=Thumbnail
@@ -48,8 +56,13 @@ WindowMode=temporary
 | 配置项 | 作用 |
 |---|---|
 | `[Folders]` | 每一行是一个分组，格式是 `显示名称=文件夹路径`。路径支持 `%USERPROFILE%` 等环境变量。 |
-| `IncludeSubfolders=1` | 递归扫描子目录。如果目录很大，第一次刷新可能稍慢。 |
+| `DisplayScope` | `FilesOnly`=仅当前目录文件；`FilesAndFolders`=当前目录文件和直接子文件夹；`RecursiveFiles`=递归文件平铺。 |
+| `FolderTimeMode` | `DirectoryModified`=文件夹自身时间；`LatestContent`=允许扫描的后代文件最新时间。 |
+| `IncludeSubfolders` | v0.6 及更早版本兼容项；缺少 `DisplayScope` 时，`0` 迁移为 `FilesOnly`，`1` 迁移为 `RecursiveFiles`。 |
 | `ThumbnailSize` | 缩略图边长，48～256。建议 72、96、128 或 160。 |
+| `ThumbnailHorizontalGap` | 相邻图标之间的水平留白，0～128 像素，默认 24。 |
+| `ThumbnailVerticalGap` | 相邻图标行之间的垂直留白，0～128 像素，默认 4。文件名高度由 `ThumbnailTextLines` 另行预留，设为 0 也不会压扁缩略图。 |
+| `ThumbnailTextLines` | 缩略图文件名显示并预留的行数。`1`=单行紧凑，过长名称按图标宽度显示省略号，完整路径仍可在状态栏查看；`2`=双行，默认 2；其他值会自动限制到 1～2。 |
 | `WindowWidth` / `WindowHeight` | 面板打开时的尺寸。 |
 | `ViewMode` | `Thumbnail`=缩略图，`List`=文件名+修改时间。也可以在面板顶部手动切换。 |
 | `ShowRecentSidebar` | `1`=显示最近打开侧边栏，`0`=关闭。面板顶部按钮也可以随时开关。 |
@@ -57,8 +70,40 @@ WindowMode=temporary
 | `CachePath` | 扫描结果缓存目录。留空时使用软件目录下的 `cache` 文件夹；不可写时退化为内存缓存。 |
 | `ThumbnailPolicy` | `Fast`（默认）只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标；`Full` 允许现场生成缩略图，可能造成短暂停顿。 |
 | `WindowMode` | 窗口显示模式：`temporary`（默认，置顶，切换到其他窗口后自动隐藏）、`always_on_top`（始终置顶）、`normal`（普通窗口，不置顶）。 |
+| `OpenFileMode` | 普通文件的鼠标激活方式：`DoubleClick`（默认）或 `SingleClick`。缺失、空值或未知值都回退为双击。 |
 | `SortMode` | 排序模式：`ModifiedDesc`（修改时间从新到旧，默认）、`NameAsc`（文件名自然升序）。支持文件夹级覆盖。 |
 | 快捷键语法 | AutoHotkey v2 格式：`^`=Ctrl，`!`=Alt，`+`=Shift，`#`=Win。例如 `^!Space`=Ctrl+Alt+Space。 |
+
+---
+
+## 单击或双击打开文件
+
+点击面板顶部“配置”可选择全局打开方式，并为每个监控来源选择：
+
+- `Inherit`：跟随全局设置（默认）
+- `SingleClick`：单击普通文件立即打开
+- `DoubleClick`：双击普通文件打开
+
+也可以直接编辑：
+
+```ini
+[General]
+OpenFileMode=DoubleClick
+
+[Folder:下载]
+OpenFileMode=SingleClick
+
+[Folder:项目]
+OpenFileMode=Inherit
+```
+
+单击模式只改变普通文件的鼠标激活次数。`Ctrl`/`Shift` 选择、框选和拖拽不会打开
+文件；文件夹（包括直接显示的子文件夹和固定文件夹）仍然需要双击。固定项和最近文件
+使用全局值。同一个文件显示在两个来源分组时，分别使用当前分组的来源设置。
+
+来源首次迁移时会获得稳定 `SourceId`，并在 `[Sources]` / `[Source:<ID>]` 中保留身份；
+单独修改来源名称或路径、以及调整顺序，都不会丢失打开方式。通常无需手工编辑这些
+内部字段。
 
 ---
 
@@ -129,6 +174,9 @@ Hotkey=F2
 MaxFilesPerFolder=8
 IncludeSubfolders=0
 ThumbnailSize=96
+ThumbnailHorizontalGap=24
+ThumbnailVerticalGap=4
+ThumbnailTextLines=2
 ; 窗口模式：temporary（默认）| always_on_top（始终置顶）| normal（普通窗口）
 WindowMode=temporary
 ; 全局：显示所有文件
@@ -317,8 +365,140 @@ PopDrop 的设计初衷是「按一下出现，用完就走」。`temporary` 模
 - 多选后点击「－ 固定项」，会批量将所有选中项目移出固定项，不会删除源文件。
 - 多选后拖拽任意一个已选文件，所有选中文件一起发送——支持跨文件夹、跨磁盘。
 - 某些以管理员权限运行的软件，不会接受普通权限程序的拖放。这是 Windows 的安全机制。如果遇到这种情况，让 PopDrop 和目标软件使用相同权限级别即可。
-- 右键菜单直接调用 Windows 完整 Shell 菜单，样式接近「显示更多选项」后的菜单，而不是 Win11 的简化版——该有的选项都在。
+- 普通右击使用 PopDrop 精简菜单；需要第三方扩展或其他系统命令时，按住 `Shift` 右击或按 `Shift + F10`。
 - 网络盘、离线盘、权限受限的目录会显示为不可用；恢复连接后点「刷新」即可回来。
+
+## v0.7 文件操作与打开方式
+
+### 精简右键菜单和快捷键
+
+普通右击打开 PopDrop 精简菜单。右击当前多选中的项目会保留整个选择；右击未选中项目
+会先改为单选。`Shift + 右击` 和 `Shift + F10` 直接打开完整 Windows Shell 菜单。
+
+| 操作 | 快捷键 |
+|---|---|
+| 使用默认关联打开 | `Enter` |
+| 在文件资源管理器中显示 | `Ctrl + Enter` |
+| 复制文件对象到剪贴板 | `Ctrl + C` |
+| 复制完整路径文本 | `Ctrl + Shift + C` |
+| 更多系统操作 | `Shift + F10` |
+
+多选定位只支持同一父目录；跨父目录时菜单项禁用，避免一次打开大量资源管理器窗口。
+复制文件使用 `CF_HDROP`，可以直接粘贴到资源管理器或支持文件粘贴的软件；复制路径则
+按当前显示顺序每行一条，不添加引号。
+
+### 配置用于打开文件的软件
+
+“选择其他程序…”只允许选择 `.exe`。Windows 接受启动请求后，PopDrop 才会保存程序，
+并自动合并当前文件的扩展名。路径按 Windows 大小写不敏感规则规范比较，同一程序不会
+重复添加。没有扩展名使用 `<none>` 表示；空扩展名列表表示适用于所有普通文件。
+
+配置使用一份容易手工编辑的 ID 顺序列表：
+
+```ini
+[OpenApps]
+Order=typora,notepad-plus-plus
+
+[OpenApp:typora]
+Path=C:\Program Files\Typora\Typora.exe
+Extensions=.md,.txt,<none>
+```
+
+`Order=` 是唯一排序来源；调整其中 ID 的先后顺序即可改变菜单顺序。ID 只需保持唯一，
+建议使用 EXE 文件名并只包含字母、数字、`-`、`_`，例如 `7z`、`everedit`。
+通过“选择其他程序…”添加时，PopDrop 会自动从 EXE 文件名生成 ID；重名时追加
+`-2`、`-3`。
+
+每个 ID 对应一个 `[OpenApp:<ID>]` 配置段。`Path` 必填；`Name`、`Icon`、`Enabled`
+均可省略，分别默认使用程序产品名、EXE 内置图标和启用状态。`Extensions` 留空或省略
+表示适用于所有普通文件。完整写法如下：
+
+```ini
+[OpenApps]
+Order=7z,everedit
+
+[OpenApp:7z]
+Path=C:\Program Files\7-Zip\7zFM.exe
+Name=7-Zip
+Icon=C:\Program Files\7-Zip\7zFM.exe
+Extensions=.7z,.zip
+Enabled=1
+
+[OpenApp:everedit]
+Path=D:\Tools\EverEdit\EverEdit.exe
+Extensions=.txt,.md,.png
+```
+
+早期 v0.7 的 `App001=<UUID>` 与单项 `Order=1` 格式仍可读取。首次加载后，PopDrop
+会通过原子写入迁移为新的 `Order=id1,id2,...` 格式；自动生成的 UUID 会转换为可读
+ID。迁移失败时原配置不会被破坏，并会显示配置错误。
+
+扩展名不区分大小写，可写 `pdf` 或 `.pdf`，保存时统一为带点小写形式。v0.7 按最后一个
+扩展名匹配，不支持把 `.tar.gz` 当作一个打开类型。未填写扩展名的通用程序排在精确匹配
+之后；顶层最多 5 个，其余放在“更多已配置应用…”中。程序移动或卸载后，点击该程序会
+提供“重新选择”或“移除”。
+
+### 复制到、移动到和目标位置
+
+复制和移动使用 Windows `IFileOperation`，支持文件、文件夹、混合选择、跨来源目录和
+跨磁盘。重名、文件夹合并、权限提升、进度、占用、网络位置、取消与部分完成均由 Shell
+处理；程序会额外检查 `GetAnyOperationsAborted`。不会静默覆盖，也不会自行用“复制后
+删除”模拟移动。
+
+常用目标最多 5 个，全部写在配置文件中。首次升级时，PopDrop 会把系统“桌面”和“下载”
+路径迁移为前两项；它们和其他常用位置一样可以删除，删除后不会自动恢复：
+
+```ini
+[General]
+TransferFavoritesInitialized=1
+
+[TransferFavorites]
+Path001=C:\Users\用户名\Desktop
+Path002=C:\Users\用户名\Downloads
+Path003=D:\项目交付
+Path004=E:\素材归档
+```
+
+最近目标最多 3 个，只记录确实产生文件变化的成功复制或移动目标。无效目标会标记为
+不可用，可从菜单移除。移动固定项时，PopDrop 根据 Shell 返回的实际新项目更新固定
+路径，包括冲突对话框造成的自动改名。整批操作完成后只请求一次后台刷新，并尽量恢复
+选择、焦点和滚动位置。
+
+### 三种子文件夹显示范围
+
+`DisplayScope` 可以全局配置，也可以在 `[Folder:名称]` 中覆盖：
+
+```ini
+[General]
+DisplayScope=FilesOnly
+FolderTimeMode=DirectoryModified
+
+[Folder:项目]
+DisplayScope=FilesAndFolders
+FolderTimeMode=LatestContent
+```
+
+- `FilesOnly`：仅显示当前目录中的文件。
+- `FilesAndFolders`：显示当前目录文件和直接子文件夹；不会平铺子文件夹内容。
+- `RecursiveFiles`：递归显示全部后代文件，与根目录文件一起排序。
+
+文件夹不强制置顶，与文件参与同一排序。`LatestContent` 在后台扫描进程中计算所有允许
+后代文件的最大修改时间，界面显示“内容更新于”；空文件夹、离线、无权限或扫描失败时
+回退到文件夹自身修改时间。递归扫描默认不进入符号链接、目录联接和其他重解析点。
+旧 `IncludeSubfolders=0/1` 在没有 `DisplayScope` 时分别兼容为 `FilesOnly` 和
+`RecursiveFiles`。
+
+### 配置写入与测试
+
+v0.7 新增配置以及固定项批量更新使用临时文件和同卷原子替换，减少异常退出造成的配置
+损坏。Windows 上可运行：
+
+```powershell
+AutoHotkey64.exe PopDrop.ahk --self-test
+```
+
+非 Windows CI 可运行 `python -m unittest discover -s tests -v` 做配置/API 接线和
+关键规范化规则检查。
 
 ## 开机启动（可选）
 

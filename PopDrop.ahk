@@ -4,6 +4,8 @@
 
 ;@Ahk2Exe-SetMainIcon assets\app.ico
 ;@Ahk2Exe-AddResource assets\tray.ico, 555
+;@Ahk2Exe-SetVersion 0.7.0.0
+;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
 ;
@@ -13,10 +15,29 @@
 ; ──── 排序模式常量 ────
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
+global APP_VERSION := "0.7.0"
 
 ; ──── 文件夹模式常量 ────
 global MODE_FILES := "Files"
 global MODE_LAUNCHER := "Launcher"
+
+; ──── v0.7 显示范围与文件夹时间 ────
+global SCOPE_FILES_ONLY := "FilesOnly"
+global SCOPE_FILES_AND_FOLDERS := "FilesAndFolders"
+global SCOPE_RECURSIVE_FILES := "RecursiveFiles"
+global FOLDER_TIME_MODIFIED := "DirectoryModified"
+global FOLDER_TIME_LATEST_CONTENT := "LatestContent"
+global NO_EXTENSION_TOKEN := "<none>"
+
+; ──── 文件激活模式 ────
+global OPEN_MODE_DOUBLE := "DoubleClick"
+global OPEN_MODE_SINGLE := "SingleClick"
+global SOURCE_OPEN_MODE_INHERIT := "Inherit"
+
+if A_Args.Length && A_Args[1] = "--self-test" {
+    RunSelfTests()
+    ExitApp
+}
 
 if A_Args.Length && A_Args[1] = "--scan-worker" {
     ; #NoTrayIcon 在脚本执行前生效，worker 从一开始就不会创建托盘图标。
@@ -57,6 +78,8 @@ global WindowModeButton := 0
 global StatusText := 0
 global ItemPaths := Map()
 global ItemLabels := Map()
+global ItemKinds := Map()
+global ItemOpenContexts := Map()
 global RecentItemPaths := Map()
 global PinnedPaths := []
 global FolderSettings := []
@@ -110,6 +133,27 @@ global ScanGeneration := 0
 global StatusKind := "default"
 global StatusTimerToken := 0
 global PanelIconHandle := 0
+global OpenApps := []
+global TransferFavorites := []
+global RecentTargets := []
+global LastOpenProgramDir := ""
+global LastTransferTargetDir := ""
+global PendingViewRestore := 0
+global PendingFileOperationRefresh := false
+global FileOperationSinkVTable := 0
+global FileOperationSinkCallbacks := []
+global FileOperationSinks := Map()
+global LastOpenAppUndoState := 0
+global CurrentStatusAction := 0
+global OpenAppsConfigNeedsMigration := false
+global GlobalOpenFileMode := OPEN_MODE_DOUBLE
+global SettingsDialog := 0
+
+; ──── 单击激活手势和重复激活抑制 ────
+global FilePointerGesture := 0
+global FilePointerGestureSerial := 0
+global LastPointerActivationKey := ""
+global LastPointerActivationTick := 0
 
 global SortMode := SORT_MODIFIED_DESC
 
@@ -133,9 +177,19 @@ ApplyWindowMode()
 InstallHotkey(ConfiguredHotkey)
 BuildTrayMenu()
 InitDropSource()
+InitFileOperationProgressSink()
+InstallPanelHotkeys()
 OnMessage(0x0201, FileViewLeftButtonDown) ; WM_LBUTTONDOWN
 OnMessage(0x0200, FileViewMouseMove)      ; WM_MOUSEMOVE
 OnMessage(0x0202, FileViewLeftButtonUp)   ; WM_LBUTTONUP
+OnMessage(0x0204, FileViewRightButtonDown) ; WM_RBUTTONDOWN
+OnMessage(0x020A, FileViewCancelInteraction) ; WM_MOUSEWHEEL
+OnMessage(0x020E, FileViewCancelInteraction) ; WM_MOUSEHWHEEL
+OnMessage(0x0114, FileViewCancelInteraction) ; WM_HSCROLL
+OnMessage(0x0115, FileViewCancelInteraction) ; WM_VSCROLL
+OnMessage(0x001F, FileViewCancelMode)      ; WM_CANCELMODE
+OnMessage(0x0215, FileViewCaptureChanged)  ; WM_CAPTURECHANGED
+OnMessage(0x0008, FileViewKillFocus)       ; WM_KILLFOCUS
 OnMessage(0x0006, PanelActivationChanged) ; WM_ACTIVATE
 OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 
@@ -158,6 +212,22 @@ ShowPanelMsgBox(Text, Title?, Options?) {
     }
 }
 
+SelectPanelFile(options, rootDir := "", title := "", filter := "") {
+    global Panel
+
+    BeginAutoHidePause()
+    try {
+        ; +OwnDialogs is thread-local in AutoHotkey. Apply it immediately
+        ; before FileSelect so an always-on-top panel cannot cover the picker.
+        if IsObject(Panel)
+            && DllCall("user32\IsWindowVisible", "ptr", Panel.Hwnd, "int")
+            Panel.Opt("+OwnDialogs")
+        return FileSelect(options, rootDir, title, filter)
+    } finally {
+        EndAutoHidePause()
+    }
+}
+
 EnsureConfig() {
     global ConfigPath
     if FileExist(ConfigPath) {
@@ -165,14 +235,31 @@ EnsureConfig() {
         return
     }
 
+    defaultDesktop := GetKnownFolderPath(
+        "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}")
+    if defaultDesktop = ""
+        defaultDesktop := "%USERPROFILE%\Desktop"
+    defaultDownloads := GetKnownFolderPath(
+        "{374DE290-123F-4565-9164-39C4925E467B}")
+    if defaultDownloads = ""
+        defaultDownloads := "%USERPROFILE%\Downloads"
+
     defaultConfig :=
     (
     "; PopDrop 配置文件`n"
     "; 修改后，在面板中点“刷新”即可重新读取。`n"
     "`n"
     "[General]`n"
+    "ConfigVersion=8`n"
     "Hotkey=F2`n"
+    "; DoubleClick（默认）| SingleClick`n"
+    "OpenFileMode=DoubleClick`n"
     "MaxFilesPerFolder=8`n"
+    "; FilesOnly | FilesAndFolders | RecursiveFiles`n"
+    "DisplayScope=FilesOnly`n"
+    "; DirectoryModified | LatestContent`n"
+    "FolderTimeMode=DirectoryModified`n"
+    "; v0.6 及更早版本兼容项；DisplayScope 存在时优先使用新配置`n"
     "IncludeSubfolders=0`n"
     "ThumbnailSize=96`n"
     "ThumbnailHorizontalGap=24`n"
@@ -192,12 +279,28 @@ EnsureConfig() {
     "; All / Include / Exclude`n"
     "FilterMode=All`n"
     "FileExtensions=`n"
+    "LastOpenProgramDir=`n"
+    "LastTransferTargetDir=`n"
+    "TransferFavoritesInitialized=1`n"
     "`n"
     "[Folders]`n"
     "文档=%USERPROFILE%\Documents`n"
     "下载=D:\download`n"
     "`n"
     "[PinnedFiles]`n"
+    "`n"
+    "[OpenApps]`n"
+    "; 顺序和稳定 ID，例如：Order=7zip,everedit`n"
+    "; 详情保存在 [OpenApp:<ID>]；ID 建议只使用字母、数字、-、_`n"
+    "Order=`n"
+    "`n"
+    "[TransferFavorites]`n"
+    "Path001=" defaultDesktop "`n"
+    "Path002=" defaultDownloads "`n"
+    "; 删除上面任一 Path 行即可从常用位置移除；不会自动恢复`n"
+    "; Path003=D:\Projects\Delivery`n"
+    "`n"
+    "[RecentTargets]`n"
     )
     ; IniRead/IniWrite use the Windows profile API, which requires UTF-16 for
     ; reliable Chinese text on every system locale.
@@ -230,12 +333,21 @@ LoadSettings(*) {
     global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
     global SortMode, SORT_MODIFIED_DESC, SORT_NAME_ASC
     global MODE_FILES, MODE_LAUNCHER
+    global SCOPE_FILES_ONLY, SCOPE_RECURSIVE_FILES, FOLDER_TIME_MODIFIED
+    global OpenApps, TransferFavorites, RecentTargets
+    global LastOpenProgramDir, LastTransferTargetDir
+    global OpenAppsConfigNeedsMigration
+    global GlobalOpenFileMode, OPEN_MODE_DOUBLE
 
     settingErrors := []
 
     ConfiguredHotkey := Trim(IniRead(ConfigPath, "General", "Hotkey", "F2"))
     if ConfiguredHotkey = ""
         ConfiguredHotkey := "F2"
+
+    ; 缺失、空值和未知值都必须保持旧版的双击行为。
+    GlobalOpenFileMode := ParseGlobalOpenFileMode(
+        IniRead(ConfigPath, "General", "OpenFileMode", OPEN_MODE_DOUBLE))
 
     ; 读取窗口模式
     rawMode := StrLower(Trim(IniRead(ConfigPath, "General", "WindowMode", "temporary")))
@@ -291,6 +403,10 @@ LoadSettings(*) {
     ThumbnailPolicy := StrLower(Trim(IniRead(ConfigPath, "General", "ThumbnailPolicy", "Fast"))) = "full"
         ? "Full" : "Fast"
     CachePathSetting := Trim(IniRead(ConfigPath, "General", "CachePath", ""))
+    LastOpenProgramDir := NormalizePath(
+        IniRead(ConfigPath, "General", "LastOpenProgramDir", ""))
+    LastTransferTargetDir := NormalizePath(
+        IniRead(ConfigPath, "General", "LastTransferTargetDir", ""))
 
     ; 读取全局排序模式
     rawSort := StrLower(Trim(IniRead(ConfigPath, "General", "SortMode", "ModifiedDesc")))
@@ -307,6 +423,9 @@ LoadSettings(*) {
         if entry.Value != ""
             FolderSettings.Push({Name: entry.Key, Path: NormalizePath(entry.Value)})
     }
+    try MigrateOpenFileModeConfig(FolderSettings)
+    catch as err
+        settingErrors.Push("无法迁移文件打开方式配置：" err.Message)
 
     ; 验证并解析配置，得到每个文件夹的最终设置
     ConfigErrorsShown := false
@@ -330,11 +449,15 @@ LoadSettings(*) {
                     Path: f.Path,
                     Mode: MODE_FILES,
                     IncludeSubfolders: IncludeSubfolders,
+                    DisplayScope: IncludeSubfolders ? SCOPE_RECURSIVE_FILES : SCOPE_FILES_ONLY,
+                    FolderTimeMode: FOLDER_TIME_MODIFIED,
                     MaxFilesPerFolder: MaxFilesPerFolder,
                     SortMode: SortMode,
                     Filter: {Mode: "All", Extensions: []},
                     StripOrderPrefix: 0,
-                    HideExtensions: 0
+                    HideExtensions: 0,
+                    SourceId: ResolveFolderSourceId(f.Name, f.Path),
+                    OpenFileMode: "Inherit"
                 })
             }
         }
@@ -356,19 +479,180 @@ LoadSettings(*) {
         if path != "" && !ArrayContainsPath(PinnedPaths, path)
             PinnedPaths.Push(path)
     }
+
+    OpenApps := LoadOpenApps()
+    if OpenAppsConfigNeedsMigration {
+        try {
+            SaveOpenApps()
+            OpenAppsConfigNeedsMigration := false
+        } catch as err {
+            message := "无法把旧版软件列表迁移到简化格式：" err.Message
+            ConfigErrors.Push(message)
+        }
+    }
+    TransferFavorites := LoadTransferFavorites(settingErrors)
+    RecentTargets := LoadPathListSection("RecentTargets", 3)
 }
 
 ; ──── 配置验证与筛选函数 ────
+
+ParseGlobalOpenFileMode(raw) {
+    global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE
+    value := StrLower(Trim(raw))
+    if value = StrLower(OPEN_MODE_SINGLE)
+        return OPEN_MODE_SINGLE
+    if value = StrLower(OPEN_MODE_DOUBLE)
+        return OPEN_MODE_DOUBLE
+    return OPEN_MODE_DOUBLE
+}
+
+IsRecognizedGlobalOpenFileMode(raw) {
+    global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE
+    value := StrLower(Trim(raw))
+    return value = StrLower(OPEN_MODE_DOUBLE)
+        || value = StrLower(OPEN_MODE_SINGLE)
+}
+
+ParseSourceOpenFileMode(raw) {
+    global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
+    value := StrLower(Trim(raw))
+    if value = StrLower(OPEN_MODE_SINGLE)
+        return OPEN_MODE_SINGLE
+    if value = StrLower(OPEN_MODE_DOUBLE)
+        return OPEN_MODE_DOUBLE
+    if value = StrLower(SOURCE_OPEN_MODE_INHERIT)
+        return SOURCE_OPEN_MODE_INHERIT
+    return SOURCE_OPEN_MODE_INHERIT
+}
+
+IsRecognizedSourceOpenFileMode(raw) {
+    global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
+    value := StrLower(Trim(raw))
+    return value = StrLower(OPEN_MODE_DOUBLE)
+        || value = StrLower(OPEN_MODE_SINGLE)
+        || value = StrLower(SOURCE_OPEN_MODE_INHERIT)
+}
+
+IsSafeSourceId(id) {
+    id := Trim(id)
+    return id != "" && !RegExMatch(id, "[,\[\]=`r`n]")
+}
+
+ParseSourceIdOrder(raw) {
+    result := []
+    seen := Map()
+    for part in StrSplit(raw, ",") {
+        id := Trim(part)
+        key := StrLower(id)
+        if !IsSafeSourceId(id) || seen.Has(key)
+            continue
+        seen[key] := true
+        result.Push(id)
+    }
+    return result
+}
+
+ResolveFolderSourceId(name, path) {
+    global ConfigPath
+    folderSection := "Folder:" name
+    sourceId := Trim(IniRead(ConfigPath, folderSection, "SourceId", ""))
+    if IsSafeSourceId(sourceId)
+        return sourceId
+
+    sourceIds := ParseSourceIdOrder(
+        IniRead(ConfigPath, "Sources", "Order", ""))
+    normalizedKey := PathKey(path)
+
+    ; 显示名未改变时优先保持身份，路径修改不会丢失来源设置。
+    for id in sourceIds {
+        section := "Source:" id
+        storedName := Trim(IniRead(ConfigPath, section, "Name", ""))
+        if storedName != "" && StrLower(storedName) = StrLower(name)
+            return id
+    }
+    ; 显示名修改时再用规范化路径恢复身份。
+    for id in sourceIds {
+        section := "Source:" id
+        storedPath := NormalizePath(IniRead(ConfigPath, section, "Path", ""))
+        if storedPath != "" && PathKey(storedPath) = normalizedKey
+            return id
+    }
+
+    ; 旧配置无需立即写回；首次从设置窗口保存时持久化此稳定 ID。
+    return "source-" HashString(StrLower(name) "|" normalizedKey)
+}
+
+ReadFolderOpenFileMode(name, sourceId) {
+    global ConfigPath, SOURCE_OPEN_MODE_INHERIT
+    raw := IniRead(ConfigPath, "Folder:" name, "OpenFileMode", "")
+    if Trim(raw) = ""
+        raw := IsSafeSourceId(sourceId)
+            ? IniRead(ConfigPath, "Source:" sourceId, "OpenFileMode",
+                SOURCE_OPEN_MODE_INHERIT)
+            : SOURCE_OPEN_MODE_INHERIT
+    return ParseSourceOpenFileMode(raw)
+}
+
+MigrateOpenFileModeConfig(folders) {
+    global ConfigPath, OPEN_MODE_DOUBLE
+
+    rawGlobal := IniRead(ConfigPath, "General", "OpenFileMode", "")
+    try configVersion := Integer(
+        IniRead(ConfigPath, "General", "ConfigVersion", "0"))
+    catch
+        configVersion := 0
+    needsMigration := configVersion < 8
+        || !IsRecognizedGlobalOpenFileMode(rawGlobal)
+    entries := []
+    seen := Map()
+    configuredIds := ParseSourceIdOrder(
+        IniRead(ConfigPath, "Sources", "Order", ""))
+
+    for folder in folders {
+        sourceId := MakeUniqueSourceId(
+            ResolveFolderSourceId(folder.Name, folder.Path), seen)
+        rawFolderId := Trim(IniRead(ConfigPath,
+            "Folder:" folder.Name, "SourceId", ""))
+        rawMode := IniRead(ConfigPath, "Folder:" folder.Name,
+            "OpenFileMode", "")
+        if Trim(rawMode) = ""
+            rawMode := IniRead(ConfigPath, "Source:" sourceId,
+                "OpenFileMode", "")
+        storedName := Trim(IniRead(ConfigPath,
+            "Source:" sourceId, "Name", ""))
+        storedPath := NormalizePath(IniRead(ConfigPath,
+            "Source:" sourceId, "Path", ""))
+        if rawFolderId != sourceId
+            || !IsRecognizedSourceOpenFileMode(rawMode)
+            || !ArrayContainsTextInsensitive(configuredIds, sourceId)
+            || storedName != folder.Name
+            || !PathsEqual(storedPath, folder.Path)
+            needsMigration := true
+        entries.Push({
+            Id: sourceId,
+            Name: folder.Name,
+            Path: folder.Path,
+            Mode: ParseSourceOpenFileMode(rawMode)
+        })
+    }
+    if needsMigration
+        AtomicConfigEdit(WriteOpenFileModeSettings.Bind(
+            ParseGlobalOpenFileMode(rawGlobal), entries))
+}
 
 ValidateConfig() {
     global ConfigPath, ConfigErrors, FolderSettings
     global SORT_MODIFIED_DESC, SORT_NAME_ASC
     global MODE_FILES, MODE_LAUNCHER
+    global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
+    global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
 
     errors := []
     tempGlobalFilter := {Mode: "All", Extensions: []}
     tempGlobalMaxFiles := 8
     tempGlobalIncludeSubfolders := false
+    tempGlobalDisplayScope := SCOPE_FILES_ONLY
+    tempGlobalFolderTimeMode := FOLDER_TIME_MODIFIED
     tempGlobalSortMode := SORT_MODIFIED_DESC
 
     ; ── 解析全局排序 ──
@@ -398,20 +682,51 @@ ValidateConfig() {
     tempGlobalMaxFiles := Max(1, Min(tempGlobalMaxFiles, 100))
 
     tempGlobalIncludeSubfolders := IniRead(ConfigPath, "General", "IncludeSubfolders", "0") = "1"
+    rawScope := StrLower(Trim(IniRead(ConfigPath, "General", "DisplayScope", "")))
+    if rawScope = ""
+        tempGlobalDisplayScope := tempGlobalIncludeSubfolders
+            ? SCOPE_RECURSIVE_FILES : SCOPE_FILES_ONLY
+    else if rawScope = StrLower(SCOPE_FILES_ONLY)
+        tempGlobalDisplayScope := SCOPE_FILES_ONLY
+    else if rawScope = StrLower(SCOPE_FILES_AND_FOLDERS)
+        tempGlobalDisplayScope := SCOPE_FILES_AND_FOLDERS
+    else if rawScope = StrLower(SCOPE_RECURSIVE_FILES)
+        tempGlobalDisplayScope := SCOPE_RECURSIVE_FILES
+    else
+        errors.Push("[General] 中 DisplayScope 值无效：" rawScope
+            "。允许的值：FilesOnly, FilesAndFolders, RecursiveFiles。")
+    tempGlobalIncludeSubfolders := tempGlobalDisplayScope = SCOPE_RECURSIVE_FILES
+
+    rawFolderTime := StrLower(Trim(
+        IniRead(ConfigPath, "General", "FolderTimeMode", "DirectoryModified")))
+    if rawFolderTime = StrLower(FOLDER_TIME_MODIFIED)
+        tempGlobalFolderTimeMode := FOLDER_TIME_MODIFIED
+    else if rawFolderTime = StrLower(FOLDER_TIME_LATEST_CONTENT)
+        tempGlobalFolderTimeMode := FOLDER_TIME_LATEST_CONTENT
+    else
+        errors.Push("[General] 中 FolderTimeMode 值无效：" rawFolderTime
+            "。允许的值：DirectoryModified, LatestContent。")
 
     ; ── 解析每个文件夹的独立配置 ──
     resolved := []
+    sourceIdsSeen := Map()
     for f in FolderSettings {
         sectionName := "Folder:" f.Name
+        sourceId := MakeUniqueSourceId(
+            ResolveFolderSourceId(f.Name, f.Path), sourceIdsSeen)
+        folderOpenFileMode := ReadFolderOpenFileMode(f.Name, sourceId)
 
         ; 读取该文件夹的独立配置节
         folderMax := tempGlobalMaxFiles
         folderRecursive := tempGlobalIncludeSubfolders
+        folderDisplayScope := tempGlobalDisplayScope
+        folderTimeMode := tempGlobalFolderTimeMode
         folderFilter := {Mode: tempGlobalFilter.Mode, Extensions: tempGlobalFilter.Extensions}
         folderSortMode := tempGlobalSortMode
         folderMode := MODE_FILES
         folderStripOrderPrefix := 0
         folderHideExtensions := 0
+        legacySubfolderOverride := false
 
         ; 检查是否有独立配置节
         sectionExists := false
@@ -437,6 +752,7 @@ ValidateConfig() {
             if folderMode = MODE_LAUNCHER {
                 ; 为 Launcher 设置默认值，用户显式配置会覆盖
                 folderRecursive := false
+                folderDisplayScope := SCOPE_FILES_ONLY
                 folderMax := 0  ; 0 = 无限
                 folderSortMode := SORT_NAME_ASC
                 folderFilter := {Mode: "Include", Extensions: [".lnk", ".url", ".exe"]}
@@ -466,12 +782,47 @@ ValidateConfig() {
             try {
                 val := IniRead(ConfigPath, sectionName, "IncludeSubfolders", "")
                 if val != "" {
+                    legacySubfolderOverride := true
                     if val = "1"
                         folderRecursive := true
                     else if val = "0"
                         folderRecursive := false
                     else
                         errors.Push("[" sectionName "] 中 IncludeSubfolders 只能为 0 或 1，实际值为：" val "。")
+                }
+            }
+
+            ; DisplayScope 是 v0.7 的权威配置；缺失时迁移旧 IncludeSubfolders 语义。
+            try {
+                val := StrLower(Trim(IniRead(ConfigPath, sectionName, "DisplayScope", "")))
+                if val != "" {
+                    if val = StrLower(SCOPE_FILES_ONLY)
+                        folderDisplayScope := SCOPE_FILES_ONLY
+                    else if val = StrLower(SCOPE_FILES_AND_FOLDERS)
+                        folderDisplayScope := SCOPE_FILES_AND_FOLDERS
+                    else if val = StrLower(SCOPE_RECURSIVE_FILES)
+                        folderDisplayScope := SCOPE_RECURSIVE_FILES
+                    else
+                        errors.Push("[" sectionName "] 中 DisplayScope 值无效：" val "。")
+                } else {
+                    if legacySubfolderOverride
+                        folderDisplayScope := folderRecursive
+                            ? SCOPE_RECURSIVE_FILES : SCOPE_FILES_ONLY
+                }
+                folderRecursive := folderDisplayScope = SCOPE_RECURSIVE_FILES
+            }
+
+            try {
+                val := StrLower(Trim(IniRead(ConfigPath, sectionName, "FolderTimeMode", "")))
+                if val != "" {
+                    if val = StrLower(FOLDER_TIME_MODIFIED)
+                        folderTimeMode := FOLDER_TIME_MODIFIED
+                    else if val = StrLower(FOLDER_TIME_LATEST_CONTENT)
+                        folderTimeMode := FOLDER_TIME_LATEST_CONTENT
+                    else if val = "inherit"
+                        folderTimeMode := tempGlobalFolderTimeMode
+                    else
+                        errors.Push("[" sectionName "] 中 FolderTimeMode 值无效：" val "。")
                 }
             }
 
@@ -564,23 +915,35 @@ ValidateConfig() {
             Path: f.Path,
             Mode: folderMode,
             IncludeSubfolders: folderRecursive,
+            DisplayScope: folderDisplayScope,
+            FolderTimeMode: folderTimeMode,
             MaxFilesPerFolder: folderMax,
             SortMode: folderSortMode,
             Filter: folderFilter,
             StripOrderPrefix: folderStripOrderPrefix,
-            HideExtensions: folderHideExtensions
+            HideExtensions: folderHideExtensions,
+            SourceId: sourceId,
+            OpenFileMode: folderOpenFileMode
         })
     }
 
     ; ── 检查 [Folder:xxx] 节是否对应存在的文件夹 ──
     knownNames := Map()
+    activeSourceIds := Map()
     for f in FolderSettings
         knownNames[f.Name] := true
+    for folder in resolved
+        activeSourceIds[StrLower(folder.SourceId)] := true
     try {
         Loop Read, ConfigPath {
             if RegExMatch(A_LoopReadLine, "i)^\[Folder:(.+)\]$", &m) {
                 folderName := m[1]
                 if !knownNames.Has(folderName) {
+                    legacySourceId := Trim(IniRead(ConfigPath,
+                        "Folder:" folderName, "SourceId", ""))
+                    if IsSafeSourceId(legacySourceId)
+                        && activeSourceIds.Has(StrLower(legacySourceId))
+                        continue
                     errors.Push("配置节 [Folder:" folderName "] 引用了不存在的文件夹名称，[Folders] 中未定义。")
                 }
             }
@@ -594,6 +957,18 @@ ValidateConfig() {
 
     ; 验证通过，返回设置
     return {Valid: true, Settings: resolved}
+}
+
+MakeUniqueSourceId(sourceId, seen) {
+    base := sourceId
+    candidate := base
+    suffix := 2
+    while seen.Has(StrLower(candidate)) {
+        candidate := base "-" suffix
+        suffix += 1
+    }
+    seen[StrLower(candidate)] := true
+    return candidate
 }
 
 ParseFilterSettings(mode, rawExtensions, context) {
@@ -653,6 +1028,588 @@ NormalizeExtensionList(raw) {
     return result
 }
 
+GetFileExtensionType(path) {
+    global NO_EXTENSION_TOKEN
+    SplitPath(path, &name, , &extension)
+    if extension = ""
+        return NO_EXTENSION_TOKEN
+    return "." StrLower(extension)
+}
+
+LoadOpenApps() {
+    global ConfigPath, OpenAppsConfigNeedsMigration
+    apps := []
+    seenIds := Map()
+    seenPaths := Map()
+    legacyFormat := OpenAppsConfigUsesLegacyFormat(ConfigPath)
+    if legacyFormat
+        OpenAppsConfigNeedsMigration := true
+    sourceIds := ReadOpenAppIdsFrom(ConfigPath)
+    reservedIds := Map()
+    for sourceId in sourceIds {
+        if !IsGuidOpenAppId(sourceId)
+            reservedIds[StrLower(sourceId)] := true
+    }
+    for sourceId in sourceIds {
+        section := "OpenApp:" sourceId
+        programPath := NormalizePath(IniRead(ConfigPath, section, "Path", ""))
+        if programPath = "" || !IsExecutablePath(programPath)
+            continue
+        id := sourceId
+        if legacyFormat && IsGuidOpenAppId(id) {
+            id := NewOpenAppIdForApps(programPath, apps, reservedIds)
+            OpenAppsConfigNeedsMigration := true
+        }
+        if seenIds.Has(StrLower(id))
+            continue
+        programPathKey := PathKey(programPath)
+        if seenPaths.Has(programPathKey)
+            continue
+        seenIds[StrLower(id)] := true
+        seenPaths[programPathKey] := true
+        name := Trim(IniRead(ConfigPath, section, "Name", ""))
+        if name = ""
+            name := GetExecutableDisplayName(programPath)
+        extensions := NormalizeOpenAppExtensions(
+            IniRead(ConfigPath, section, "Extensions", ""))
+        enabled := IniRead(ConfigPath, section, "Enabled", "1") != "0"
+        icon := NormalizePath(IniRead(ConfigPath, section, "Icon", programPath))
+        if icon = ""
+            icon := programPath
+        apps.Push({
+            Id: id,
+            Path: programPath,
+            Name: name,
+            Icon: icon,
+            Extensions: extensions,
+            Enabled: enabled
+        })
+    }
+    return apps
+}
+
+OpenAppsConfigUsesLegacyFormat(path) {
+    legacyEntryFound := false
+    for entry in ReadIniSectionFrom(path, "OpenApps") {
+        if StrLower(entry.Key) = "order"
+            return false
+        if RegExMatch(entry.Key, "i)^App\d+$")
+            legacyEntryFound := true
+    }
+    return legacyEntryFound
+}
+
+ReadOpenAppIdsFrom(path) {
+    legacyIds := []
+    orderFound := false
+    orderValue := ""
+    for entry in ReadIniSectionFrom(path, "OpenApps") {
+        if StrLower(entry.Key) = "order" {
+            orderFound := true
+            orderValue := entry.Value
+            continue
+        }
+        ; v0.7 早期格式：App001=<UUID 或自定义 ID>。
+        if RegExMatch(entry.Key, "i)^App\d+$") {
+            id := Trim(entry.Value)
+            if (IsSafeOpenAppId(id)
+                && !ArrayContainsTextInsensitive(legacyIds, id))
+                legacyIds.Push(id)
+        }
+    }
+    ; 只要存在 Order 键（即使为空），它就是唯一排序来源。
+    return orderFound ? ParseOpenAppOrder(orderValue) : legacyIds
+}
+
+ParseOpenAppOrder(raw) {
+    ids := []
+    seen := Map()
+    for part in StrSplit(raw, ",") {
+        id := Trim(part)
+        key := StrLower(id)
+        if !IsSafeOpenAppId(id) || seen.Has(key)
+            continue
+        seen[key] := true
+        ids.Push(id)
+    }
+    return ids
+}
+
+IsSafeOpenAppId(id) {
+    id := Trim(id)
+    return id != "" && !RegExMatch(id, "[,\[\]=`r`n]")
+}
+
+IsGuidOpenAppId(id) {
+    return RegExMatch(id,
+        "i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+}
+
+NormalizeOpenAppExtensions(raw) {
+    global NO_EXTENSION_TOKEN
+    result := []
+    seen := Map()
+    for part in StrSplit(raw, ",", " `t") {
+        value := StrLower(Trim(part))
+        if value = ""
+            continue
+        if value = StrLower(NO_EXTENSION_TOKEN) || value = "none"
+            value := NO_EXTENSION_TOKEN
+        else
+            value := SubStr(value, 1, 1) = "." ? value : "." value
+        if !seen.Has(value) {
+            seen[value] := true
+            result.Push(value)
+        }
+    }
+    return result
+}
+
+GetApplicableOpenApps(filePath) {
+    global OpenApps
+    extensionType := GetFileExtensionType(filePath)
+    exact := []
+    generic := []
+    for app in OpenApps {
+        if !app.Enabled
+            continue
+        if !app.Extensions.Length {
+            generic.Push(app)
+            continue
+        }
+        for extension in app.Extensions {
+            if StrLower(extension) = StrLower(extensionType) {
+                exact.Push(app)
+                break
+            }
+        }
+    }
+    for app in generic
+        exact.Push(app)
+    return exact
+}
+
+FindOpenAppById(id) {
+    global OpenApps
+    for app in OpenApps {
+        if StrLower(app.Id) = StrLower(id)
+            return app
+    }
+    return 0
+}
+
+FindOpenAppByPath(path) {
+    global OpenApps
+    for app in OpenApps {
+        if PathsEqual(app.Path, path)
+            return app
+    }
+    return 0
+}
+
+OpenWithConfiguredApp(appId, filePath, *) {
+    app := FindOpenAppById(appId)
+    if !IsObject(app)
+        return
+    if !IsExistingExecutable(app.Path) {
+        HandleMissingOpenApp(app)
+        return
+    }
+    if !ShellLaunchExecutable(app.Path, filePath) {
+        ShowPanelMsgBox("无法使用 " app.Name " 打开文件。",
+            "打开失败", "Iconx")
+        return
+    }
+    SetUserStatus("已用 " app.Name " 打开")
+}
+
+AddConfiguredOpenApp(*) {
+    global LastOpenProgramDir, OpenApps
+    initialDir := DirExist(LastOpenProgramDir)
+        ? LastOpenProgramDir : GetProgramFilesDirectory()
+    selected := SelectPanelFile("3", initialDir,
+        "添加用于打开文件的软件", "应用程序 (*.exe)")
+    if selected = ""
+        return
+    selected := NormalizePath(selected)
+    if !IsExistingExecutable(selected) {
+        ShowPanelMsgBox("v0.7 仅支持选择现有的 .exe 应用程序。",
+            "添加软件", "Icon!")
+        return
+    }
+    existing := FindOpenAppByPath(selected)
+    if IsObject(existing) {
+        SetUserStatus(existing.Name " 已在软件列表中")
+        return
+    }
+    app := {
+        Id: NewOpenAppId(selected),
+        Path: selected,
+        Name: GetExecutableDisplayName(selected),
+        Icon: selected,
+        Extensions: [],
+        Enabled: true
+    }
+    OpenApps.Push(app)
+    SplitPath(selected, , &LastOpenProgramDir)
+    try {
+        SaveOpenApps()
+        SetUserStatus("已添加 " app.Name "；扩展名留空，适用于所有普通文件")
+        OpenConfigFile()
+    } catch as err {
+        OpenApps.Pop()
+        ShowPanelMsgBox("无法保存软件配置：`n" err.Message,
+            "添加软件失败", "Iconx")
+    }
+}
+
+ChooseOtherProgramForFile(filePath, *) {
+    global LastOpenProgramDir, OpenApps, LastOpenAppUndoState
+    extensionType := GetFileExtensionType(filePath)
+    extensionLabel := extensionType = "<none>" ? "无扩展名" : extensionType
+    initialDir := DirExist(LastOpenProgramDir)
+        ? LastOpenProgramDir : GetProgramFilesDirectory()
+
+    selected := SelectPanelFile("3", initialDir,
+        "选择用于打开 " extensionLabel " 文件的程序", "应用程序 (*.exe)")
+    if selected = ""
+        return
+    selected := NormalizePath(selected)
+    if !IsExistingExecutable(selected) {
+        ShowPanelMsgBox("v0.7 仅支持选择现有的 .exe 应用程序。",
+            "无法添加程序", "Icon!")
+        return
+    }
+    if !ShellLaunchExecutable(selected, filePath) {
+        ShowPanelMsgBox("无法使用该程序打开文件，未保存到软件列表",
+            "打开失败", "Iconx")
+        return
+    }
+
+    previousState := CloneOpenApps(OpenApps)
+    app := FindOpenAppByPath(selected)
+    changed := false
+    if !IsObject(app) {
+        app := {
+            Id: NewOpenAppId(selected),
+            Path: selected,
+            Name: GetExecutableDisplayName(selected),
+            Icon: selected,
+            Extensions: [extensionType],
+            Enabled: true
+        }
+        OpenApps.Push(app)
+        changed := true
+    } else if app.Extensions.Length {
+        if !ArrayContainsTextInsensitive(app.Extensions, extensionType) {
+            app.Extensions.Push(extensionType)
+            changed := true
+        }
+    }
+    SplitPath(selected, , &selectedDir)
+    LastOpenProgramDir := NormalizePath(selectedDir)
+    if changed {
+        try SaveOpenApps()
+        catch as err {
+            OpenApps := previousState
+            ShowPanelMsgBox("程序已启动，但无法安全保存软件列表：`n"
+                err.Message, "配置保存失败", "Iconx")
+            return
+        }
+        LastOpenAppUndoState := previousState
+        SetOpenAppUndoStatus("已用 " app.Name " 打开，并添加为 " extensionLabel
+            " 文件的可用程序    撤销")
+    } else {
+        try SaveOpenApps()
+        SetUserStatus("已用 " app.Name " 打开")
+    }
+}
+
+HandleMissingOpenApp(app) {
+    answer := ShowPanelMsgBox("找不到 " app.Name
+        "`n`n“是”：重新选择程序`n“否”：从软件列表移除",
+        "程序不可用", "YesNoCancel Icon!")
+    if answer = "Yes"
+        ReselectMissingOpenApp(app)
+    else if answer = "No"
+        RemoveOpenAppById(app.Id)
+}
+
+ReselectMissingOpenApp(app) {
+    global LastOpenProgramDir
+    initialDir := DirExist(LastOpenProgramDir)
+        ? LastOpenProgramDir : GetProgramFilesDirectory()
+    selected := SelectPanelFile("3", initialDir,
+        "重新选择 " app.Name, "应用程序 (*.exe)")
+    if selected = ""
+        return
+    selected := NormalizePath(selected)
+    if !IsExistingExecutable(selected) {
+        ShowPanelMsgBox("请选择现有的 .exe 应用程序。",
+            "重新选择程序", "Icon!")
+        return
+    }
+    duplicate := FindOpenAppByPath(selected)
+    if IsObject(duplicate) && StrLower(duplicate.Id) != StrLower(app.Id) {
+        if !app.Extensions.Length
+            duplicate.Extensions := []
+        else {
+            for extension in app.Extensions {
+                if duplicate.Extensions.Length
+                    && !ArrayContainsTextInsensitive(duplicate.Extensions, extension)
+                    duplicate.Extensions.Push(extension)
+            }
+        }
+        RemoveOpenAppById(app.Id, false)
+    } else {
+        app.Path := selected
+        app.Icon := selected
+        if app.Name = ""
+            app.Name := GetExecutableDisplayName(selected)
+    }
+    SplitPath(selected, , &LastOpenProgramDir)
+    SaveOpenApps()
+    SetUserStatus("已更新 " app.Name " 的程序路径")
+}
+
+RemoveOpenAppById(id, save := true) {
+    global OpenApps
+    for index, app in OpenApps {
+        if StrLower(app.Id) = StrLower(id) {
+            OpenApps.RemoveAt(index)
+            if save
+                SaveOpenApps()
+            SetUserStatus("已从软件列表移除 " app.Name)
+            return true
+        }
+    }
+    return false
+}
+
+CloneOpenApps(apps) {
+    result := []
+    for app in apps
+        result.Push({
+            Id: app.Id, Path: app.Path, Name: app.Name, Icon: app.Icon,
+            Extensions: app.Extensions.Clone(), Enabled: app.Enabled
+        })
+    return result
+}
+
+ArrayContainsTextInsensitive(values, target) {
+    for value in values {
+        if StrLower(value) = StrLower(target)
+            return true
+    }
+    return false
+}
+
+HandleStatusAction(*) {
+    global LastOpenAppUndoState, OpenApps, CurrentStatusAction
+    if IsObject(CurrentStatusAction) {
+        action := CurrentStatusAction
+        CurrentStatusAction := 0
+        action.Call()
+        return
+    }
+    if !IsObject(LastOpenAppUndoState)
+        return
+    OpenApps := CloneOpenApps(LastOpenAppUndoState)
+    LastOpenAppUndoState := 0
+    try {
+        SaveOpenApps()
+        SetUserStatus("已撤销软件列表更改")
+    } catch as err {
+        ShowPanelMsgBox("无法撤销软件列表更改：`n" err.Message,
+            "撤销失败", "Iconx")
+    }
+}
+
+SetOpenAppUndoStatus(text) {
+    global StatusText, StatusKind, CurrentStatusAction
+    CurrentStatusAction := 0
+    if IsObject(StatusText) {
+        StatusKind := "user"
+        StatusText.Text := text
+    }
+}
+
+GetProgramFilesDirectory() {
+    path := EnvGet("ProgramFiles")
+    return DirExist(path) ? path : "C:\Program Files"
+}
+
+NewOpenAppId(executablePath) {
+    global OpenApps
+    return NewOpenAppIdForApps(executablePath, OpenApps)
+}
+
+NewOpenAppIdForApps(executablePath, apps, reservedIds := 0) {
+    base := OpenAppIdBase(executablePath)
+    candidate := base
+    suffix := 2
+    while (OpenAppArrayHasId(apps, candidate)
+        || (IsObject(reservedIds) && reservedIds.Has(StrLower(candidate)))) {
+        candidate := base "-" suffix
+        suffix += 1
+    }
+    return candidate
+}
+
+OpenAppArrayHasId(apps, id) {
+    for app in apps {
+        if StrLower(app.Id) = StrLower(id)
+            return true
+    }
+    return false
+}
+
+OpenAppIdBase(executablePath) {
+    SplitPath(executablePath, , , , &nameNoExt)
+    base := StrLower(Trim(nameNoExt))
+    base := RegExReplace(base, "[^a-z0-9_-]+", "-")
+    base := Trim(base, "-_")
+    return base != "" ? base : "app"
+}
+
+GetExecutableDisplayName(path) {
+    name := GetExecutableProductName(path)
+    if name != ""
+        return name
+    SplitPath(path, &fileName, , , &nameNoExt)
+    return nameNoExt != "" ? nameNoExt : fileName
+}
+
+GetExecutableProductName(path) {
+    ignored := 0
+    size := DllCall("version\GetFileVersionInfoSizeW", "wstr", path,
+        "uint*", &ignored, "uint")
+    if !size
+        return ""
+    data := Buffer(size, 0)
+    if !DllCall("version\GetFileVersionInfoW", "wstr", path,
+        "uint", 0, "uint", size, "ptr", data.Ptr, "int")
+        return ""
+    translation := 0
+    translationLength := 0
+    queries := []
+    if DllCall("version\VerQueryValueW", "ptr", data.Ptr,
+        "wstr", "\VarFileInfo\Translation", "ptr*", &translation,
+        "uint*", &translationLength, "int") && translationLength >= 4 {
+        language := NumGet(translation, 0, "ushort")
+        codePage := NumGet(translation, 2, "ushort")
+        queries.Push(Format("\StringFileInfo\{:04X}{:04X}\ProductName",
+            language, codePage))
+    }
+    queries.Push("\StringFileInfo\040904B0\ProductName")
+    for query in queries {
+        valuePtr := 0
+        valueLength := 0
+        if DllCall("version\VerQueryValueW", "ptr", data.Ptr,
+            "wstr", query, "ptr*", &valuePtr, "uint*", &valueLength, "int")
+            && valuePtr && valueLength {
+            value := Trim(StrGet(valuePtr))
+            if value != ""
+                return value
+        }
+    }
+    return ""
+}
+
+ShellLaunchExecutable(executablePath, targetPath) {
+    global Panel
+    executablePath := NormalizePath(executablePath)
+    targetPath := NormalizePath(targetPath)
+    if !IsExistingExecutable(executablePath)
+        return false
+    parameters := QuoteWindowsArgument(targetPath)
+    infoSize := A_PtrSize = 8 ? 112 : 60
+    info := Buffer(infoSize, 0)
+    NumPut("uint", infoSize, info, 0)
+    NumPut("uint", 0x440, info, 4) ; SEE_MASK_NOCLOSEPROCESS | FLAG_NO_UI
+    NumPut("ptr", IsObject(Panel) ? Panel.Hwnd : 0, info, 8)
+    NumPut("ptr", StrPtr(executablePath), info, A_PtrSize = 8 ? 24 : 16)
+    NumPut("ptr", StrPtr(parameters), info, A_PtrSize = 8 ? 32 : 20)
+    NumPut("int", 1, info, A_PtrSize = 8 ? 48 : 28)
+    if !DllCall("shell32\ShellExecuteExW", "ptr", info.Ptr, "int")
+        return false
+    processHandle := NumGet(info, A_PtrSize = 8 ? 104 : 56, "ptr")
+    if processHandle
+        DllCall("kernel32\CloseHandle", "ptr", processHandle)
+    return true
+}
+
+IsExecutablePath(path) {
+    SplitPath(path, , , &extension)
+    return StrLower(extension) = "exe"
+}
+
+IsExistingExecutable(path) {
+    path := NormalizePath(path)
+    attributes := FileExist(path)
+    return path != "" && attributes != "" && !InStr(attributes, "D")
+        && IsExecutablePath(path)
+}
+
+QuoteWindowsArgument(value) {
+    ; CommandLineToArgvW-compatible quoting for one argument. lpFile and
+    ; lpParameters remain separate SHELLEXECUTEINFO fields.
+    result := '"'
+    backslashes := 0
+    for char in StrSplit(value) {
+        if char = "\" {
+            backslashes += 1
+            continue
+        }
+        if char = '"' {
+            result .= RepeatText("\", backslashes * 2 + 1) '"'
+            backslashes := 0
+            continue
+        }
+        result .= RepeatText("\", backslashes) char
+        backslashes := 0
+    }
+    result .= RepeatText("\", backslashes * 2) '"'
+    return result
+}
+
+RepeatText(text, count) {
+    result := ""
+    Loop count
+        result .= text
+    return result
+}
+
+SaveOpenApps() {
+    AtomicConfigEdit(WriteOpenAppsConfig)
+}
+
+WriteOpenAppsConfig(tempPath) {
+    global OpenApps, LastOpenProgramDir
+    for id in ReadOpenAppIdsFrom(tempPath)
+        try IniDelete(tempPath, "OpenApp:" id)
+    try IniDelete(tempPath, "OpenApps")
+    ids := []
+    for app in OpenApps
+        ids.Push(app.Id)
+    IniWrite(JoinArray(ids, ","), tempPath, "OpenApps", "Order")
+
+    for app in OpenApps {
+        section := "OpenApp:" app.Id
+        IniWrite(app.Path, tempPath, section, "Path")
+        if app.Name != GetExecutableDisplayName(app.Path)
+            IniWrite(app.Name, tempPath, section, "Name")
+        if !PathsEqual(app.Icon, app.Path)
+            IniWrite(app.Icon, tempPath, section, "Icon")
+        if app.Extensions.Length
+            IniWrite(JoinArray(app.Extensions, ","), tempPath, section, "Extensions")
+        if !app.Enabled
+            IniWrite("0", tempPath, section, "Enabled")
+    }
+    IniWrite(LastOpenProgramDir, tempPath, "General", "LastOpenProgramDir")
+    IniWrite("8", tempPath, "General", "ConfigVersion")
+}
+
 ShouldIncludeFile(filename, filter) {
     ; filter: {Mode: "All"|"Include"|"Exclude", Extensions: [...]}
     if filter.Mode = "All"
@@ -705,8 +1662,12 @@ ShowConfigErrorDialog() {
 
 ReadIniSection(sectionName) {
     global ConfigPath
+    return ReadIniSectionFrom(ConfigPath, sectionName)
+}
+
+ReadIniSectionFrom(path, sectionName) {
     result := []
-    try raw := IniRead(ConfigPath, sectionName)
+    try raw := IniRead(path, sectionName)
     catch
         return result
 
@@ -722,10 +1683,99 @@ ReadIniSection(sectionName) {
     return result
 }
 
+LoadPathListSection(sectionName, limit := 0) {
+    result := []
+    for entry in ReadIniSection(sectionName) {
+        if !RegExMatch(entry.Key, "i)^Path\d+$")
+            continue
+        path := NormalizePath(entry.Value)
+        if path != "" && !ArrayContainsPath(result, path) {
+            result.Push(path)
+            if limit > 0 && result.Length >= limit
+                break
+        }
+    }
+    return result
+}
+
+LoadTransferFavorites(settingErrors) {
+    global ConfigPath
+
+    configured := LoadPathListSection("TransferFavorites", 5)
+    initialized := IniRead(ConfigPath, "General",
+        "TransferFavoritesInitialized", "0") = "1"
+    if initialized
+        return configured
+
+    ; One-time migration for v0.7 configs that injected Desktop/Downloads at
+    ; menu-build time. Persist them now, while preserving existing custom paths.
+    migrated := GetDefaultTransferFavoritePaths()
+    for path in configured {
+        if migrated.Length >= 5
+            break
+        if !ArrayContainsPath(migrated, path)
+            migrated.Push(path)
+    }
+    try AtomicConfigEdit(WriteInitialTransferFavoritesConfig.Bind(migrated))
+    catch as err
+        settingErrors.Push("无法迁移常用位置配置：" err.Message)
+    return migrated
+}
+
+GetDefaultTransferFavoritePaths() {
+    result := []
+    desktop := GetKnownFolderPath("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}")
+    downloads := GetKnownFolderPath("{374DE290-123F-4565-9164-39C4925E467B}")
+    if desktop != ""
+        result.Push(desktop)
+    if downloads != "" && !ArrayContainsPath(result, downloads)
+        result.Push(downloads)
+    return result
+}
+
+WriteInitialTransferFavoritesConfig(favorites, tempPath) {
+    try IniDelete(tempPath, "TransferFavorites")
+    for index, path in favorites
+        IniWrite(path, tempPath, "TransferFavorites",
+            "Path" Format("{:03}", index))
+    IniWrite("1", tempPath, "General", "TransferFavoritesInitialized")
+    IniWrite("8", tempPath, "General", "ConfigVersion")
+}
+
+AtomicConfigEdit(editor) {
+    global ConfigPath
+    tempPath := ConfigPath ".tmp-"
+        . DllCall("kernel32\GetCurrentProcessId", "uint")
+        . "-" A_TickCount
+    try FileDelete(tempPath)
+    try {
+        if FileExist(ConfigPath)
+            FileCopy(ConfigPath, tempPath, 1)
+        else
+            FileAppend("", tempPath, "UTF-16")
+        editor.Call(tempPath)
+        ; ReplaceFileW is atomic on the same volume and preserves metadata.
+        replaced := DllCall("kernel32\ReplaceFileW", "wstr", ConfigPath,
+            "wstr", tempPath, "ptr", 0, "uint", 0x2,
+            "ptr", 0, "ptr", 0, "int")
+        if !replaced {
+            ; New configurations may not have a destination yet. MoveFileExW
+            ; remains a same-volume replace and requests write-through.
+            if !DllCall("kernel32\MoveFileExW", "wstr", tempPath,
+                "wstr", ConfigPath, "uint", 0x9, "int")
+                throw OSError(A_LastError, "无法原子替换配置文件")
+        }
+    } catch {
+        try FileDelete(tempPath)
+        throw
+    }
+}
+
 NormalizePath(path) {
     path := Trim(path, " `t`r`n`"")
     if path = ""
         return ""
+    path := StrReplace(path, "/", "\")
 
     required := DllCall("kernel32\ExpandEnvironmentStringsW", "str", path, "ptr", 0, "uint", 0, "uint")
     if required {
@@ -736,16 +1786,56 @@ NormalizePath(path) {
 
     if !RegExMatch(path, "i)^(?:[A-Z]:\\|\\\\)")
         path := A_ScriptDir "\" path
-    if RegExMatch(path, "i)^[A-Z]:\\$")
+    required := DllCall("kernel32\GetFullPathNameW", "wstr", path,
+        "uint", 0, "ptr", 0, "ptr", 0, "uint")
+    if required {
+        full := Buffer((required + 1) * 2, 0)
+        if DllCall("kernel32\GetFullPathNameW", "wstr", path,
+            "uint", required + 1, "ptr", full.Ptr, "ptr", 0, "uint")
+            path := StrGet(full)
+    }
+    if IsPathRoot(path)
         return path
     return RTrim(path, "\")
+}
+
+IsPathRoot(path) {
+    return RegExMatch(path, "i)^(?:[A-Z]:\\|\\\\[^\\]+\\[^\\]+\\?)$")
+}
+
+PathKey(path) {
+    path := NormalizePath(path)
+    if SubStr(path, 1, 8) = "\\?\UNC\"
+        path := "\\" SubStr(path, 9)
+    else if SubStr(path, 1, 4) = "\\?\"
+        path := SubStr(path, 5)
+    if !IsPathRoot(path)
+        path := RTrim(path, "\")
+    return StrLower(path)
+}
+
+PathsEqual(left, right) {
+    return PathKey(left) = PathKey(right)
+}
+
+GetParentPath(path) {
+    path := NormalizePath(path)
+    SplitPath(path, , &parent)
+    return NormalizePath(parent)
+}
+
+IsSameOrDescendantPath(candidate, ancestor) {
+    candidateKey := PathKey(candidate)
+    ancestorKey := RTrim(PathKey(ancestor), "\")
+    return candidateKey = ancestorKey
+        || SubStr(candidateKey, 1, StrLen(ancestorKey) + 1) = ancestorKey "\"
 }
 
 BuildPanel() {
     global Panel, FileView, RecentLabel, RecentView
     global ViewButton, RecentButton, WindowModeButton, StatusText
 
-    Panel := Gui("+Resize +MinSize620x380", "PopDrop")
+    Panel := Gui("+Resize +MinSize620x380", "PopDrop v0.7")
     Panel.MarginX := 12
     Panel.MarginY := 10
     Panel.SetFont("s9", "Microsoft YaHei UI")
@@ -765,6 +1855,7 @@ BuildPanel() {
     ; Multi-select is the native ListView default. In icon view this enables
     ; Ctrl-click, Shift range selection and marquee selection on blank space.
     FileView := Panel.AddListView("xm y+10 w716 h468 Icon +0x100", ["文件", "修改时间"])
+    FileView.OnEvent("Click", FileViewClick)
     FileView.OnEvent("DoubleClick", OpenFileViewItem)
     FileView.OnEvent("ContextMenu", FileViewContextMenu)
     FileView.OnEvent("ItemSelect", FileViewItemSelect)
@@ -776,11 +1867,13 @@ BuildPanel() {
     RecentLabel := Panel.AddText("x740 y50 w220 h22 +0x200", "最近打开")
     RecentLabel.SetFont("s10 Bold")
     RecentView := Panel.AddListView("x740 y76 w220 h442 Report -Hdr -Multi", ["文件"])
+    RecentView.OnEvent("Click", FileViewClick)
     RecentView.OnEvent("DoubleClick", OpenRecentItem)
     RecentView.OnEvent("ContextMenu", RecentContextMenu)
     RecentView.OnEvent("ItemSelect", RecentItemSelect)
 
-    StatusText := Panel.AddText("xm y+8 w716 h22 +0x200", "就绪")
+    StatusText := Panel.AddText("xm y+8 w716 h22 +0x200 +0x100", "就绪")
+    StatusText.OnEvent("Click", HandleStatusAction)
     Panel.OnEvent("Close", HandlePanelClose)
     Panel.OnEvent("Escape", HandlePanelClose)
     Panel.OnEvent("Size", ResizePanel)
@@ -826,8 +1919,10 @@ PanelActivationChanged(wParam, lParam, msg, hwnd) {
     activationState := wParam & 0xFFFF
 
     ; WA_INACTIVE = 0
-    if activationState = 0
+    if activationState = 0 {
+        CancelFilePointerGesture()
         ScheduleAutoHideCheck(150)
+    }
 }
 
 ScheduleAutoHideCheck(delayMs := 150) {
@@ -938,10 +2033,12 @@ BuildTrayMenu() {
     A_TrayMenu.Add("显示/隐藏面板 (" ActiveHotkey ")", TogglePanel)
     A_TrayMenu.Add("刷新并显示", ShowAndRefresh)
     A_TrayMenu.Add()
-    A_TrayMenu.Add("打开配置", OpenConfig)
+    A_TrayMenu.Add("添加打开软件…", AddConfiguredOpenApp)
+    A_TrayMenu.Add("文件打开设置…", OpenConfig)
+    A_TrayMenu.Add("高级编辑 config.ini", OpenConfigFile)
     A_TrayMenu.Add("退出", (*) => ExitApp())
     A_TrayMenu.Default := "显示/隐藏面板 (" ActiveHotkey ")"
-    A_IconTip := "PopDrop"
+    A_IconTip := "PopDrop v0.7"
 }
 
 InstallHotkey(newHotkey) {
@@ -1038,6 +2135,7 @@ RefreshPanel(*) {
 
 HidePanel(*) {
     global Panel, PanelVisible
+    CancelFilePointerGesture()
     CancelAutoHideCheck()
     Panel.Hide()
     PanelVisible := false
@@ -1287,11 +2385,16 @@ MeasureListViewText(text, hdc) {
 
 PopulatePanel() {
     global FileView, ItemPaths, ItemLabels, ItemFolderPaths
+    global ItemKinds, ItemOpenContexts
     global PinnedPaths, FolderSettings, StatusText
+    global IncludeSubfolders, MaxFilesPerFolder, SortMode
     global ThumbnailSize, ThumbnailImageList, SelectedFilePaths, LastValidFolderSettings, ConfigErrors
     global CurrentScanResult, ScanResultLoaded, StatusKind
     global ConfigErrorsShown, MODE_FILES, GroupFolderPaths
+    global SCOPE_FILES_ONLY, SCOPE_RECURSIVE_FILES, FOLDER_TIME_MODIFIED
+    global PendingFileOperationRefresh, PendingRefresh
 
+    CancelFilePointerGesture()
     SelectedFilePaths := []
     FileView.Opt("-Redraw")
     FileView.Delete()
@@ -1311,6 +2414,8 @@ PopulatePanel() {
     ItemPaths := Map()
     ItemLabels := Map()
     ItemFolderPaths := Map()
+    ItemKinds := Map()
+    ItemOpenContexts := Map()
     GroupFolderPaths := Map()
     displayedCount := 0
     unavailableCount := 0
@@ -1325,6 +2430,8 @@ PopulatePanel() {
                 label .= "  [项目不存在]"
             row := AddFileTile(path, label, "", groupId)
             ItemPaths[row] := path
+            ItemKinds[row] := DirExist(path) ? "Folder" : "File"
+            ItemOpenContexts[row] := {Area: "Pinned"}
             displayedCount += 1
         }
         groupId += 1
@@ -1342,11 +2449,15 @@ PopulatePanel() {
                 Path: f.Path,
                 Mode: MODE_FILES,
                 IncludeSubfolders: IncludeSubfolders,
+                DisplayScope: IncludeSubfolders ? SCOPE_RECURSIVE_FILES : SCOPE_FILES_ONLY,
+                FolderTimeMode: FOLDER_TIME_MODIFIED,
                 MaxFilesPerFolder: MaxFilesPerFolder,
                 SortMode: SortMode,
                 Filter: {Mode: "All", Extensions: []},
                 StripOrderPrefix: 0,
-                HideExtensions: 0
+                HideExtensions: 0,
+                SourceId: ResolveFolderSourceId(f.Name, f.Path),
+                OpenFileMode: "Inherit"
             })
         }
     }
@@ -1370,6 +2481,11 @@ PopulatePanel() {
             row := AddPlaceholderTile("目录不可用", groupId)
             ItemPaths[row] := folder.Path
             ItemFolderPaths[row] := folder.Path
+            ItemKinds[row] := "Folder"
+            ItemOpenContexts[row] := {
+                Area: "Source",
+                SourceId: folder.SourceId
+            }
             unavailableCount += 1
             groupId += 1
             continue
@@ -1381,15 +2497,28 @@ PopulatePanel() {
                 row := AddPlaceholderTile("暂无文件", groupId)
             ItemPaths[row] := folder.Path
             ItemFolderPaths[row] := folder.Path
+            ItemKinds[row] := "Folder"
+            ItemOpenContexts[row] := {
+                Area: "Source",
+                SourceId: folder.SourceId
+            }
             groupId += 1
             continue
         }
         for file in files {
             displayName := GetDisplayName(file.Name, folder)
-            modifiedText := FormatTime(file.Modified, "yyyy-MM-dd HH:mm")
+            modifiedText := file.Modified = ""
+                ? "" : FormatTime(file.Modified, "yyyy-MM-dd HH:mm")
+            if file.IsDirectory && file.TimeKind = "Content"
+                modifiedText := "内容更新于 " modifiedText
             row := AddFileTile(file.Path, displayName, modifiedText, groupId)
             ItemPaths[row] := file.Path
             ItemFolderPaths[row] := folder.Path
+            ItemKinds[row] := file.IsDirectory ? "Folder" : "File"
+            ItemOpenContexts[row] := {
+                Area: "Source",
+                SourceId: folder.SourceId
+            }
             displayedCount += 1
         }
         groupId += 1
@@ -1402,7 +2531,7 @@ PopulatePanel() {
 
     ApplyViewMode()
     FileView.Opt("+Redraw")
-    status := "共显示 " displayedCount " 个文件"
+    status := "共显示 " displayedCount " 个项目"
     if unavailableCount
         status .= "；" unavailableCount " 个目录不可用"
     if ConfigErrors.Length
@@ -1415,6 +2544,9 @@ PopulatePanel() {
     ; 在 GUI 完全更新后显示错误对话框
     if ConfigErrors.Length
         SetTimer(ShowConfigErrorDialog, -100)
+
+    if PendingFileOperationRefresh && !PendingRefresh
+        ApplyPendingViewRestore()
 }
 
 InsertListGroup(groupId, header) {
@@ -1579,36 +2711,100 @@ GetWindowsRecentFiles(limit) {
     return results
 }
 
-GetSortedFiles(folderPath, limit, recursive, sortMode, filter?) {
+GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode) {
+    global SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
+    global FOLDER_TIME_LATEST_CONTENT
     files := []
-    try {
-        mode := recursive ? "FR" : "F"
-        Loop Files, folderPath "\*", mode {
-            if IsSet(filter) && !ShouldIncludeFile(A_LoopFileName, filter)
-                continue
-            candidate := {
-                Path: A_LoopFileFullPath,
-                Name: A_LoopFileName,
-                Modified: A_LoopFileTimeModified
-            }
-            if limit > 0 {
-                ; 有界模式：保持排序的候选列表，超过时移除最不合适的
-                insertAt := 1
-                while insertAt <= files.Length
-                    && CompareFiles(candidate, files[insertAt], sortMode) > 0
-                    insertAt += 1
-                files.InsertAt(insertAt, candidate)
-                if files.Length > limit
-                    files.Pop()
-            } else {
-                files.Push(candidate)
+    stack := [{Path: folderPath, Root: true}]
+    while stack.Length {
+        current := stack.Pop()
+        try {
+            Loop Files, current.Path "\*", "FD" {
+                attributes := A_LoopFileAttrib
+                isDirectory := InStr(attributes, "D") != 0
+                if isDirectory {
+                    ; Reparse points include symlinks and junctions. Never
+                    ; recursively enter them; direct folders may still be shown.
+                    isReparsePoint := InStr(attributes, "L") != 0
+                    if current.Root && displayScope = SCOPE_FILES_AND_FOLDERS {
+                        modified := A_LoopFileTimeModified
+                        timeKind := "Directory"
+                        if folderTimeMode = FOLDER_TIME_LATEST_CONTENT
+                            && !isReparsePoint {
+                            latest := GetLatestDescendantFileTime(
+                                A_LoopFileFullPath, filter)
+                            if latest != "" {
+                                modified := latest
+                                timeKind := "Content"
+                            }
+                        }
+                        AddSortedCandidate(&files, {
+                            Path: A_LoopFileFullPath,
+                            Name: A_LoopFileName,
+                            Modified: modified,
+                            IsDirectory: true,
+                            TimeKind: timeKind
+                        }, limit, sortMode)
+                    }
+                    if displayScope = SCOPE_RECURSIVE_FILES && !isReparsePoint
+                        stack.Push({Path: A_LoopFileFullPath, Root: false})
+                    continue
+                }
+
+                if !current.Root && displayScope != SCOPE_RECURSIVE_FILES
+                    continue
+                if !ShouldIncludeFile(A_LoopFileName, filter)
+                    continue
+                AddSortedCandidate(&files, {
+                    Path: A_LoopFileFullPath,
+                    Name: A_LoopFileName,
+                    Modified: A_LoopFileTimeModified,
+                    IsDirectory: false,
+                    TimeKind: "File"
+                }, limit, sortMode)
             }
         }
-        ; 无限模式：收集完毕后统一排序
-        if limit = 0
-            SortFileArray(&files, sortMode)
     }
+    if limit = 0
+        SortFileArray(&files, sortMode)
     return files
+}
+
+AddSortedCandidate(&files, candidate, limit, sortMode) {
+    if limit > 0 {
+        insertAt := 1
+        while insertAt <= files.Length
+            && CompareFiles(candidate, files[insertAt], sortMode) > 0
+            insertAt += 1
+        files.InsertAt(insertAt, candidate)
+        if files.Length > limit
+            files.Pop()
+    } else {
+        files.Push(candidate)
+    }
+}
+
+GetLatestDescendantFileTime(folderPath, filter) {
+    latest := ""
+    stack := [folderPath]
+    while stack.Length {
+        current := stack.Pop()
+        try {
+            Loop Files, current "\*", "FD" {
+                attributes := A_LoopFileAttrib
+                if InStr(attributes, "D") {
+                    if !InStr(attributes, "L")
+                        stack.Push(A_LoopFileFullPath)
+                    continue
+                }
+                if !ShouldIncludeFile(A_LoopFileName, filter)
+                    continue
+                if latest = "" || A_LoopFileTimeModified > latest
+                    latest := A_LoopFileTimeModified
+            }
+        }
+    }
+    return latest
 }
 
 ; ──── 自然排序 (StrCmpLogicalW) ────
@@ -1729,8 +2925,9 @@ RunScanWorkerMode() {
             Fingerprint: request.Fingerprint, Folders: [], Recent: []}
         for folder in request.Folders {
             state := DirExist(folder.Path) ? "OK" : "Unavailable"
-            files := state = "OK" ? GetSortedFiles(folder.Path,
-                folder.MaxFilesPerFolder, folder.IncludeSubfolders, folder.SortMode, folder.Filter) : []
+            files := state = "OK" ? GetSortedItems(folder.Path,
+                folder.MaxFilesPerFolder, folder.DisplayScope, folder.SortMode,
+                folder.Filter, folder.FolderTimeMode) : []
             result.Folders.Push({Name: folder.Name, Path: folder.Path,
                 State: state, Files: files})
         }
@@ -1752,6 +2949,8 @@ RunScanWorkerMode() {
 
 ReadWorkerRequest(path) {
     global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
+    global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     version := Integer(IniRead(path, "Meta", "Version", "0"))
     if version != 1 && version != 2
         throw Error("unsupported request version")
@@ -1783,10 +2982,29 @@ ReadWorkerRequest(path) {
         else if rawSort = StrLower(SORT_NAME_ASC)
             folderSort := SORT_NAME_ASC
 
+        rawScope := StrLower(Trim(
+            IniRead(path, section, "DisplayScope", "")))
+        oldRecursive := IniRead(path, section, "IncludeSubfolders", "0") = "1"
+        if rawScope = StrLower(SCOPE_FILES_AND_FOLDERS)
+            folderScope := SCOPE_FILES_AND_FOLDERS
+        else if rawScope = StrLower(SCOPE_RECURSIVE_FILES)
+            folderScope := SCOPE_RECURSIVE_FILES
+        else if rawScope = StrLower(SCOPE_FILES_ONLY)
+            folderScope := SCOPE_FILES_ONLY
+        else
+            folderScope := oldRecursive ? SCOPE_RECURSIVE_FILES : SCOPE_FILES_ONLY
+
+        rawFolderTime := StrLower(Trim(
+            IniRead(path, section, "FolderTimeMode", "DirectoryModified")))
+        folderTimeMode := rawFolderTime = StrLower(FOLDER_TIME_LATEST_CONTENT)
+            ? FOLDER_TIME_LATEST_CONTENT : FOLDER_TIME_MODIFIED
+
         request.Folders.Push({
             Name: IniRead(path, section, "Name", ""),
             Path: IniRead(path, section, "Path", ""),
-            IncludeSubfolders: IniRead(path, section, "IncludeSubfolders", "0") = "1",
+            IncludeSubfolders: folderScope = SCOPE_RECURSIVE_FILES,
+            DisplayScope: folderScope,
+            FolderTimeMode: folderTimeMode,
             MaxFilesPerFolder: folderMax,
             SortMode: folderSort,
             Filter: filter
@@ -1816,6 +3034,8 @@ WriteScanResultAtomic(result, readyPath) {
             IniWrite(item.Path, tempPath, section, key "Path")
             IniWrite(item.Name, tempPath, section, key "Name")
             IniWrite(item.Modified, tempPath, section, key "Modified")
+            IniWrite(item.IsDirectory ? "1" : "0", tempPath, section, key "IsDirectory")
+            IniWrite(item.TimeKind, tempPath, section, key "TimeKind")
         }
     }
     for index, item in result.Recent {
@@ -1852,6 +3072,8 @@ ComputeConfigFingerprint(settings) {
         raw .= "|" folder.Name "|" StrLower(RTrim(folder.Path, "\"))
         raw .= "|mode=" folder.Mode
         raw .= "|sub=" (folder.IncludeSubfolders ? 1 : 0)
+        raw .= "|scope=" folder.DisplayScope
+        raw .= "|foldertime=" folder.FolderTimeMode
         raw .= "|max=" folder.MaxFilesPerFolder "|sort=" folder.SortMode
         raw .= "|filter=" folder.Filter.Mode
         raw .= "|ext=" JoinArray(folder.Filter.Extensions, ",")
@@ -1915,7 +3137,9 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
                     return 0
                 folder.Files.Push({Path: itemPath,
                     Name: IniRead(path, section, key "Name", GetFileName(itemPath)),
-                    Modified: IniRead(path, section, key "Modified", "")})
+                    Modified: IniRead(path, section, key "Modified", ""),
+                    IsDirectory: IniRead(path, section, key "IsDirectory", "0") = "1",
+                    TimeKind: IniRead(path, section, key "TimeKind", "File")})
             }
             result.Folders.Push(folder)
         }
@@ -1949,6 +3173,8 @@ WriteScanRequest(path, generation) {
         IniWrite(folder.Name, path, section, "Name")
         IniWrite(folder.Path, path, section, "Path")
         IniWrite(folder.IncludeSubfolders ? "1" : "0", path, section, "IncludeSubfolders")
+        IniWrite(folder.DisplayScope, path, section, "DisplayScope")
+        IniWrite(folder.FolderTimeMode, path, section, "FolderTimeMode")
         IniWrite(folder.MaxFilesPerFolder, path, section, "MaxFilesPerFolder")
         IniWrite(folder.SortMode, path, section, "SortMode")
         IniWrite(folder.Filter.Mode, path, section, "FilterMode")
@@ -1956,16 +3182,39 @@ WriteScanRequest(path, generation) {
     }
 }
 
-QuoteCommandArg(value) {
-    return '"' StrReplace(value, '"', '\"') '"'
-}
-
-BuildWorkerCommand(requestPath, readyPath) {
-    if A_IsCompiled
-        executable := QuoteCommandArg(A_ScriptFullPath)
-    else
-        executable := QuoteCommandArg(A_AhkPath) " " QuoteCommandArg(A_ScriptFullPath)
-    return executable " --scan-worker " QuoteCommandArg(requestPath) " " QuoteCommandArg(readyPath)
+StartScanWorkerProcess(requestPath, readyPath) {
+    if A_IsCompiled {
+        executable := A_ScriptFullPath
+        arguments := [A_ScriptFullPath, "--scan-worker", requestPath, readyPath]
+    } else {
+        executable := A_AhkPath
+        arguments := [A_AhkPath, A_ScriptFullPath,
+            "--scan-worker", requestPath, readyPath]
+    }
+    commandLine := ""
+    for argument in arguments
+        commandLine .= (commandLine = "" ? "" : " ")
+            . QuoteWindowsArgument(argument)
+    commandBuffer := Buffer((StrLen(commandLine) + 1) * 2, 0)
+    StrPut(commandLine, commandBuffer)
+    startupInfoSize := A_PtrSize = 8 ? 104 : 68
+    startupInfo := Buffer(startupInfoSize, 0)
+    NumPut("uint", startupInfoSize, startupInfo, 0)
+    processInfo := Buffer(A_PtrSize * 2 + 8, 0)
+    if !DllCall("kernel32\CreateProcessW",
+        "wstr", executable, "ptr", commandBuffer.Ptr,
+        "ptr", 0, "ptr", 0, "int", false,
+        "uint", 0x08000000, "ptr", 0, "wstr", A_ScriptDir,
+        "ptr", startupInfo.Ptr, "ptr", processInfo.Ptr, "int")
+        throw OSError(A_LastError, "无法启动扫描进程")
+    processHandle := NumGet(processInfo, 0, "ptr")
+    threadHandle := NumGet(processInfo, A_PtrSize, "ptr")
+    pid := NumGet(processInfo, A_PtrSize * 2, "uint")
+    if threadHandle
+        DllCall("kernel32\CloseHandle", "ptr", threadHandle)
+    if processHandle
+        DllCall("kernel32\CloseHandle", "ptr", processHandle)
+    return pid
 }
 
 StartBackgroundScan() {
@@ -1984,7 +3233,7 @@ StartBackgroundScan() {
     try FileDelete(readyPath)
     try {
         WriteScanRequest(requestPath, generation)
-        Run(BuildWorkerCommand(requestPath, readyPath), , "Hide", &WorkerPid)
+        WorkerPid := StartScanWorkerProcess(requestPath, readyPath)
     } catch {
         SetBackgroundStatus("更新失败，正在显示上次结果")
         return
@@ -2001,7 +3250,9 @@ StartBackgroundScan() {
 PollWorkerResult() {
     global WorkerRunning, WorkerPid, WorkerReadyPath, WorkerRequestPath, WorkerGeneration
     global PendingRefresh, CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
+    global PendingFileOperationRefresh
     global CacheFilePath, CacheWritable, CacheWriteWarningShown
+    global Panel, PanelVisible, StatusKind
     if !WorkerRunning {
         SetTimer(PollWorkerResult, 0)
         return
@@ -2012,7 +3263,8 @@ PollWorkerResult() {
             changed := !ScanResultsEqual(CurrentScanResult, result)
             CurrentScanResult := result
             ScanResultLoaded := true
-            if changed && IsObject(Panel) && PanelVisible {
+            if (changed || PendingFileOperationRefresh)
+                && IsObject(Panel) && PanelVisible {
                 PopulatePanel()
                 PopulateRecentSidebar()
                 SetTimer(UpdateSelectionStatus, 0)
@@ -2131,32 +3383,308 @@ GetFileName(path) {
 }
 
 OpenFileViewItem(list, row) {
-    global ItemPaths, ItemFolderPaths
+    global ItemPaths, OPEN_MODE_SINGLE
     if !ItemPaths.Has(row)
         return
     path := ItemPaths[row]
-    ; Configured-folder placeholders and pinned folders both open in Explorer.
+    if GetPointerModifierMask() != 0
+        return
+    ; 文件夹始终保持双击激活，不受单击模式影响。
+    if IsListItemFolder(list, row, path) {
+        OpenFolderPath(path)
+        return
+    }
+    ; 单击模式的第一次合法释放已经打开；忽略随后产生的双击通知。
+    effectiveMode := GetEffectiveOpenMode(
+        GetListItemOpenContext(list, row))
+    if effectiveMode = OPEN_MODE_SINGLE
+        return
+    OpenItemWithDefaultApplication(path)
+}
+
+OpenRecentItem(list, row) {
+    global RecentItemPaths, OPEN_MODE_SINGLE
+    if !RecentItemPaths.Has(row)
+        return
+    if GetPointerModifierMask() != 0
+        return
+    effectiveMode := GetEffectiveOpenMode(
+        GetListItemOpenContext(list, row))
+    if effectiveMode = OPEN_MODE_SINGLE
+        return
+    OpenItemWithDefaultApplication(RecentItemPaths[row])
+}
+
+GetListItemOpenContext(list, row) {
+    global FileView, RecentView, ItemOpenContexts
+    if IsObject(FileView) && list.Hwnd = FileView.Hwnd
+        && ItemOpenContexts.Has(row)
+        return ItemOpenContexts[row]
+    if IsObject(RecentView) && list.Hwnd = RecentView.Hwnd
+        return {Area: "Recent"}
+    return {Area: "Global"}
+}
+
+GetEffectiveOpenMode(itemContext) {
+    global GlobalOpenFileMode, LastValidFolderSettings
+    global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE
+    global SOURCE_OPEN_MODE_INHERIT
+
+    if IsObject(itemContext) && HasProp(itemContext, "Area")
+        && itemContext.Area = "Source"
+        && HasProp(itemContext, "SourceId") {
+        for folder in LastValidFolderSettings {
+            if StrLower(folder.SourceId) != StrLower(itemContext.SourceId)
+                continue
+            sourceMode := ParseSourceOpenFileMode(folder.OpenFileMode)
+            if sourceMode = OPEN_MODE_SINGLE
+                return OPEN_MODE_SINGLE
+            if sourceMode = OPEN_MODE_DOUBLE
+                return OPEN_MODE_DOUBLE
+            break
+        }
+    }
+    ; 固定项、最近文件和没有明确来源上下文的项目统一使用全局值。
+    return ParseGlobalOpenFileMode(GlobalOpenFileMode)
+}
+
+IsListItemFolder(list, row, path := "") {
+    global FileView, ItemKinds
+    if path != "" && DirExist(path)
+        return true
+    if IsObject(FileView) && list.Hwnd = FileView.Hwnd
+        && ItemKinds.Has(row)
+        return ItemKinds[row] = "Folder"
+    return false
+}
+
+OpenItemWithDefaultApplication(path) {
     if DirExist(path) {
         OpenFolderPath(path)
         return
     }
-    OpenFilePath(path)
-}
-
-OpenRecentItem(list, row) {
-    global RecentItemPaths
-    if RecentItemPaths.Has(row)
-        OpenFilePath(RecentItemPaths[row])
-}
-
-OpenFilePath(path) {
     if !FileExist(path) {
         ShowPanelMsgBox("文件不存在或当前无法访问：`n" path, "无法打开", "Icon!")
-        return
+        return false
     }
     try Run(path)
-    catch as err
+    catch as err {
         ShowPanelMsgBox("无法打开文件：`n" path "`n`n" err.Message, "打开失败", "Iconx")
+        return false
+    }
+    return true
+}
+
+InstallPanelHotkeys() {
+    HotIf(IsPanelFileViewActive)
+    Hotkey("Enter", PanelOpenSelection)
+    Hotkey("+F10", PanelShowSystemMenu)
+    Hotkey("^Enter", PanelRevealSelection)
+    Hotkey("^c", PanelCopyFileObjects)
+    Hotkey("^+c", PanelCopyPaths)
+    HotIf()
+}
+
+IsPanelFileViewActive(*) {
+    global Panel, PanelVisible, FileView, RecentView
+    if !PanelVisible || !IsObject(Panel)
+        return false
+    focused := DllCall("user32\GetFocus", "ptr")
+    return (IsObject(FileView) && focused = FileView.Hwnd)
+        || (IsObject(RecentView) && focused = RecentView.Hwnd)
+}
+
+GetActiveSelectionContext() {
+    global FileView, RecentView, ItemPaths, RecentItemPaths
+    focused := DllCall("user32\GetFocus", "ptr")
+    if IsObject(FileView) && focused = FileView.Hwnd {
+        paths := GetSelectedExistingPaths()
+        focusedRow := FileView.GetNext(0, "F")
+        clicked := focusedRow && ItemPaths.Has(focusedRow)
+            ? ItemPaths[focusedRow] : (paths.Length ? paths[1] : "")
+        return {Paths: paths, Clicked: clicked, Hwnd: FileView.Hwnd}
+    }
+    if IsObject(RecentView) && focused = RecentView.Hwnd {
+        row := RecentView.GetNext(0)
+        if row && RecentItemPaths.Has(row)
+            return {Paths: [RecentItemPaths[row]], Clicked: RecentItemPaths[row],
+                Hwnd: RecentView.Hwnd}
+    }
+    return {Paths: [], Clicked: "", Hwnd: 0}
+}
+
+PanelOpenSelection(*) {
+    context := GetActiveSelectionContext()
+    if context.Paths.Length
+        OpenSelectedItems(context.Paths)
+}
+
+PanelShowSystemMenu(*) {
+    global Panel
+    context := GetActiveSelectionContext()
+    if context.Paths.Length
+        ShowShellContextMenu(GetShellMenuPaths(context.Paths, context.Clicked),
+            Panel.Hwnd, -1, -1)
+}
+
+PanelRevealSelection(*) {
+    context := GetActiveSelectionContext()
+    if context.Paths.Length
+        RevealPathsInExplorer(context.Paths)
+}
+
+PanelCopyFileObjects(*) {
+    context := GetActiveSelectionContext()
+    if context.Paths.Length
+        CopyFileObjectsToClipboard(context.Paths)
+}
+
+PanelCopyPaths(*) {
+    context := GetActiveSelectionContext()
+    if context.Paths.Length
+        CopyPathTextToClipboard(context.Paths)
+}
+
+OpenSelectedItems(paths, *) {
+    for path in paths {
+        OpenItemWithDefaultApplication(path)
+    }
+}
+
+CanRevealTogether(paths) {
+    if !paths.Length
+        return false
+    parent := GetParentPath(paths[1])
+    for path in paths {
+        if !FileExist(path) || !PathsEqual(GetParentPath(path), parent)
+            return false
+    }
+    return DirExist(parent) != ""
+}
+
+RevealPathsInExplorer(paths, *) {
+    if !CanRevealTogether(paths) {
+        ShowPanelMsgBox(
+            "只能同时定位位于同一父文件夹中的项目；请缩小选择范围后重试。",
+            "在文件资源管理器中显示", "Iconi")
+        return
+    }
+
+    parentPath := GetParentPath(paths[1])
+    parentPidl := 0
+    fullPidls := []
+    try {
+        if DllCall("shell32\SHParseDisplayName", "wstr", parentPath,
+            "ptr", 0, "ptr*", &parentPidl, "uint", 0, "ptr", 0) != 0
+            throw Error("Windows Shell 无法解析父文件夹。")
+        childArray := Buffer(paths.Length * A_PtrSize, 0)
+        for index, path in paths {
+            fullPidl := 0
+            if DllCall("shell32\SHParseDisplayName", "wstr", path,
+                "ptr", 0, "ptr*", &fullPidl, "uint", 0, "ptr", 0) != 0
+                throw Error("Windows Shell 无法解析所选项目。")
+            fullPidls.Push(fullPidl)
+            childPidl := DllCall("shell32\ILFindLastID", "ptr", fullPidl, "ptr")
+            NumPut("ptr", childPidl, childArray, (index - 1) * A_PtrSize)
+        }
+        hr := DllCall("shell32\SHOpenFolderAndSelectItems", "ptr", parentPidl,
+            "uint", paths.Length, "ptr", childArray.Ptr, "uint", 0, "int")
+        if hr != 0
+            throw Error("资源管理器未接受定位请求（HRESULT "
+                Format("0x{:08X}", hr & 0xFFFFFFFF) "）。")
+    } catch as err {
+        ShowPanelMsgBox("无法在文件资源管理器中显示所选项目：`n"
+            err.Message, "定位失败", "Iconx")
+    } finally {
+        for pidl in fullPidls
+            DllCall("ole32\CoTaskMemFree", "ptr", pidl)
+        if parentPidl
+            DllCall("ole32\CoTaskMemFree", "ptr", parentPidl)
+    }
+}
+
+CopyFileObjectsToClipboard(paths, *) {
+    global Panel
+    existing := []
+    for path in paths {
+        if FileExist(path) && !ArrayContainsPath(existing, path)
+            existing.Push(path)
+    }
+    if !existing.Length {
+        ShowPanelMsgBox("所选项目均不存在或当前不可访问。",
+            "复制文件", "Icon!")
+        return false
+    }
+    hDrop := CreateHDrop(existing)
+    if !hDrop {
+        ShowPanelMsgBox("无法创建 Windows 文件剪贴板数据。",
+            "复制文件失败", "Iconx")
+        return false
+    }
+
+    if !DllCall("user32\OpenClipboard", "ptr", Panel.Hwnd, "int") {
+        DllCall("kernel32\GlobalFree", "ptr", hDrop)
+        ShowPanelMsgBox("剪贴板当前正被其他程序使用，请稍后重试。",
+            "复制文件失败", "Icon!")
+        return false
+    }
+    success := false
+    try {
+        if !DllCall("user32\EmptyClipboard", "int")
+            throw Error("无法清空剪贴板。")
+        if !DllCall("user32\SetClipboardData", "uint", 15,
+            "ptr", hDrop, "ptr")
+            throw Error("Windows 拒绝了文件剪贴板数据。")
+        ; SetClipboardData 成功后所有权转移给系统。
+        hDrop := 0
+        success := true
+    } catch as err {
+        ShowPanelMsgBox(err.Message, "复制文件失败", "Iconx")
+    } finally {
+        DllCall("user32\CloseClipboard")
+        if hDrop
+            DllCall("kernel32\GlobalFree", "ptr", hDrop)
+    }
+    if success
+        SetUserStatus("已复制 " existing.Length " 个文件系统项目")
+    return success
+}
+
+CopyPathTextToClipboard(paths, *) {
+    normalized := []
+    for path in paths {
+        if !ArrayContainsPath(normalized, path)
+            normalized.Push(NormalizePath(path))
+    }
+    if !normalized.Length
+        return false
+    A_Clipboard := JoinArray(normalized, "`r`n")
+    if !ClipWait(1) {
+        ShowPanelMsgBox("无法写入文本剪贴板，请稍后重试。",
+            "复制路径失败", "Iconx")
+        return false
+    }
+    SetUserStatus("已复制 " normalized.Length " 条完整路径")
+    return true
+}
+
+SetUserStatus(text) {
+    global StatusText, StatusKind, CurrentStatusAction, LastOpenAppUndoState
+    if IsObject(StatusText) {
+        CurrentStatusAction := 0
+        LastOpenAppUndoState := 0
+        StatusKind := "user"
+        StatusText.Text := text
+    }
+}
+
+SetActionStatus(text, action) {
+    global StatusText, StatusKind, CurrentStatusAction
+    CurrentStatusAction := action
+    if IsObject(StatusText) {
+        StatusKind := "user"
+        StatusText.Text := text
+    }
 }
 
 RecentItemSelect(list, row, selected) {
@@ -2169,15 +3697,22 @@ RecentItemSelect(list, row, selected) {
 
 RecentContextMenu(list, row, isRightClick, x, y) {
     global RecentItemPaths
+    CancelFilePointerGesture()
     if !row || !RecentItemPaths.Has(row)
         return
-    list.Modify(row, "Select Focus Vis")
+    if !IsListRowSelected(list.Hwnd, row) {
+        list.Modify(0, "-Select -Focus")
+        list.Modify(row, "Select Focus Vis")
+    }
     path := RecentItemPaths[row]
     if !FileExist(path) {
         ShowPanelMsgBox("文件不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
         return
     }
-    ShowShellContextMenu(path, list.Gui.Hwnd, x, y)
+    if GetKeyState("Shift", "P")
+        ShowShellContextMenu([path], list.Gui.Hwnd, x, y)
+    else
+        ShowPopDropContextMenu([path], path, list.Gui.Hwnd, x, y)
 }
 
 FileViewItemSelect(list, row, selected) {
@@ -2215,20 +3750,13 @@ GetSelectedFileRows() {
 }
 
 AddPinnedFiles(*) {
-    global PinnedPaths, Panel
+    global PinnedPaths
 
-    BeginAutoHidePause()
-    try {
-        if Panel && Panel.Hwnd
-            Panel.Opt("+OwnDialogs")
-        try selected := FileSelect("M3", , "选择要加入固定项的文件")
-        catch
-            return
-        if !IsObject(selected)
-            return
-    } finally {
-        EndAutoHidePause()
-    }
+    try selected := SelectPanelFile("M3", , "选择要加入固定项的文件")
+    catch
+        return
+    if !IsObject(selected)
+        return
 
     newPaths := []
     for path in selected {
@@ -2242,6 +3770,53 @@ AddPinnedFiles(*) {
         PrependPinnedPaths(newPaths)
         SavePinnedFiles()
         PopulatePanel()
+    }
+}
+
+AddSelectionToPinned(paths, *) {
+    global PinnedPaths
+    additions := []
+    for path in paths {
+        if FileExist(path) && !ArrayContainsPath(PinnedPaths, path)
+            && !ArrayContainsPath(additions, path)
+            additions.Push(NormalizePath(path))
+    }
+    if !additions.Length
+        return
+    original := PinnedPaths.Clone()
+    PrependPinnedPaths(additions)
+    try {
+        SavePinnedFiles()
+        PopulatePanel()
+        SetUserStatus("已添加到固定项：" additions.Length " 项")
+    } catch as err {
+        PinnedPaths := original
+        ShowPanelMsgBox("无法保存固定项：`n" err.Message,
+            "添加固定项失败", "Iconx")
+    }
+}
+
+RemoveSelectionFromPinned(paths, *) {
+    global PinnedPaths
+    original := PinnedPaths.Clone()
+    removed := 0
+    for path in paths {
+        index := FindPathIndex(PinnedPaths, path)
+        if index {
+            PinnedPaths.RemoveAt(index)
+            removed += 1
+        }
+    }
+    if !removed
+        return
+    try {
+        SavePinnedFiles()
+        PopulatePanel()
+        SetUserStatus("已从固定项移除：" removed " 项")
+    } catch as err {
+        PinnedPaths := original
+        ShowPanelMsgBox("无法保存固定项：`n" err.Message,
+            "移除固定项失败", "Iconx")
     }
 }
 
@@ -2397,10 +3972,15 @@ PrependPinnedPaths(paths) {
 }
 
 SavePinnedFiles() {
-    global ConfigPath, PinnedPaths
-    try IniDelete(ConfigPath, "PinnedFiles")
+    AtomicConfigEdit(WritePinnedFilesConfig)
+}
+
+WritePinnedFilesConfig(tempPath) {
+    global PinnedPaths
+    try IniDelete(tempPath, "PinnedFiles")
     for index, path in PinnedPaths
-        IniWrite(path, ConfigPath, "PinnedFiles", "File" Format("{:03}", index))
+        IniWrite(path, tempPath, "PinnedFiles", "File" Format("{:03}", index))
+    IniWrite("8", tempPath, "General", "ConfigVersion")
 }
 
 ArrayContainsPath(paths, target) {
@@ -2408,19 +3988,237 @@ ArrayContainsPath(paths, target) {
 }
 
 FindPathIndex(paths, target) {
-    target := StrLower(RTrim(target, "\"))
+    target := PathKey(target)
     for index, path in paths {
-        if StrLower(RTrim(path, "\")) = target
+        if PathKey(path) = target
             return index
     }
     return 0
 }
 
 OpenConfig(*) {
-    global ConfigPath
-    try Run('notepad.exe "' ConfigPath '"')
-    catch
-        Run(ConfigPath)
+    global Panel, SettingsDialog, LastValidFolderSettings
+    global GlobalOpenFileMode, OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE
+    global SOURCE_OPEN_MODE_INHERIT
+
+    CancelFilePointerGesture()
+    if IsObject(SettingsDialog) {
+        try {
+            SettingsDialog.Show()
+            WinActivate("ahk_id " SettingsDialog.Hwnd)
+            return
+        }
+    }
+
+    BeginAutoHidePause()
+    settingsGui := Gui("+Owner" Panel.Hwnd " +MinSize620x500",
+        "PopDrop 文件打开设置")
+    SettingsDialog := settingsGui
+    settingsGui.MarginX := 16
+    settingsGui.MarginY := 14
+    settingsGui.SetFont("s9", "Microsoft YaHei UI")
+
+    settingsGui.AddText("xm ym w580", "全局打开文件")
+        .SetFont("s10 Bold")
+    globalDouble := settingsGui.AddRadio(
+        "xm y+10 Group " (GlobalOpenFileMode = OPEN_MODE_DOUBLE
+            ? "Checked" : ""), "双击（默认）")
+    globalSingle := settingsGui.AddRadio(
+        "x+28 yp " (GlobalOpenFileMode = OPEN_MODE_SINGLE
+            ? "Checked" : ""), "单击")
+    settingsGui.AddText("xm y+10 w580 c555555",
+        "单击会立即打开文件。按住 Ctrl 或 Shift 可以多选，拖拽不受影响；"
+        . "文件夹仍然需要双击打开。")
+
+    settingsGui.AddText("xm y+18 w580", "监控来源")
+        .SetFont("s10 Bold")
+    sourceList := settingsGui.AddListView(
+        "xm y+8 w580 h240 Report -Multi", ["来源", "路径", "打开文件"])
+    sourceState := {
+        Rows: Map(),
+        Modes: Map(),
+        Updating: false,
+        List: sourceList
+    }
+    for folder in LastValidFolderSettings {
+        mode := ParseSourceOpenFileMode(folder.OpenFileMode)
+        row := sourceList.Add("", folder.Name, folder.Path,
+            SourceOpenModeLabel(mode))
+        sourceState.Rows[row] := {
+            Id: folder.SourceId,
+            Name: folder.Name,
+            Path: folder.Path
+        }
+        sourceState.Modes[folder.SourceId] := mode
+    }
+    sourceList.ModifyCol(1, 120)
+    sourceList.ModifyCol(2, 300)
+    sourceList.ModifyCol(3, 125)
+
+    sourceHint := settingsGui.AddText("xm y+10 w580 c555555",
+        "选择一个来源后设置覆盖方式。继承项会随全局设置立即变化。")
+    sourceInherit := settingsGui.AddRadio(
+        "xm y+8 Group Disabled", "跟随全局设置")
+    sourceSingle := settingsGui.AddRadio("x+18 yp Disabled", "单击")
+    sourceDouble := settingsGui.AddRadio("x+18 yp Disabled", "双击")
+    sourceState.Controls := {
+        Inherit: sourceInherit,
+        Single: sourceSingle,
+        Double: sourceDouble,
+        Hint: sourceHint
+    }
+    sourceList.OnEvent("ItemSelect",
+        OpenModeSourceSelected.Bind(sourceState))
+    sourceInherit.OnEvent("Click", SetSourceOpenModeFromDialog.Bind(
+        sourceState, SOURCE_OPEN_MODE_INHERIT))
+    sourceSingle.OnEvent("Click", SetSourceOpenModeFromDialog.Bind(
+        sourceState, OPEN_MODE_SINGLE))
+    sourceDouble.OnEvent("Click", SetSourceOpenModeFromDialog.Bind(
+        sourceState, OPEN_MODE_DOUBLE))
+
+    saveButton := settingsGui.AddButton("xm y+20 w90 Default", "保存")
+    cancelButton := settingsGui.AddButton("x+8 yp w90", "取消")
+    advancedButton := settingsGui.AddButton("x+8 yp w150",
+        "高级编辑 config.ini")
+    saveButton.OnEvent("Click", SaveOpenFileSettings.Bind(
+        settingsGui, globalDouble, globalSingle, sourceState))
+    cancelButton.OnEvent("Click", CloseOpenFileSettings.Bind(settingsGui))
+    advancedButton.OnEvent("Click", OpenConfigFile)
+    settingsGui.OnEvent("Close", CloseOpenFileSettings.Bind(settingsGui))
+    settingsGui.OnEvent("Escape", CloseOpenFileSettings.Bind(settingsGui))
+    settingsGui.OnEvent("Size", ResizeOpenFileSettings.Bind(
+        sourceList, sourceHint, sourceInherit, sourceSingle, sourceDouble,
+        saveButton, cancelButton, advancedButton))
+    settingsGui.Show("w620 h520")
+}
+
+SourceOpenModeLabel(mode) {
+    global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, GlobalOpenFileMode
+    if mode = OPEN_MODE_SINGLE
+        return "单击"
+    if mode = OPEN_MODE_DOUBLE
+        return "双击"
+    actual := ParseGlobalOpenFileMode(GlobalOpenFileMode)
+        = OPEN_MODE_SINGLE ? "单击" : "双击"
+    return "跟随全局（当前：" actual "）"
+}
+
+OpenModeSourceSelected(state, list, row, selected) {
+    if !selected || !state.Rows.Has(row)
+        return
+    state.SelectedRow := row
+    sourceId := state.Rows[row].Id
+    mode := state.Modes[sourceId]
+    controls := state.Controls
+    state.Updating := true
+    try {
+        controls.Inherit.Enabled := true
+        controls.Single.Enabled := true
+        controls.Double.Enabled := true
+        controls.Inherit.Value := mode = "Inherit"
+        controls.Single.Value := mode = "SingleClick"
+        controls.Double.Value := mode = "DoubleClick"
+    } finally {
+        state.Updating := false
+    }
+}
+
+SetSourceOpenModeFromDialog(state, mode, control, *) {
+    if state.Updating || !HasProp(state, "SelectedRow")
+        return
+    row := state.SelectedRow
+    if !state.Rows.Has(row)
+        return
+    sourceId := state.Rows[row].Id
+    state.Modes[sourceId] := ParseSourceOpenFileMode(mode)
+    state.List.Modify(row, "Col3",
+        SourceOpenModeLabel(state.Modes[sourceId]))
+}
+
+SaveOpenFileSettings(settingsGui, globalDouble, globalSingle, sourceState, *) {
+    global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE
+
+    globalMode := globalSingle.Value ? OPEN_MODE_SINGLE : OPEN_MODE_DOUBLE
+    entries := []
+    for row, folder in sourceState.Rows {
+        entries.Push({
+            Id: folder.Id,
+            Name: folder.Name,
+            Path: folder.Path,
+            Mode: sourceState.Modes[folder.Id]
+        })
+    }
+    try {
+        AtomicConfigEdit(
+            WriteOpenFileModeSettings.Bind(globalMode, entries))
+        LoadSettings()
+        SetUserStatus("文件打开方式已更新")
+        CloseOpenFileSettings(settingsGui)
+    } catch as err {
+        ShowPanelMsgBox("无法保存文件打开设置：`n" err.Message,
+            "保存设置失败", "Iconx")
+    }
+}
+
+WriteOpenFileModeSettings(globalMode, entries, tempPath) {
+    IniWrite(ParseGlobalOpenFileMode(globalMode), tempPath,
+        "General", "OpenFileMode")
+    sourceIds := []
+    for entry in entries {
+        sourceIds.Push(entry.Id)
+        folderSection := "Folder:" entry.Name
+        sourceSection := "Source:" entry.Id
+        IniWrite(entry.Id, tempPath, folderSection, "SourceId")
+        IniWrite(ParseSourceOpenFileMode(entry.Mode), tempPath,
+            folderSection, "OpenFileMode")
+        IniWrite(entry.Name, tempPath, sourceSection, "Name")
+        IniWrite(entry.Path, tempPath, sourceSection, "Path")
+        IniWrite(ParseSourceOpenFileMode(entry.Mode), tempPath,
+            sourceSection, "OpenFileMode")
+    }
+    IniWrite(JoinArray(sourceIds, ","), tempPath, "Sources", "Order")
+    IniWrite("8", tempPath, "General", "ConfigVersion")
+}
+
+CloseOpenFileSettings(settingsGui, *) {
+    global SettingsDialog
+    if !IsObject(SettingsDialog)
+        return
+    CancelFilePointerGesture()
+    SettingsDialog := 0
+    try settingsGui.Destroy()
+    EndAutoHidePause()
+}
+
+ResizeOpenFileSettings(sourceList, sourceHint,
+    sourceInherit, sourceSingle, sourceDouble,
+    saveButton, cancelButton, advancedButton,
+    guiObj, minMax, width, height) {
+    if minMax = -1
+        return
+    contentWidth := Max(420, width - 32)
+    listHeight := Max(150, height - 280)
+    sourceList.Move(, , contentWidth, listHeight)
+    sourceHint.Move(, 128 + listHeight, contentWidth)
+    radioY := 158 + listHeight
+    sourceInherit.Move(, radioY)
+    sourceSingle.Move(, radioY)
+    sourceDouble.Move(, radioY)
+    buttonY := height - 48
+    saveButton.Move(, buttonY)
+    cancelButton.Move(, buttonY)
+    advancedButton.Move(, buttonY)
+}
+
+OpenConfigFile(*) {
+    global ConfigPath, Panel
+    CancelFilePointerGesture()
+    result := DllCall("shell32\ShellExecuteW",
+        "ptr", IsObject(Panel) ? Panel.Hwnd : 0,
+        "wstr", "open", "wstr", ConfigPath,
+        "ptr", 0, "wstr", A_ScriptDir, "int", 1, "ptr")
+    if result <= 32
+        ShowPanelMsgBox("无法打开配置文件。", "打开配置", "Iconx")
 }
 
 FileViewNotify(wParam, lParam, msg, hwnd) {
@@ -2450,19 +4248,296 @@ FileViewNotify(wParam, lParam, msg, hwnd) {
 
 FileViewContextMenu(list, row, isRightClick, x, y) {
     global ItemPaths
+    CancelFilePointerGesture()
     if !row || !ItemPaths.Has(row)
         return
-    list.Modify(row, "Select Focus Vis")
+    if !IsListRowSelected(list.Hwnd, row) {
+        list.Modify(0, "-Select -Focus")
+        list.Modify(row, "Select Focus Vis")
+    } else {
+        list.Modify(row, "Focus Vis")
+    }
+    UpdateSelectionStatus()
     path := ItemPaths[row]
     if !FileExist(path) {
         ShowPanelMsgBox("项目不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
         return
     }
-    ShowShellContextMenu(path, list.Gui.Hwnd, x, y)
+    paths := GetSelectedExistingPaths()
+    if !paths.Length
+        paths := [path]
+    if GetKeyState("Shift", "P")
+        ShowShellContextMenu(GetShellMenuPaths(paths, path), list.Gui.Hwnd, x, y)
+    else
+        ShowPopDropContextMenu(paths, path, list.Gui.Hwnd, x, y)
 }
 
-ShowShellContextMenu(path, ownerHwnd, x, y) {
-    pidl := 0
+IsListRowSelected(hwnd, row) {
+    state := DllCall("user32\SendMessageW", "ptr", hwnd, "uint", 0x102C,
+        "ptr", row - 1, "ptr", 0x2, "uint") ; LVM_GETITEMSTATE / LVIS_SELECTED
+    return (state & 0x2) != 0
+}
+
+GetSelectedExistingPaths() {
+    global ItemPaths
+    paths := []
+    for row in GetSelectedFileRows() {
+        path := ItemPaths[row]
+        if FileExist(path) && !ArrayContainsPath(paths, path)
+            paths.Push(path)
+    }
+    return paths
+}
+
+GetShellMenuPaths(paths, clickedPath) {
+    if paths.Length <= 1
+        return [clickedPath]
+    parent := GetParentPath(paths[1])
+    for path in paths {
+        if !PathsEqual(GetParentPath(path), parent)
+            return [clickedPath]
+    }
+    return paths.Clone()
+}
+
+ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
+    global PinnedPaths
+
+    contextMenu := Menu()
+    openText := "打开`tEnter"
+    contextMenu.Add(openText, OpenSelectedItems.Bind(paths.Clone()))
+
+    singleFile := paths.Length = 1 && FileExist(paths[1])
+        && !InStr(FileExist(paths[1]), "D")
+    if singleFile {
+        apps := GetApplicableOpenApps(paths[1])
+        directCount := Min(5, apps.Length)
+        usedLabels := Map()
+        Loop directCount {
+            app := apps[A_Index]
+            label := UniqueOpenAppMenuLabel(app.Name, usedLabels)
+            contextMenu.Add(label, OpenWithConfiguredApp.Bind(app.Id, paths[1]))
+            try contextMenu.SetIcon(label, app.Icon)
+        }
+        if apps.Length > 5 {
+            moreApps := Menu()
+            Loop apps.Length - 5 {
+                app := apps[A_Index + 5]
+                label := UniqueOpenAppMenuLabel(app.Name, usedLabels)
+                moreApps.Add(label, OpenWithConfiguredApp.Bind(app.Id, paths[1]))
+                try moreApps.SetIcon(label, app.Icon)
+            }
+            contextMenu.Add("更多已配置应用…", moreApps)
+        }
+        contextMenu.Add("选择其他程序…", ChooseOtherProgramForFile.Bind(paths[1]))
+    }
+
+    contextMenu.Add()
+    revealText := "在文件资源管理器中显示`tCtrl+Enter"
+    contextMenu.Add(revealText, RevealPathsInExplorer.Bind(paths.Clone()))
+    if !CanRevealTogether(paths)
+        contextMenu.Disable(revealText)
+
+    contextMenu.Add()
+    copyFilesText := "复制文件`tCtrl+C"
+    copyPathsText := "复制路径`tCtrl+Shift+C"
+    contextMenu.Add(copyFilesText, CopyFileObjectsToClipboard.Bind(paths.Clone()))
+    contextMenu.Add(copyPathsText, CopyPathTextToClipboard.Bind(paths.Clone()))
+
+    contextMenu.Add()
+    copyMenu := BuildTransferTargetMenu("copy", paths)
+    moveMenu := BuildTransferTargetMenu("move", paths)
+    contextMenu.Add("复制到…", copyMenu)
+    contextMenu.Add("移动到…", moveMenu)
+
+    contextMenu.Add()
+    addCount := 0
+    removeCount := 0
+    for path in paths {
+        if FindPathIndex(PinnedPaths, path)
+            removeCount += 1
+        else
+            addCount += 1
+    }
+    addText := paths.Length > 1 ? "添加到固定项（" addCount " 项）" : "添加到固定项"
+    removeText := paths.Length > 1 ? "从固定项移除（" removeCount " 项）" : "从固定项移除"
+    contextMenu.Add(addText, AddSelectionToPinned.Bind(paths.Clone()))
+    contextMenu.Add(removeText, RemoveSelectionFromPinned.Bind(paths.Clone()))
+    if !addCount
+        contextMenu.Disable(addText)
+    if !removeCount
+        contextMenu.Disable(removeText)
+
+    contextMenu.Add()
+    systemText := "更多系统操作…`tShift+F10"
+    contextMenu.Add(systemText, ShowSystemMenuForSelection.Bind(
+        paths.Clone(), clickedPath, ownerHwnd, x, y))
+
+    point := MenuScreenPoint(ownerHwnd, x, y)
+    BeginAutoHidePause()
+    try {
+        ; Menu.Show follows CoordMode("Menu"). The ListView event supplies
+        ; client coordinates, which MenuScreenPoint converted to screen pixels.
+        CoordMode("Menu", "Screen")
+        contextMenu.Show(point.X, point.Y)
+    } finally {
+        EndAutoHidePause()
+    }
+}
+
+UniqueOpenAppMenuLabel(name, usedLabels) {
+    base := "用 " name " 打开"
+    count := usedLabels.Has(base) ? usedLabels[base] + 1 : 1
+    usedLabels[base] := count
+    return count = 1 ? base : base " (" count ")"
+}
+
+MenuScreenPoint(ownerHwnd, x, y) {
+    point := Buffer(8, 0)
+    if x = -1 || y = -1 {
+        DllCall("user32\GetCursorPos", "ptr", point)
+    } else {
+        NumPut("int", x, point, 0)
+        NumPut("int", y, point, 4)
+        DllCall("user32\ClientToScreen", "ptr", ownerHwnd, "ptr", point)
+    }
+    return {X: NumGet(point, 0, "int"), Y: NumGet(point, 4, "int")}
+}
+
+ShowSystemMenuForSelection(paths, clickedPath, ownerHwnd, x, y, *) {
+    ShowShellContextMenu(GetShellMenuPaths(paths, clickedPath), ownerHwnd, x, y)
+}
+
+BuildTransferTargetMenu(operation, paths) {
+    global TransferFavorites, RecentTargets
+    targetMenu := Menu()
+    seen := Map()
+
+    favorites := GetEffectiveTransferFavorites()
+    heading := "常用位置"
+    targetMenu.Add(heading, NoopMenuAction)
+    targetMenu.Disable(heading)
+    for target in favorites {
+        key := PathKey(target.Path)
+        if seen.Has(key)
+            continue
+        seen[key] := true
+        text := target.Label
+        targetMenu.Add(text, RunTransferToTarget.Bind(
+            operation, paths.Clone(), target.Path))
+        if !DirExist(target.Path) {
+            targetMenu.Rename(text, text "（不可用）")
+            targetMenu.Disable(text "（不可用）")
+        }
+    }
+
+    recentAdded := 0
+    for targetPath in RecentTargets {
+        key := PathKey(targetPath)
+        if seen.Has(key)
+            continue
+        if !recentAdded {
+            recentHeading := "最近目标"
+            targetMenu.Add(recentHeading, NoopMenuAction)
+            targetMenu.Disable(recentHeading)
+        }
+        recentAdded += 1
+        seen[key] := true
+        text := GetDistinctTargetLabel(targetPath, favorites, RecentTargets)
+        targetMenu.Add(text, RunTransferToTarget.Bind(
+            operation, paths.Clone(), targetPath))
+        if !DirExist(targetPath) {
+            targetMenu.Rename(text, text "（不可用）")
+            targetMenu.Disable(text "（不可用）")
+        }
+        if recentAdded >= 3
+            break
+    }
+
+    targetMenu.Add()
+    targetMenu.Add("选择其他文件夹…",
+        ChooseTransferFolder.Bind(operation, paths.Clone()))
+    targetMenu.Add("管理常用位置…", OpenConfigAtTransferFavorites)
+    if HasInvalidTransferTargets()
+        targetMenu.Add("移除无效位置…", RemoveInvalidTransferTargets)
+    return targetMenu
+}
+
+NoopMenuAction(*) {
+}
+
+GetEffectiveTransferFavorites() {
+    global TransferFavorites
+    result := []
+    desktop := GetKnownFolderPath("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}")
+    downloads := GetKnownFolderPath("{374DE290-123F-4565-9164-39C4925E467B}")
+    for path in TransferFavorites {
+        if result.Length >= 5
+            break
+        if ArrayContainsObjectPath(result, path)
+            continue
+        if desktop != "" && PathsEqual(path, desktop)
+            label := "桌面"
+        else if downloads != "" && PathsEqual(path, downloads)
+            label := "下载"
+        else
+            label := GetDistinctTargetLabel(path, TransferFavorites, [])
+        result.Push({Path: path, Label: label})
+    }
+    return result
+}
+
+ArrayContainsObjectPath(objects, target) {
+    for item in objects {
+        if PathsEqual(item.Path, target)
+            return true
+    }
+    return false
+}
+
+GetDistinctTargetLabel(path, firstList, secondList) {
+    name := GetFileName(path)
+    duplicate := false
+    for list in [firstList, secondList] {
+        for other in list {
+            otherPath := IsObject(other) ? other.Path : other
+            if !PathsEqual(otherPath, path) && GetFileName(otherPath) = name {
+                duplicate := true
+                break
+            }
+        }
+    }
+    return duplicate ? name " — " GetParentPath(path) : name
+}
+
+GetKnownFolderPath(guidText) {
+    guid := GuidBuffer(guidText)
+    resultPath := 0
+    hr := DllCall("shell32\SHGetKnownFolderPath", "ptr", guid.Ptr,
+        "uint", 0, "ptr", 0, "ptr*", &resultPath, "int")
+    if hr != 0 || !resultPath
+        return ""
+    try return NormalizePath(StrGet(resultPath))
+    finally DllCall("ole32\CoTaskMemFree", "ptr", resultPath)
+}
+
+HasInvalidTransferTargets() {
+    global TransferFavorites, RecentTargets
+    for path in TransferFavorites {
+        if !DirExist(path)
+            return true
+    }
+    for path in RecentTargets {
+        if !DirExist(path)
+            return true
+    }
+    return false
+}
+
+ShowShellContextMenu(paths, ownerHwnd, x, y) {
+    if !IsObject(paths)
+        paths := [paths]
+    fullPidls := []
     parentFolder := 0
     contextMenu := 0
     menuHandle := 0
@@ -2470,20 +4545,33 @@ ShowShellContextMenu(path, ownerHwnd, x, y) {
     BeginAutoHidePause()
 
     try {
-        if DllCall("shell32\SHParseDisplayName", "wstr", path, "ptr", 0, "ptr*", &pidl,
-            "uint", 0, "ptr", 0) != 0
-            throw Error("Windows Shell 无法解析此文件。")
-
         iidShellFolder := GuidBuffer("{000214E6-0000-0000-C000-000000000046}")
-        childPidl := 0
-        if DllCall("shell32\SHBindToParent", "ptr", pidl, "ptr", iidShellFolder.Ptr,
-            "ptr*", &parentFolder, "ptr*", &childPidl) != 0
-            throw Error("无法连接文件所在目录。")
+        childPidls := []
+        for index, path in paths {
+            pidl := 0
+            if DllCall("shell32\SHParseDisplayName", "wstr", path, "ptr", 0,
+                "ptr*", &pidl, "uint", 0, "ptr", 0) != 0
+                throw Error("Windows Shell 无法解析此项目。")
+            fullPidls.Push(pidl)
+            currentParent := 0
+            childPidl := 0
+            if DllCall("shell32\SHBindToParent", "ptr", pidl,
+                "ptr", iidShellFolder.Ptr, "ptr*", &currentParent,
+                "ptr*", &childPidl) != 0
+                throw Error("无法连接项目所在目录。")
+            if index = 1
+                parentFolder := currentParent
+            else
+                ObjRelease(currentParent)
+            childPidls.Push(childPidl)
+        }
 
         iidContextMenu := GuidBuffer("{000214E4-0000-0000-C000-000000000046}")
-        childArray := Buffer(A_PtrSize, 0)
-        NumPut("ptr", childPidl, childArray)
-        hr := ComCall(10, parentFolder, "ptr", ownerHwnd, "uint", 1, "ptr", childArray.Ptr,
+        childArray := Buffer(A_PtrSize * childPidls.Length, 0)
+        for index, childPidl in childPidls
+            NumPut("ptr", childPidl, childArray, (index - 1) * A_PtrSize)
+        hr := ComCall(10, parentFolder, "ptr", ownerHwnd,
+            "uint", childPidls.Length, "ptr", childArray.Ptr,
             "ptr", iidContextMenu.Ptr, "ptr", 0, "ptr*", &contextMenu)
         if hr != 0
             throw Error("无法创建系统文件菜单。")
@@ -2534,7 +4622,7 @@ ShowShellContextMenu(path, ownerHwnd, x, y) {
             ObjRelease(contextMenu)
         if parentFolder
             ObjRelease(parentFolder)
-        if pidl
+        for pidl in fullPidls
             DllCall("ole32\CoTaskMemFree", "ptr", pidl)
     }
 }
@@ -2550,6 +4638,9 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     global FileView, RecentView, ItemPaths, RecentItemPaths, PinnedPaths
     global DragPaths, SelectedFilePaths, DragSourceHwnd, DragStartX, DragStartY, DragStarted
     global PinnedReorderActive, PinnedReorderPath
+    global FilePointerGesture, FilePointerGestureSerial
+    global OPEN_MODE_SINGLE
+
     isMainView := IsObject(FileView) && hwnd = FileView.Hwnd
     if isMainView
         pathMap := ItemPaths
@@ -2560,6 +4651,34 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     x := SignedMouseCoordinate(lParam & 0xFFFF)
     y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
     row := HitTestListRow(hwnd, x, y)
+    modifiers := GetPointerModifierMask()
+    path := row && pathMap.Has(row) ? pathMap[row] : ""
+    selectedSnapshot := []
+    if isMainView
+        selectedSnapshot := SelectedFilePaths.Clone()
+    else if row && path != "" && IsListRowSelected(hwnd, row)
+        selectedSnapshot.Push(path)
+
+    serial := ++FilePointerGestureSerial
+    FilePointerGesture := {
+        Serial: serial,
+        Active: true,
+        Hwnd: hwnd,
+        Row: row,
+        Path: path,
+        Key: path != "" ? GetDisplayedItemActivationKey(hwnd, row, path) : "",
+        X: x,
+        Y: y,
+        DownTick: A_TickCount,
+        Selection: selectedSnapshot,
+        Modifiers: modifiers,
+        OpenRegion: row && path != "",
+        ChildControl: false,
+        Dragging: false,
+        Marquee: !row,
+        Cancelled: false
+    }
+
     DragPaths := []
     if row && pathMap.Has(row) {
         ; WM_LBUTTONDOWN can collapse a multi-selection before a drag reaches
@@ -2580,11 +4699,38 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     if isMainView && DragPaths.Length = 1
         && FindPathIndex(PinnedPaths, DragPaths[1])
         PinnedReorderPath := DragPaths[1]
+
+    ; 原生 ListView 会在按下已选项时先收敛多选。消息返回后恢复快照，
+    ; 因而超过阈值的拖拽仍能显示并发送整组选择；未拖拽的释放再收敛。
+    if isMainView && modifiers = 0 && path != ""
+        && selectedSnapshot.Length > 1
+        && ArrayContainsPath(selectedSnapshot, path)
+        && !IsListItemFolder(FileView, row, path)
+        && GetEffectiveOpenMode(GetListItemOpenContext(FileView, row))
+            = OPEN_MODE_SINGLE {
+        SetTimer(RestorePointerSelection.Bind(serial), -1)
+    }
 }
 
 FileViewMouseMove(wParam, lParam, msg, hwnd) {
     global DragPaths, DragSourceHwnd, DragStartX, DragStartY, DragStarted, StatusText, StatusKind
     global PinnedReorderActive, PinnedReorderPath
+    global FilePointerGesture
+
+    if IsObject(FilePointerGesture) && FilePointerGesture.Active
+        && hwnd = FilePointerGesture.Hwnd
+        && GetKeyState("LButton", "P") {
+        pointerX := SignedMouseCoordinate(lParam & 0xFFFF)
+        pointerY := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
+        thresholdX := DllCall("user32\GetSystemMetrics",
+            "int", 68, "int") ; SM_CXDRAG（已按当前 DPI 虚拟化）
+        thresholdY := DllCall("user32\GetSystemMetrics",
+            "int", 69, "int") ; SM_CYDRAG
+        if Abs(pointerX - FilePointerGesture.X) >= thresholdX
+            || Abs(pointerY - FilePointerGesture.Y) >= thresholdY
+            FilePointerGesture.Dragging := true
+    }
+
     if !DragPaths.Length || DragStarted || hwnd != DragSourceHwnd || !GetKeyState("LButton", "P")
         return
     x := SignedMouseCoordinate(lParam & 0xFFFF)
@@ -2626,17 +4772,25 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
         DllCall("user32\UpdateWindow", "ptr", StatusText.Hwnd)
         BeginShellDrag(existingPaths, DragSourceHwnd)
     }
+    ; OLE 拖拽返回时原始按键释放通常已被拖放循环消费。
+    CancelFilePointerGesture()
 }
 
 FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
     global FileView, ItemPaths, PinnedPaths, PinnedReorderActive, PinnedReorderPath
     global DragPaths, DragStarted, StatusKind, ViewMode
 
-    if !PinnedReorderActive
+    if !PinnedReorderActive {
+        ProcessFilePointerUp(hwnd, lParam)
+        DragPaths := []
+        DragStarted := false
+        PinnedReorderPath := ""
         return
+    }
 
     PinnedReorderActive := false
     DllCall("user32\ReleaseCapture")
+    CancelFilePointerGesture()
     sourcePath := PinnedReorderPath
     PinnedReorderPath := ""
     DragPaths := []
@@ -2677,6 +4831,204 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
         StatusKind := "default"
         SetBackgroundStatus("已保存固定项顺序", 3000)
     }
+}
+
+ProcessFilePointerUp(hwnd, lParam) {
+    global FilePointerGesture, FileView, RecentView
+    if !IsObject(FilePointerGesture) || !FilePointerGesture.Active
+        return
+    if IsObject(FileView) && hwnd = FileView.Hwnd
+        list := FileView
+    else if IsObject(RecentView) && hwnd = RecentView.Hwnd
+        list := RecentView
+    else
+        return
+
+    x := SignedMouseCoordinate(lParam & 0xFFFF)
+    y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
+    row := HitTestListRow(hwnd, x, y)
+    ProcessFilePointerRelease(list, row)
+}
+
+FileViewClick(list, row, *) {
+    ; NM_CLICK 是原生 ListView 在左键释放阶段发出的通知。部分版本会在
+    ; WM_LBUTTONUP 回调前先释放捕获，因此这里作为同一状态机的可靠入口。
+    ProcessFilePointerRelease(list, row)
+}
+
+ProcessFilePointerRelease(list, row) {
+    global FilePointerGesture, FileView, RecentView
+    global ItemPaths, RecentItemPaths, OPEN_MODE_SINGLE
+
+    if !IsObject(FilePointerGesture) || !FilePointerGesture.Active
+        return
+    gesture := FilePointerGesture
+    ; 先清理，避免打开程序、错误对话框或焦点变化重入本次手势。
+    FilePointerGesture := 0
+
+    if gesture.Cancelled || gesture.Dragging || gesture.Marquee
+        || gesture.ChildControl || !gesture.OpenRegion
+        || list.Hwnd != gesture.Hwnd || gesture.Modifiers != 0
+        || GetPointerModifierMask() != 0
+        return
+
+    if IsObject(FileView) && list.Hwnd = FileView.Hwnd
+        pathMap := ItemPaths
+    else if IsObject(RecentView) && list.Hwnd = RecentView.Hwnd
+        pathMap := RecentItemPaths
+    else
+        return
+    if !row || !pathMap.Has(row)
+        return
+
+    path := pathMap[row]
+    releaseKey := GetDisplayedItemActivationKey(list.Hwnd, row, path)
+    if releaseKey = "" || releaseKey != gesture.Key
+        || !PathsEqual(path, gesture.Path)
+        return
+
+    if IsListItemFolder(list, row, path)
+        return
+    if GetEffectiveOpenMode(GetListItemOpenContext(list, row))
+        != OPEN_MODE_SINGLE
+        return
+
+    ; 无修饰键释放把此前的多选收敛到当前文件，只激活这一项。
+    CollapseListSelectionToRow(list, row)
+    if ShouldSuppressRepeatedPointerActivation(releaseKey)
+        return
+    OpenItemWithDefaultApplication(path)
+}
+
+RestorePointerSelection(serial) {
+    global FilePointerGesture, FileView, ItemPaths
+    if !IsObject(FilePointerGesture) || !FilePointerGesture.Active
+        || FilePointerGesture.Serial != serial
+        || FilePointerGesture.Hwnd != FileView.Hwnd
+        || FilePointerGesture.Modifiers != 0
+        || !GetKeyState("LButton", "P")
+        return
+    snapshot := FilePointerGesture.Selection
+    if snapshot.Length <= 1
+        return
+    FileView.Modify(0, "-Select")
+    for row, path in ItemPaths {
+        if ArrayContainsPath(snapshot, path)
+            FileView.Modify(row, "Select")
+    }
+    if FilePointerGesture.Row
+        FileView.Modify(FilePointerGesture.Row, "Focus Vis")
+}
+
+CollapseListSelectionToRow(list, row) {
+    list.Modify(0, "-Select -Focus")
+    list.Modify(row, "Select Focus Vis")
+    SetTimer(UpdateSelectionStatus, -1)
+}
+
+GetPointerModifierMask() {
+    mask := 0
+    if GetKeyState("Ctrl", "P")
+        mask |= 0x01
+    if GetKeyState("Shift", "P")
+        mask |= 0x02
+    if GetKeyState("Alt", "P")
+        mask |= 0x04
+    if GetKeyState("LWin", "P") || GetKeyState("RWin", "P")
+        mask |= 0x08
+    return mask
+}
+
+GetDisplayedItemActivationKey(hwnd, row, path) {
+    global FileView, RecentView, ItemOpenContexts
+    normalizedKey := PathKey(path)
+    if normalizedKey = ""
+        return ""
+    if IsObject(FileView) && hwnd = FileView.Hwnd {
+        if ItemOpenContexts.Has(row) {
+            context := ItemOpenContexts[row]
+            if context.Area = "Source"
+                return "source|" StrLower(context.SourceId)
+                    . "|" normalizedKey
+            if context.Area = "Pinned"
+                return "pinned|" normalizedKey
+        }
+        return "main|" normalizedKey
+    }
+    if IsObject(RecentView) && hwnd = RecentView.Hwnd
+        return "recent|" normalizedKey
+    return ""
+}
+
+ShouldSuppressRepeatedPointerActivation(key) {
+    global LastPointerActivationKey, LastPointerActivationTick
+    now := A_TickCount
+    doubleClickTime := DllCall("user32\GetDoubleClickTime", "uint")
+    elapsed := LastPointerActivationTick = 0
+        ? doubleClickTime + 1
+        : ElapsedTickMilliseconds(LastPointerActivationTick, now)
+    if key = LastPointerActivationKey && elapsed <= doubleClickTime
+        return true
+    LastPointerActivationKey := key
+    LastPointerActivationTick := now
+    return false
+}
+
+ElapsedTickMilliseconds(earlier, later) {
+    if later >= earlier
+        return later - earlier
+    return (0xFFFFFFFF - earlier) + later + 1
+}
+
+CancelFilePointerGesture(*) {
+    global FilePointerGesture, DragPaths, DragStarted
+    if IsObject(FilePointerGesture)
+        FilePointerGesture.Cancelled := true
+    FilePointerGesture := 0
+    DragPaths := []
+    DragStarted := false
+}
+
+CancelFilePointerGestureForHwnd(hwnd) {
+    global FilePointerGesture
+    if IsObject(FilePointerGesture)
+        && FilePointerGesture.Active
+        && FilePointerGesture.Hwnd = hwnd
+        CancelFilePointerGesture()
+}
+
+IsTrackedFileViewHwnd(hwnd) {
+    global FileView, RecentView
+    return (IsObject(FileView) && hwnd = FileView.Hwnd)
+        || (IsObject(RecentView) && hwnd = RecentView.Hwnd)
+}
+
+FileViewRightButtonDown(wParam, lParam, msg, hwnd) {
+    if IsTrackedFileViewHwnd(hwnd)
+        CancelFilePointerGesture()
+}
+
+FileViewCancelInteraction(wParam, lParam, msg, hwnd) {
+    if IsTrackedFileViewHwnd(hwnd)
+        CancelFilePointerGesture()
+}
+
+FileViewCancelMode(wParam, lParam, msg, hwnd) {
+    if IsTrackedFileViewHwnd(hwnd)
+        CancelFilePointerGestureForHwnd(hwnd)
+}
+
+FileViewCaptureChanged(wParam, lParam, msg, hwnd) {
+    ; 原生 ListView 在正常释放期间也会发 WM_CAPTURECHANGED。此时物理
+    ; 左键已抬起，NM_CLICK/WM_LBUTTONUP 仍需消费手势，不能提前清除。
+    ; 只有按键仍按住时的捕获转移才是真正的取消/外部抢占。
+    if IsTrackedFileViewHwnd(hwnd) && GetKeyState("LButton", "P")
+        CancelFilePointerGestureForHwnd(hwnd)
+}
+
+FileViewKillFocus(wParam, lParam, msg, hwnd) {
+    if IsTrackedFileViewHwnd(hwnd)
+        CancelFilePointerGestureForHwnd(hwnd)
 }
 
 SignedMouseCoordinate(value) {
@@ -2738,10 +5090,530 @@ PathArraysEqual(left, right) {
     if left.Length != right.Length
         return false
     for index, path in left {
-        if StrLower(RTrim(path, "\")) != StrLower(RTrim(right[index], "\"))
+        if !PathsEqual(path, right[index])
             return false
     }
     return true
+}
+
+RunTransferToTarget(operation, paths, targetPath, *) {
+    if !DirExist(targetPath) {
+        ShowPanelMsgBox("目标文件夹不存在、离线或当前无权访问：`n"
+            targetPath, "目标不可用", "Icon!")
+        return
+    }
+    PerformShellFileOperation(operation, paths, targetPath)
+}
+
+ChooseTransferFolder(operation, paths, *) {
+    global LastTransferTargetDir
+    initial := DirExist(LastTransferTargetDir)
+        ? LastTransferTargetDir : GetKnownFolderPath(
+            "{374DE290-123F-4565-9164-39C4925E467B}")
+    selected := SelectPanelFile("D3", initial,
+        operation = "copy" ? "选择复制目标文件夹" : "选择移动目标文件夹")
+    if selected = ""
+        return
+    RunTransferToTarget(operation, paths, NormalizePath(selected))
+}
+
+OpenConfigAtTransferFavorites(*) {
+    OpenConfigFile()
+    SetUserStatus("请在 [TransferFavorites] 中管理常用位置")
+}
+
+RemoveInvalidTransferTargets(*) {
+    global TransferFavorites, RecentTargets
+    validFavorites := []
+    validRecent := []
+    for path in TransferFavorites {
+        if DirExist(path)
+            validFavorites.Push(path)
+    }
+    for path in RecentTargets {
+        if DirExist(path)
+            validRecent.Push(path)
+    }
+    if validFavorites.Length = TransferFavorites.Length
+        && validRecent.Length = RecentTargets.Length
+        return
+    TransferFavorites := validFavorites
+    RecentTargets := validRecent
+    SaveTransferTargets()
+    SetUserStatus("已移除不可用的目标位置")
+}
+
+PerformShellFileOperation(operation, paths, targetPath) {
+    ; Native IFileOperation pipeline. The advised
+    ; IFileOperationProgressSink records actual destination Shell items;
+    ; PerformOperations is always followed by GetAnyOperationsAborted.
+    global Panel, PinnedPaths
+    if operation != "copy" && operation != "move"
+        return
+    targetPath := NormalizePath(targetPath)
+    validPaths := []
+    skipped := 0
+    noOp := 0
+    validationDetails := []
+    for path in paths {
+        path := NormalizePath(path)
+        attributes := FileExist(path)
+        if !attributes {
+            skipped += 1
+            validationDetails.Push(path "：项目不存在或无法访问")
+            continue
+        }
+        if InStr(attributes, "D") && IsSameOrDescendantPath(targetPath, path) {
+            skipped += 1
+            validationDetails.Push(path "：不能复制或移动到自身或后代目录")
+            continue
+        }
+        if operation = "move" && PathsEqual(GetParentPath(path), targetPath) {
+            noOp += 1
+            continue
+        }
+        if !ArrayContainsPath(validPaths, path)
+            validPaths.Push(path)
+    }
+    if !validPaths.Length {
+        message := noOp
+            ? "目标与源父文件夹相同，没有需要移动的项目。"
+            : "没有可执行的项目；失效路径或文件夹自身/后代目标已跳过。"
+        ShowPanelMsgBox(message, operation = "copy" ? "复制到" : "移动到",
+            "Iconi")
+        return
+    }
+
+    viewState := CaptureViewState(validPaths)
+    state := {
+        Operation: operation,
+        Target: targetPath,
+        Success: 0,
+        Failed: 0,
+        Changed: false,
+        Mappings: Map(),
+        PinnedMappingFailures: [],
+        Details: []
+    }
+    for detail in validationDetails
+        state.Details.Push(detail)
+    sink := CreateFileOperationProgressSink(state)
+    fileOperation := 0
+    destinationItem := 0
+    cookie := 0
+    queued := 0
+    aborted := 0
+    performHr := 0x80004005
+    try {
+        clsid := GuidBuffer("{3AD05575-8857-4850-9277-11B85BDB8E09}")
+        iidFileOperation := GuidBuffer("{947AAB5F-0A5C-4C13-B4D6-4BF7836FC9F8}")
+        hr := DllCall("ole32\CoCreateInstance", "ptr", clsid.Ptr,
+            "ptr", 0, "uint", 1, "ptr", iidFileOperation.Ptr,
+            "ptr*", &fileOperation, "int")
+        if hr != 0 || !fileOperation
+            throw Error("无法创建 Windows Shell 文件操作。")
+
+        ; FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOFX_SHOWELEVATIONPROMPT.
+        ; 冲突、文件占用、合并和取消仍交由 Shell 标准界面处理。
+        ComCall(5, fileOperation, "uint", 0x40240)
+        ComCall(9, fileOperation, "ptr", Panel.Hwnd)
+        hr := ComCall(3, fileOperation, "ptr", sink.Ptr, "uint*", &cookie)
+        if hr != 0
+            throw Error("无法订阅文件操作结果。")
+
+        destinationItem := CreateShellItem(targetPath)
+        if !destinationItem
+            throw Error("Windows Shell 无法解析目标文件夹。")
+
+        for sourcePath in validPaths {
+            sourceItem := CreateShellItem(sourcePath)
+            if !sourceItem {
+                state.Failed += 1
+                state.Details.Push(sourcePath "：Shell 无法解析")
+                continue
+            }
+            try {
+                if operation = "copy"
+                    hr := ComCall(16, fileOperation, "ptr", sourceItem,
+                        "ptr", destinationItem, "ptr", 0, "ptr", 0)
+                else
+                    hr := ComCall(14, fileOperation, "ptr", sourceItem,
+                        "ptr", destinationItem, "ptr", 0, "ptr", 0)
+                if HResultSucceeded(hr)
+                    queued += 1
+                else {
+                    state.Failed += 1
+                    state.Details.Push(sourcePath "：无法加入操作队列")
+                }
+            } finally {
+                ObjRelease(sourceItem)
+            }
+        }
+        if !queued
+            throw Error("没有项目能够加入 Windows Shell 操作队列。")
+
+        BeginAutoHidePause()
+        try performHr := ComCall(21, fileOperation)
+        finally EndAutoHidePause()
+        ComCall(22, fileOperation, "int*", &aborted)
+    } catch as err {
+        ShowPanelMsgBox("文件操作失败：`n" err.Message,
+            operation = "copy" ? "复制到" : "移动到", "Iconx")
+    } finally {
+        if fileOperation && cookie
+            try ComCall(4, fileOperation, "uint", cookie)
+        if destinationItem
+            ObjRelease(destinationItem)
+        if fileOperation
+            ObjRelease(fileOperation)
+        ReleaseFileOperationSink(sink)
+    }
+
+    totalFailures := state.Failed + skipped
+    if state.Changed {
+        pinnedUpdateFailed := false
+        if operation = "move" && state.Mappings.Count {
+            try UpdatePinnedPathsAfterMove(state.Mappings)
+            catch as err {
+                pinnedUpdateFailed := true
+                ShowPanelMsgBox("文件已移动，但固定项路径保存失败：`n"
+                    err.Message "`n`n请立即检查 config.ini。",
+                    "固定项更新失败", "Iconx")
+            }
+        }
+        if operation = "move" && state.PinnedMappingFailures.Length {
+            pinnedUpdateFailed := true
+            ShowPanelMsgBox(
+                "以下固定项已移动，但 Windows Shell 未返回可验证的新路径：`n"
+                JoinArray(state.PinnedMappingFailures, "`n")
+                "`n`n请检查并修正固定项配置。",
+                "固定项路径需要检查", "Icon!")
+        }
+        try RememberSuccessfulTarget(targetPath)
+        catch as err
+            ShowPanelMsgBox("文件操作已完成，但无法保存最近目标：`n"
+                err.Message, "目标记录失败", "Icon!")
+        QueueSingleRefreshAfterFileOperation(viewState, state.Mappings)
+        actionText := operation = "copy" ? "复制" : "移动"
+        if totalFailures {
+            message := "已" actionText " " state.Success " 个项目，"
+                . totalFailures " 个项目失败或跳过    查看详情"
+        } else if aborted {
+            message := "已" actionText " " state.Success
+                . " 个项目，操作随后被取消    打开目标文件夹"
+        } else {
+            message := "已将 " state.Success " 个项目" actionText
+                . "到“" GetFileName(targetPath) "”    打开目标文件夹"
+        }
+        if pinnedUpdateFailed
+            message .= "；固定项需要检查"
+        if totalFailures
+            SetActionStatus(message, ShowFileOperationDetails.Bind(
+                state.Details.Clone(), targetPath))
+        else
+            SetActionStatus(message, OpenFolderPath.Bind(targetPath))
+    } else if aborted || HResultSucceeded(performHr) {
+        SetUserStatus("操作已取消，未产生文件变化")
+    }
+}
+
+ShowFileOperationDetails(details, targetPath, *) {
+    message := details.Length ? JoinArray(details, "`n") : "没有更多错误详情。"
+    message .= "`n`n目标文件夹：`n" targetPath
+    ShowPanelMsgBox(message, "文件操作详情", "Iconi")
+}
+
+CreateShellItem(path) {
+    iidShellItem := GuidBuffer("{43826D1E-E718-42EE-BC55-A1E261C37BFE}")
+    item := 0
+    hr := DllCall("shell32\SHCreateItemFromParsingName", "wstr", path,
+        "ptr", 0, "ptr", iidShellItem.Ptr, "ptr*", &item, "int")
+    return hr = 0 ? item : 0
+}
+
+HResultSucceeded(hr) {
+    return (hr & 0x80000000) = 0
+}
+
+RememberSuccessfulTarget(targetPath) {
+    global RecentTargets, LastTransferTargetDir
+    targetPath := NormalizePath(targetPath)
+    index := FindPathIndex(RecentTargets, targetPath)
+    if index
+        RecentTargets.RemoveAt(index)
+    RecentTargets.InsertAt(1, targetPath)
+    while RecentTargets.Length > 3
+        RecentTargets.Pop()
+    LastTransferTargetDir := targetPath
+    SaveTransferTargets()
+}
+
+SaveTransferTargets() {
+    AtomicConfigEdit(WriteTransferTargetsConfig)
+}
+
+WriteTransferTargetsConfig(tempPath) {
+    global TransferFavorites, RecentTargets, LastTransferTargetDir
+    try IniDelete(tempPath, "TransferFavorites")
+    for index, path in TransferFavorites
+        IniWrite(path, tempPath, "TransferFavorites",
+            "Path" Format("{:03}", index))
+    try IniDelete(tempPath, "RecentTargets")
+    for index, path in RecentTargets
+        IniWrite(path, tempPath, "RecentTargets", "Path" Format("{:03}", index))
+    IniWrite(LastTransferTargetDir, tempPath, "General", "LastTransferTargetDir")
+    IniWrite("1", tempPath, "General", "TransferFavoritesInitialized")
+    IniWrite("8", tempPath, "General", "ConfigVersion")
+}
+
+UpdatePinnedPathsAfterMove(mappings) {
+    global PinnedPaths
+    changed := false
+    for index, pinnedPath in PinnedPaths {
+        key := PathKey(pinnedPath)
+        if mappings.Has(key) {
+            PinnedPaths[index] := mappings[key].NewPath
+            changed := true
+        }
+    }
+    if changed
+        SavePinnedFiles()
+}
+
+CaptureViewState(operationPaths) {
+    global FileView, ItemPaths
+    selected := []
+    for row in GetSelectedFileRows()
+        selected.Push(ItemPaths[row])
+    focusedRow := FileView.GetNext(0, "F")
+    topIndex := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x1027, "ptr", 0, "ptr", 0, "int") + 1 ; LVM_GETTOPINDEX
+    return {
+        Selected: selected,
+        FocusedPath: focusedRow && ItemPaths.Has(focusedRow)
+            ? ItemPaths[focusedRow] : "",
+        AnchorRow: focusedRow ? focusedRow : topIndex,
+        TopRow: topIndex
+    }
+}
+
+QueueSingleRefreshAfterFileOperation(viewState, mappings) {
+    global PendingViewRestore, PendingFileOperationRefresh
+    selected := []
+    for path in viewState.Selected {
+        key := PathKey(path)
+        selected.Push(mappings.Has(key) ? mappings[key].NewPath : path)
+    }
+    focusPath := viewState.FocusedPath
+    focusKey := PathKey(focusPath)
+    if focusPath != "" && mappings.Has(focusKey)
+        focusPath := mappings[focusKey].NewPath
+    PendingViewRestore := {
+        Selected: selected,
+        FocusedPath: focusPath,
+        AnchorRow: viewState.AnchorRow,
+        TopRow: viewState.TopRow
+    }
+    PendingFileOperationRefresh := true
+    StartBackgroundScan()
+}
+
+ApplyPendingViewRestore() {
+    global PendingViewRestore, PendingFileOperationRefresh, FileView, ItemPaths
+    if !IsObject(PendingViewRestore)
+        return
+    restore := PendingViewRestore
+    FileView.Modify(0, "-Select -Focus")
+    selectedRows := []
+    focusRow := 0
+    for row, path in ItemPaths {
+        if ArrayContainsPath(restore.Selected, path) {
+            FileView.Modify(row, "Select")
+            selectedRows.Push(row)
+        }
+        if restore.FocusedPath != "" && PathsEqual(path, restore.FocusedPath)
+            focusRow := row
+    }
+    if !focusRow {
+        if selectedRows.Length
+            focusRow := selectedRows[1]
+        else if ItemPaths.Count
+            focusRow := Max(1, Min(restore.AnchorRow, ItemPaths.Count))
+    }
+    if focusRow {
+        FileView.Modify(focusRow, "Focus Vis")
+        DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+            "uint", 0x1013, "ptr", Max(0, restore.TopRow - 1),
+            "ptr", 0, "ptr") ; LVM_ENSUREVISIBLE
+    }
+    PendingViewRestore := 0
+    PendingFileOperationRefresh := false
+    UpdateSelectionStatus()
+}
+
+InitFileOperationProgressSink() {
+    global FileOperationSinkVTable, FileOperationSinkCallbacks
+    FileOperationSinkCallbacks := [
+        CallbackCreate(FileOpSinkQueryInterface, "Fast", 3),
+        CallbackCreate(FileOpSinkAddRef, "Fast", 1),
+        CallbackCreate(FileOpSinkRelease, "Fast", 1),
+        CallbackCreate(FileOpSinkStartOperations, "Fast", 1),
+        CallbackCreate(FileOpSinkFinishOperations, "Fast", 2),
+        CallbackCreate(FileOpSinkPreRenameItem, "Fast", 4),
+        CallbackCreate(FileOpSinkPostRenameItem, "Fast", 6),
+        CallbackCreate(FileOpSinkPreMoveItem, "Fast", 5),
+        CallbackCreate(FileOpSinkPostMoveItem, "Fast", 7),
+        CallbackCreate(FileOpSinkPreCopyItem, "Fast", 5),
+        CallbackCreate(FileOpSinkPostCopyItem, "Fast", 7),
+        CallbackCreate(FileOpSinkPreDeleteItem, "Fast", 3),
+        CallbackCreate(FileOpSinkPostDeleteItem, "Fast", 5),
+        CallbackCreate(FileOpSinkPreNewItem, "Fast", 4),
+        CallbackCreate(FileOpSinkPostNewItem, "Fast", 8),
+        CallbackCreate(FileOpSinkUpdateProgress, "Fast", 3),
+        CallbackCreate(FileOpSinkResetTimer, "Fast", 1),
+        CallbackCreate(FileOpSinkPauseTimer, "Fast", 1),
+        CallbackCreate(FileOpSinkResumeTimer, "Fast", 1)
+    ]
+    FileOperationSinkVTable := Buffer(
+        FileOperationSinkCallbacks.Length * A_PtrSize, 0)
+    for index, callback in FileOperationSinkCallbacks
+        NumPut("ptr", callback, FileOperationSinkVTable,
+            (index - 1) * A_PtrSize)
+}
+
+CreateFileOperationProgressSink(state) {
+    global FileOperationSinkVTable, FileOperationSinks
+    sink := Buffer(A_PtrSize + 8, 0)
+    NumPut("ptr", FileOperationSinkVTable.Ptr, sink, 0)
+    NumPut("uint", 1, sink, A_PtrSize)
+    FileOperationSinks[sink.Ptr] := {Memory: sink, State: state}
+    return sink
+}
+
+ReleaseFileOperationSink(sink) {
+    if IsObject(sink)
+        FileOpSinkRelease(sink.Ptr)
+}
+
+FileOpSinkQueryInterface(this, iid, objectOut) {
+    static iidUnknown := GuidBuffer("{00000000-0000-0000-C000-000000000046}")
+    static iidSink := GuidBuffer("{04B0F1A7-9490-44BC-96E1-4296A31252E2}")
+    if !GuidPointersEqual(iid, iidUnknown.Ptr)
+        && !GuidPointersEqual(iid, iidSink.Ptr) {
+        NumPut("ptr", 0, objectOut)
+        return 0x80004002
+    }
+    NumPut("ptr", this, objectOut)
+    FileOpSinkAddRef(this)
+    return 0
+}
+
+FileOpSinkAddRef(this) {
+    count := NumGet(this + A_PtrSize, "uint") + 1
+    NumPut("uint", count, this + A_PtrSize)
+    return count
+}
+
+FileOpSinkRelease(this) {
+    global FileOperationSinks
+    count := NumGet(this + A_PtrSize, "uint")
+    if count
+        count -= 1
+    NumPut("uint", count, this + A_PtrSize)
+    if !count && FileOperationSinks.Has(this)
+        FileOperationSinks.Delete(this)
+    return count
+}
+
+FileOpSinkStartOperations(this) {
+    return 0
+}
+FileOpSinkFinishOperations(this, hrResult) {
+    return 0
+}
+FileOpSinkPreRenameItem(this, flags, item, newName) {
+    return 0
+}
+FileOpSinkPostRenameItem(this, flags, item, newName, hr, created) {
+    return 0
+}
+FileOpSinkPreMoveItem(this, flags, item, destination, newName) {
+    return 0
+}
+FileOpSinkPostMoveItem(this, flags, item, destination, newName, hr, created) {
+    RecordFileOperationResult(this, item, hr, created)
+    return 0
+}
+FileOpSinkPreCopyItem(this, flags, item, destination, newName) {
+    return 0
+}
+FileOpSinkPostCopyItem(this, flags, item, destination, newName, hr, created) {
+    RecordFileOperationResult(this, item, hr, created)
+    return 0
+}
+FileOpSinkPreDeleteItem(this, flags, item) {
+    return 0
+}
+FileOpSinkPostDeleteItem(this, flags, item, hr, created) {
+    return 0
+}
+FileOpSinkPreNewItem(this, flags, destination, newName) {
+    return 0
+}
+FileOpSinkPostNewItem(this, flags, destination, newName, templateName,
+    attributes, hr, created) {
+    return 0
+}
+FileOpSinkUpdateProgress(this, total, completed) {
+    return 0
+}
+FileOpSinkResetTimer(this) {
+    return 0
+}
+FileOpSinkPauseTimer(this) {
+    return 0
+}
+FileOpSinkResumeTimer(this) {
+    return 0
+}
+
+RecordFileOperationResult(this, originalItem, hr, createdItem) {
+    global FileOperationSinks, PinnedPaths
+    if !FileOperationSinks.Has(this)
+        return
+    state := FileOperationSinks[this].State
+    originalPath := GetShellItemPath(originalItem)
+    if HResultSucceeded(hr) {
+        newPath := createdItem ? GetShellItemPath(createdItem) : ""
+        state.Success += 1
+        state.Changed := true
+        if state.Operation = "move" && originalPath != "" {
+            if newPath != ""
+                state.Mappings[PathKey(originalPath)] := {
+                    OldPath: originalPath, NewPath: newPath}
+            else if FindPathIndex(PinnedPaths, originalPath) {
+                state.PinnedMappingFailures.Push(originalPath)
+                state.Details.Push(originalPath
+                    "：Shell 未返回实际新路径，固定项未自动更新")
+            }
+        }
+        return
+    }
+    state.Failed += 1
+    if originalPath != ""
+        state.Details.Push(originalPath "：操作未完成")
+}
+
+GetShellItemPath(shellItem) {
+    if !shellItem
+        return ""
+    pathPtr := 0
+    hr := ComCall(5, shellItem, "uint", 0x80058000,
+        "ptr*", &pathPtr) ; SIGDN_FILESYSPATH
+    if hr != 0 || !pathPtr
+        return ""
+    try return NormalizePath(StrGet(pathPtr))
+    finally DllCall("ole32\CoTaskMemFree", "ptr", pathPtr)
 }
 
 InitDropSource() {
@@ -3064,9 +5936,71 @@ DropGiveFeedback(this, effect) {
     return 0x00040102 ; DRAGDROP_S_USEDEFAULTCURSORS
 }
 
+RunSelfTests() {
+    global NO_EXTENSION_TOKEN
+    global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
+    try {
+        AssertSelfTest(ParseGlobalOpenFileMode("") = OPEN_MODE_DOUBLE,
+            "缺失全局打开方式回退为双击")
+        AssertSelfTest(ParseGlobalOpenFileMode("broken") = OPEN_MODE_DOUBLE,
+            "损坏全局打开方式回退为双击")
+        AssertSelfTest(ParseGlobalOpenFileMode("singleclick") = OPEN_MODE_SINGLE,
+            "全局单击方式大小写不敏感")
+        AssertSelfTest(ParseSourceOpenFileMode("") = SOURCE_OPEN_MODE_INHERIT,
+            "缺失来源打开方式继承全局")
+        AssertSelfTest(ParseSourceOpenFileMode("unknown")
+            = SOURCE_OPEN_MODE_INHERIT,
+            "损坏来源打开方式继承全局")
+        extensions := NormalizeOpenAppExtensions("PDF, .pdf, txt, <none>, none")
+        AssertSelfTest(extensions.Length = 3, "扩展名去重")
+        AssertSelfTest(extensions[1] = ".pdf", "扩展名小写及点号")
+        AssertSelfTest(extensions[3] = NO_EXTENSION_TOKEN, "无扩展名类型")
+        AssertSelfTest(GetFileExtensionType("C:\a\README") = NO_EXTENSION_TOKEN,
+            "无扩展名识别")
+        AssertSelfTest(GetFileExtensionType("C:\a\archive.tar.gz") = ".gz",
+            "只取最后扩展名")
+        AssertSelfTest(IsExecutablePath("C:\Program Files\7-Zip\7z.exe"),
+            "EXE 扩展名识别")
+        AssertSelfTest(IsExecutablePath("C:\Tools\APP.EXE"),
+            "EXE 扩展名大小写不敏感")
+        AssertSelfTest(!IsExecutablePath("C:\Tools\script.cmd"),
+            "拒绝脚本型程序")
+        appIds := ParseOpenAppOrder("7z, everedit,7Z, guoheview")
+        AssertSelfTest(appIds.Length = 3 && appIds[1] = "7z"
+            && appIds[3] = "guoheview", "软件顺序解析及 ID 去重")
+        AssertSelfTest(OpenAppIdBase(
+            "C:\Program Files\7-Zip\7zG.exe") = "7zg",
+            "从 EXE 文件名生成可读软件 ID")
+        AssertSelfTest(OpenAppIdBase(
+            "C:\Tools\My App!.exe") = "my-app",
+            "可读软件 ID 字符规范化")
+        AssertSelfTest(IsGuidOpenAppId(
+            "16e792f3-dc35-422a-b61f-4fb325a2616b"),
+            "识别旧版 UUID 软件 ID")
+        AssertSelfTest(PathsEqual('"C:/Temp/Folder/"', "c:\temp\folder"),
+            "Windows 路径规范比较")
+        AssertSelfTest(IsSameOrDescendantPath(
+            "C:\Temp\Folder\Child", "c:\temp\folder"),
+            "后代路径识别")
+        AssertSelfTest(!IsSameOrDescendantPath(
+            "C:\Temp\Folder2", "c:\temp\folder"),
+            "路径边界识别")
+        FileAppend("PopDrop v0.7 self-test: PASS`n", "*")
+    } catch as err {
+        FileAppend("PopDrop v0.7 self-test: FAIL - " err.Message "`n", "*")
+        ExitApp(1)
+    }
+}
+
+AssertSelfTest(condition, name) {
+    if !condition
+        throw Error("测试失败：" name)
+}
+
 Cleanup(*) {
     global DropCallbacks, DataCallbacks, ThumbnailImageList, MainInstanceMutex
     global WorkerRunning, WorkerPid, WorkerRequestPath, WorkerReadyPath, PanelIconHandle
+    global FileOperationSinkCallbacks
     SetTimer(PollWorkerResult, 0)
     if WorkerRunning && WorkerPid && ProcessExist(WorkerPid)
         try ProcessClose(WorkerPid)
@@ -3076,6 +6010,8 @@ Cleanup(*) {
     for callbackPtr in DropCallbacks
         CallbackFree(callbackPtr)
     for callbackPtr in DataCallbacks
+        CallbackFree(callbackPtr)
+    for callbackPtr in FileOperationSinkCallbacks
         CallbackFree(callbackPtr)
     if ThumbnailImageList
         DllCall("comctl32\ImageList_Destroy", "ptr", ThumbnailImageList)

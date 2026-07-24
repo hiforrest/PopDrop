@@ -1,5 +1,7 @@
 # PopDrop
 
+当前版本：**v0.7.0**
+
 <img src="assets/logo.webp" width="192px">
 
 按一下 `F2`，一个文件面板出现在屏幕最前面。找到文件，拖走，关掉。全程不到三秒。
@@ -22,7 +24,8 @@ PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近
 3. 双击 `PopDrop.ahk`
 4. 按 `F2` 试试看
 
-> 无论哪种方式，**PopDrop 不会修改、移动、删除你的文件**——只负责展示和操作。
+> PopDrop 只会在你明确选择“复制到…”或“移动到…”后调用 Windows Shell
+> 执行文件操作；取消固定项只会移除面板记录，不会删除真实文件。
 
 详细配置和使用说明请查看 **[使用指南](USAGE.md)**。
 
@@ -38,7 +41,13 @@ PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近
 - **拖入保持可见**：temporary 模式下接收拖入项目时暂停自动隐藏，完成后窗口保持打开
 - **实时置顶切换**：顶部按钮可在 temporary 与 always_on_top 模式之间即时切换
 - **完整拖放支持**：从面板拖拽文件到 Photoshop、浏览器、微信等任何软件
-- **Windows 完整右键菜单**：包括你装过的第三方扩展（7-Zip、Notepad++、VS Code 等）
+- **PopDrop 精简右键菜单**：打开、应用选择、Explorer 定位、复制、复制/移动到和固定项操作
+- **完整系统菜单仍保留**：`Shift + 右击` 或 `Shift + F10`，包括第三方 Shell 扩展
+- **键盘操作**：`Enter` 打开、`Ctrl + Enter` 定位、`Ctrl + C` 复制文件对象、`Ctrl + Shift + C` 复制路径
+- **可选单击打开**：普通文件可全局或按来源切换单击/双击；多选、拖拽和文件夹双击不变
+- **配置打开软件**：按扩展名显示最多 5 个常用应用，其余进入二级菜单
+- **Shell 文件操作**：多选、跨目录复制/移动，使用 Windows `IFileOperation` 处理冲突、进度与取消
+- **三种显示范围**：仅文件、文件和直接子文件夹、递归文件平铺
 - **最近打开侧边栏**：右侧显示 Windows 近期文件记录，双击即可再次打开
 - **多选操作**：`Ctrl` 多选、`Shift` 连续选、拖框选——支持跨文件夹、跨磁盘
 - **Launcher 模式**：将文件夹变成快捷启动面板，按数字前缀排序 [详细说明](USAGE.md#快捷启动文件夹launcher模式v05)
@@ -50,20 +59,48 @@ PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近
 
 ```ini
 [General]
+ConfigVersion=8
 Hotkey=F2
+OpenFileMode=DoubleClick
 MaxFilesPerFolder=8
+DisplayScope=FilesOnly
+FolderTimeMode=DirectoryModified
 WindowMode=temporary
 ViewMode=Thumbnail
+ThumbnailSize=96
+ThumbnailHorizontalGap=24
+ThumbnailVerticalGap=4
+ThumbnailTextLines=2
 ShowRecentSidebar=1
 
 [Folders]
 文档=%USERPROFILE%\Documents
 下载=D:\download
 项目=D:\Projects\Current
+
+[Folder:下载]
+OpenFileMode=SingleClick
 ```
+
+`ThumbnailTextLines=1` 时，过长文件名会按图标宽度显示省略号；选择项目后，状态栏仍会
+显示完整路径，切换到列表视图时也会恢复完整文本。双行模式维持原有显示方式。
+
+面板的“配置”按钮可直接选择全局打开方式，并为每个监控来源选择“跟随全局设置”、
+“单击”或“双击”。固定项和最近文件使用全局值；文件夹始终需要双击。单击模式只在
+无修饰键且未发生拖拽的左键释放时打开文件。
 
 所有配置项详解见 **[使用指南](USAGE.md)**。
 
+手工配置打开软件时，只需在 `[OpenApps]` 的 `Order=` 中列出可读 ID，再添加对应的
+`[OpenApp:<ID>]` 段；例如 `Order=7z,everedit`。应用段中只有 `Path` 必填，
+`Name`、`Icon`、`Enabled` 均有安全默认值。旧版 `App001=<UUID>` 格式会自动迁移。
+
 ## 安全说明
 
-PopDrop 不会主动修改、移动或删除你的文件。软件由 AutoHotkey 开发，可能被安全软件误报。
+PopDrop 不会静默覆盖文件，也不会通过“复制后删除”模拟跨盘移动。复制和移动由
+Windows Shell 原生文件操作完成；重名、合并、权限提升、取消和部分完成由系统处理。
+程序路径和文件参数分别交给 Windows API，v0.7 只允许配置 `.exe`。软件由 AutoHotkey
+开发，可能被安全软件误报。
+
+`[TransferFavorites]` 中的每条 `PathNNN` 都是可删除的常用目标；桌面和下载也作为普通
+配置项保存，删除后不会被程序重新添加。
