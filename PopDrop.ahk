@@ -135,7 +135,9 @@ global StatusTimerToken := 0
 global PanelIconHandle := 0
 global OpenApps := []
 global TransferFavorites := []
+global TransferFavoriteLabels := Map()
 global RecentTargets := []
+global GlobalExcludedFolderNames := []
 global LastOpenProgramDir := ""
 global LastTransferTargetDir := ""
 global PendingViewRestore := 0
@@ -148,6 +150,9 @@ global CurrentStatusAction := 0
 global OpenAppsConfigNeedsMigration := false
 global GlobalOpenFileMode := OPEN_MODE_DOUBLE
 global SettingsDialog := 0
+global EscapeHidesPanel := true
+
+#Include SettingsGui.ahk
 
 ; ──── 单击激活手势和重复激活抑制 ────
 global FilePointerGesture := 0
@@ -250,10 +255,11 @@ EnsureConfig() {
     "; 修改后，在面板中点“刷新”即可重新读取。`n"
     "`n"
     "[General]`n"
-    "ConfigVersion=8`n"
+    "ConfigVersion=9`n"
     "Hotkey=F2`n"
     "; DoubleClick（默认）| SingleClick`n"
     "OpenFileMode=DoubleClick`n"
+    "EscapeHidesPanel=1`n"
     "MaxFilesPerFolder=8`n"
     "; FilesOnly | FilesAndFolders | RecursiveFiles`n"
     "DisplayScope=FilesOnly`n"
@@ -282,6 +288,7 @@ EnsureConfig() {
     "LastOpenProgramDir=`n"
     "LastTransferTargetDir=`n"
     "TransferFavoritesInitialized=1`n"
+    "GlobalExcludedNamesInitialized=1`n"
     "`n"
     "[Folders]`n"
     "文档=%USERPROFILE%\Documents`n"
@@ -301,6 +308,13 @@ EnsureConfig() {
     "; Path003=D:\Projects\Delivery`n"
     "`n"
     "[RecentTargets]`n"
+    "`n"
+    "[ExcludedFolderNames]`n"
+    "Name001=.git`n"
+    "Name002=.svn`n"
+    "Name003=.hg`n"
+    "Name004=node_modules`n"
+    "Name005=__pycache__`n"
     )
     ; IniRead/IniWrite use the Windows profile API, which requires UTF-16 for
     ; reliable Chinese text on every system locale.
@@ -334,7 +348,8 @@ LoadSettings(*) {
     global SortMode, SORT_MODIFIED_DESC, SORT_NAME_ASC
     global MODE_FILES, MODE_LAUNCHER
     global SCOPE_FILES_ONLY, SCOPE_RECURSIVE_FILES, FOLDER_TIME_MODIFIED
-    global OpenApps, TransferFavorites, RecentTargets
+    global OpenApps, TransferFavorites, TransferFavoriteLabels, RecentTargets
+    global GlobalExcludedFolderNames, EscapeHidesPanel
     global LastOpenProgramDir, LastTransferTargetDir
     global OpenAppsConfigNeedsMigration
     global GlobalOpenFileMode, OPEN_MODE_DOUBLE
@@ -348,6 +363,9 @@ LoadSettings(*) {
     ; 缺失、空值和未知值都必须保持旧版的双击行为。
     GlobalOpenFileMode := ParseGlobalOpenFileMode(
         IniRead(ConfigPath, "General", "OpenFileMode", OPEN_MODE_DOUBLE))
+    EscapeHidesPanel := IniRead(
+        ConfigPath, "General", "EscapeHidesPanel", "1") = "1"
+    GlobalExcludedFolderNames := LoadGlobalExcludedFolderNames()
 
     ; 读取窗口模式
     rawMode := StrLower(Trim(IniRead(ConfigPath, "General", "WindowMode", "temporary")))
@@ -457,7 +475,9 @@ LoadSettings(*) {
                     StripOrderPrefix: 0,
                     HideExtensions: 0,
                     SourceId: ResolveFolderSourceId(f.Name, f.Path),
-                    OpenFileMode: "Inherit"
+                    OpenFileMode: "Inherit",
+                    ExcludedPaths: [],
+                    AllowedExcludedPaths: []
                 })
             }
         }
@@ -491,6 +511,7 @@ LoadSettings(*) {
         }
     }
     TransferFavorites := LoadTransferFavorites(settingErrors)
+    TransferFavoriteLabels := LoadTransferFavoriteLabels(TransferFavorites)
     RecentTargets := LoadPathListSection("RecentTargets", 3)
 }
 
@@ -923,7 +944,11 @@ ValidateConfig() {
             StripOrderPrefix: folderStripOrderPrefix,
             HideExtensions: folderHideExtensions,
             SourceId: sourceId,
-            OpenFileMode: folderOpenFileMode
+            OpenFileMode: folderOpenFileMode,
+            ExcludedPaths: LoadConfiguredSourcePaths(
+                "SourceExclude:" sourceId, f.Path),
+            AllowedExcludedPaths: LoadConfiguredSourcePaths(
+                "SourceAllow:" sourceId, f.Path)
         })
     }
 
@@ -1607,7 +1632,7 @@ WriteOpenAppsConfig(tempPath) {
             IniWrite("0", tempPath, section, "Enabled")
     }
     IniWrite(LastOpenProgramDir, tempPath, "General", "LastOpenProgramDir")
-    IniWrite("8", tempPath, "General", "ConfigVersion")
+    IniWrite("9", tempPath, "General", "ConfigVersion")
 }
 
 ShouldIncludeFile(filename, filter) {
@@ -1739,7 +1764,7 @@ WriteInitialTransferFavoritesConfig(favorites, tempPath) {
         IniWrite(path, tempPath, "TransferFavorites",
             "Path" Format("{:03}", index))
     IniWrite("1", tempPath, "General", "TransferFavoritesInitialized")
-    IniWrite("8", tempPath, "General", "ConfigVersion")
+    IniWrite("9", tempPath, "General", "ConfigVersion")
 }
 
 AtomicConfigEdit(editor) {
@@ -1875,7 +1900,7 @@ BuildPanel() {
     StatusText := Panel.AddText("xm y+8 w716 h22 +0x200 +0x100", "就绪")
     StatusText.OnEvent("Click", HandleStatusAction)
     Panel.OnEvent("Close", HandlePanelClose)
-    Panel.OnEvent("Escape", HandlePanelClose)
+    Panel.OnEvent("Escape", HandlePanelEscape)
     Panel.OnEvent("Size", ResizePanel)
     ; Filesystem items dropped anywhere in the window are added as pinned items.
     Panel.OnEvent("DropFiles", PinDroppedFiles)
@@ -2034,7 +2059,7 @@ BuildTrayMenu() {
     A_TrayMenu.Add("刷新并显示", ShowAndRefresh)
     A_TrayMenu.Add()
     A_TrayMenu.Add("添加打开软件…", AddConfiguredOpenApp)
-    A_TrayMenu.Add("文件打开设置…", OpenConfig)
+    A_TrayMenu.Add("PopDrop 设置…", OpenConfig)
     A_TrayMenu.Add("高级编辑 config.ini", OpenConfigFile)
     A_TrayMenu.Add("退出", (*) => ExitApp())
     A_TrayMenu.Default := "显示/隐藏面板 (" ActiveHotkey ")"
@@ -2143,6 +2168,13 @@ HidePanel(*) {
 
 HandlePanelClose(*) {
     HidePanel()
+    return true
+}
+
+HandlePanelEscape(*) {
+    global EscapeHidesPanel
+    if EscapeHidesPanel
+        HidePanel()
     return true
 }
 
@@ -2711,7 +2743,8 @@ GetWindowsRecentFiles(limit) {
     return results
 }
 
-GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode) {
+GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode,
+    globalExcludedNames := [], excludedPaths := [], allowedPaths := []) {
     global SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_LATEST_CONTENT
     files := []
@@ -2723,6 +2756,10 @@ GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode
                 attributes := A_LoopFileAttrib
                 isDirectory := InStr(attributes, "D") != 0
                 if isDirectory {
+                    if ShouldSkipScannedFolder(A_LoopFileFullPath,
+                        A_LoopFileName, globalExcludedNames,
+                        excludedPaths, allowedPaths)
+                        continue
                     ; Reparse points include symlinks and junctions. Never
                     ; recursively enter them; direct folders may still be shown.
                     isReparsePoint := InStr(attributes, "L") != 0
@@ -2732,7 +2769,9 @@ GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode
                         if folderTimeMode = FOLDER_TIME_LATEST_CONTENT
                             && !isReparsePoint {
                             latest := GetLatestDescendantFileTime(
-                                A_LoopFileFullPath, filter)
+                                A_LoopFileFullPath, filter,
+                                globalExcludedNames, excludedPaths,
+                                allowedPaths)
                             if latest != "" {
                                 modified := latest
                                 timeKind := "Content"
@@ -2784,7 +2823,8 @@ AddSortedCandidate(&files, candidate, limit, sortMode) {
     }
 }
 
-GetLatestDescendantFileTime(folderPath, filter) {
+GetLatestDescendantFileTime(folderPath, filter, globalExcludedNames := [],
+    excludedPaths := [], allowedPaths := []) {
     latest := ""
     stack := [folderPath]
     while stack.Length {
@@ -2793,6 +2833,10 @@ GetLatestDescendantFileTime(folderPath, filter) {
             Loop Files, current "\*", "FD" {
                 attributes := A_LoopFileAttrib
                 if InStr(attributes, "D") {
+                    if ShouldSkipScannedFolder(A_LoopFileFullPath,
+                        A_LoopFileName, globalExcludedNames,
+                        excludedPaths, allowedPaths)
+                        continue
                     if !InStr(attributes, "L")
                         stack.Push(A_LoopFileFullPath)
                     continue
@@ -2805,6 +2849,31 @@ GetLatestDescendantFileTime(folderPath, filter) {
         }
     }
     return latest
+}
+
+ShouldSkipScannedFolder(path, name, globalExcludedNames,
+    excludedPaths, allowedPaths) {
+    for excludedPath in excludedPaths {
+        if IsSameOrDescendantPath(path, excludedPath)
+            return true
+    }
+    allowed := false
+    for allowedPath in allowedPaths {
+        ; Also traverse ancestors of an explicitly allowed path so a nested
+        ; override remains reachable.
+        if IsSameOrDescendantPath(path, allowedPath)
+            || IsSameOrDescendantPath(allowedPath, path) {
+            allowed := true
+            break
+        }
+    }
+    if allowed
+        return false
+    for excludedName in globalExcludedNames {
+        if StrLower(name) = StrLower(excludedName)
+            return true
+    }
+    return false
 }
 
 ; ──── 自然排序 (StrCmpLogicalW) ────
@@ -2927,7 +2996,9 @@ RunScanWorkerMode() {
             state := DirExist(folder.Path) ? "OK" : "Unavailable"
             files := state = "OK" ? GetSortedItems(folder.Path,
                 folder.MaxFilesPerFolder, folder.DisplayScope, folder.SortMode,
-                folder.Filter, folder.FolderTimeMode) : []
+                folder.Filter, folder.FolderTimeMode,
+                request.GlobalExcludedNames, folder.ExcludedPaths,
+                folder.AllowedExcludedPaths) : []
             result.Folders.Push({Name: folder.Name, Path: folder.Path,
                 State: state, Files: files})
         }
@@ -2952,11 +3023,20 @@ ReadWorkerRequest(path) {
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     version := Integer(IniRead(path, "Meta", "Version", "0"))
-    if version != 1 && version != 2
+    if version != 1 && version != 2 && version != 3
         throw Error("unsupported request version")
     request := {Generation: IniRead(path, "Meta", "Generation", ""),
         Fingerprint: IniRead(path, "Meta", "Fingerprint", ""), Folders: [],
-        RecentFileCount: Integer(IniRead(path, "Meta", "RecentFileCount", "12"))}
+        RecentFileCount: Integer(IniRead(path, "Meta", "RecentFileCount", "12")),
+        GlobalExcludedNames: []}
+    globalNameCount := Integer(
+        IniRead(path, "Meta", "GlobalExcludedNameCount", "0"))
+    Loop globalNameCount {
+        name := Trim(IniRead(path, "Meta",
+            "GlobalExcludedName" Format("{:03}", A_Index), ""))
+        if name != ""
+            request.GlobalExcludedNames.Push(name)
+    }
     count := Integer(IniRead(path, "Meta", "FolderCount", "0"))
     Loop count {
         section := "Folder" Format("{:03}", A_Index)
@@ -2999,6 +3079,24 @@ ReadWorkerRequest(path) {
         folderTimeMode := rawFolderTime = StrLower(FOLDER_TIME_LATEST_CONTENT)
             ? FOLDER_TIME_LATEST_CONTENT : FOLDER_TIME_MODIFIED
 
+        excludedPaths := []
+        allowedPaths := []
+        excludedCount := Integer(
+            IniRead(path, section, "ExcludedPathCount", "0"))
+        Loop excludedCount {
+            value := NormalizePath(IniRead(path, section,
+                "ExcludedPath" Format("{:03}", A_Index), ""))
+            if value != ""
+                excludedPaths.Push(value)
+        }
+        allowedCount := Integer(
+            IniRead(path, section, "AllowedPathCount", "0"))
+        Loop allowedCount {
+            value := NormalizePath(IniRead(path, section,
+                "AllowedPath" Format("{:03}", A_Index), ""))
+            if value != ""
+                allowedPaths.Push(value)
+        }
         request.Folders.Push({
             Name: IniRead(path, section, "Name", ""),
             Path: IniRead(path, section, "Path", ""),
@@ -3007,7 +3105,9 @@ ReadWorkerRequest(path) {
             FolderTimeMode: folderTimeMode,
             MaxFilesPerFolder: folderMax,
             SortMode: folderSort,
-            Filter: filter
+            Filter: filter,
+            ExcludedPaths: excludedPaths,
+            AllowedExcludedPaths: allowedPaths
         })
     }
     return request
@@ -3066,8 +3166,9 @@ EnsureCacheDirectory(path) {
 }
 
 ComputeConfigFingerprint(settings) {
-    global RecentFileCount
-    raw := "v2|recent=" RecentFileCount
+    global RecentFileCount, GlobalExcludedFolderNames
+    raw := "v3|recent=" RecentFileCount
+        . "|excludedNames=" JoinArray(GlobalExcludedFolderNames, ",")
     for folder in settings {
         raw .= "|" folder.Name "|" StrLower(RTrim(folder.Path, "\"))
         raw .= "|mode=" folder.Mode
@@ -3077,6 +3178,8 @@ ComputeConfigFingerprint(settings) {
         raw .= "|max=" folder.MaxFilesPerFolder "|sort=" folder.SortMode
         raw .= "|filter=" folder.Filter.Mode
         raw .= "|ext=" JoinArray(folder.Filter.Extensions, ",")
+        raw .= "|excludedPaths=" JoinNormalizedPaths(folder.ExcludedPaths)
+        raw .= "|allowedPaths=" JoinNormalizedPaths(folder.AllowedExcludedPaths)
     }
     return HashString(raw)
 }
@@ -3162,12 +3265,18 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
 
 WriteScanRequest(path, generation) {
     global LastValidFolderSettings, CurrentConfigFingerprint, RecentFileCount
+    global GlobalExcludedFolderNames
     try FileDelete(path)
-    IniWrite("2", path, "Meta", "Version")
+    IniWrite("3", path, "Meta", "Version")
     IniWrite(generation, path, "Meta", "Generation")
     IniWrite(CurrentConfigFingerprint, path, "Meta", "Fingerprint")
     IniWrite(LastValidFolderSettings.Length, path, "Meta", "FolderCount")
     IniWrite(RecentFileCount, path, "Meta", "RecentFileCount")
+    IniWrite(GlobalExcludedFolderNames.Length, path,
+        "Meta", "GlobalExcludedNameCount")
+    for index, name in GlobalExcludedFolderNames
+        IniWrite(name, path, "Meta",
+            "GlobalExcludedName" Format("{:03}", index))
     for index, folder in LastValidFolderSettings {
         section := "Folder" Format("{:03}", index)
         IniWrite(folder.Name, path, section, "Name")
@@ -3179,6 +3288,15 @@ WriteScanRequest(path, generation) {
         IniWrite(folder.SortMode, path, section, "SortMode")
         IniWrite(folder.Filter.Mode, path, section, "FilterMode")
         IniWrite(JoinArray(folder.Filter.Extensions, ","), path, section, "FileExtensions")
+        IniWrite(folder.ExcludedPaths.Length, path, section, "ExcludedPathCount")
+        for pathIndex, excludedPath in folder.ExcludedPaths
+            IniWrite(excludedPath, path, section,
+                "ExcludedPath" Format("{:03}", pathIndex))
+        IniWrite(folder.AllowedExcludedPaths.Length, path,
+            section, "AllowedPathCount")
+        for pathIndex, allowedPath in folder.AllowedExcludedPaths
+            IniWrite(allowedPath, path, section,
+                "AllowedPath" Format("{:03}", pathIndex))
     }
 }
 
@@ -3980,7 +4098,7 @@ WritePinnedFilesConfig(tempPath) {
     try IniDelete(tempPath, "PinnedFiles")
     for index, path in PinnedPaths
         IniWrite(path, tempPath, "PinnedFiles", "File" Format("{:03}", index))
-    IniWrite("8", tempPath, "General", "ConfigVersion")
+    IniWrite("9", tempPath, "General", "ConfigVersion")
 }
 
 ArrayContainsPath(paths, target) {
@@ -3996,7 +4114,7 @@ FindPathIndex(paths, target) {
     return 0
 }
 
-OpenConfig(*) {
+OpenConfigLegacy(*) {
     global Panel, SettingsDialog, LastValidFolderSettings
     global GlobalOpenFileMode, OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE
     global SOURCE_OPEN_MODE_INHERIT
@@ -4177,7 +4295,7 @@ WriteOpenFileModeSettings(globalMode, entries, tempPath) {
             sourceSection, "OpenFileMode")
     }
     IniWrite(JoinArray(sourceIds, ","), tempPath, "Sources", "Order")
-    IniWrite("8", tempPath, "General", "ConfigVersion")
+    IniWrite("9", tempPath, "General", "ConfigVersion")
 }
 
 CloseOpenFileSettings(settingsGui, *) {
@@ -4467,7 +4585,7 @@ NoopMenuAction(*) {
 }
 
 GetEffectiveTransferFavorites() {
-    global TransferFavorites
+    global TransferFavorites, TransferFavoriteLabels
     result := []
     desktop := GetKnownFolderPath("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}")
     downloads := GetKnownFolderPath("{374DE290-123F-4565-9164-39C4925E467B}")
@@ -4476,7 +4594,10 @@ GetEffectiveTransferFavorites() {
             break
         if ArrayContainsObjectPath(result, path)
             continue
-        if desktop != "" && PathsEqual(path, desktop)
+        if TransferFavoriteLabels.Has(PathKey(path))
+            && Trim(TransferFavoriteLabels[PathKey(path)]) != ""
+            label := TransferFavoriteLabels[PathKey(path)]
+        else if desktop != "" && PathsEqual(path, desktop)
             label := "桌面"
         else if downloads != "" && PathsEqual(path, downloads)
             label := "下载"
@@ -5118,8 +5239,8 @@ ChooseTransferFolder(operation, paths, *) {
 }
 
 OpenConfigAtTransferFavorites(*) {
-    OpenConfigFile()
-    SetUserStatus("请在 [TransferFavorites] 中管理常用位置")
+    OpenConfig()
+    SetUserStatus("可在“文件操作”页管理常用位置")
 }
 
 RemoveInvalidTransferTargets(*) {
@@ -5353,17 +5474,25 @@ SaveTransferTargets() {
 }
 
 WriteTransferTargetsConfig(tempPath) {
-    global TransferFavorites, RecentTargets, LastTransferTargetDir
+    global TransferFavorites, TransferFavoriteLabels
+    global RecentTargets, LastTransferTargetDir
     try IniDelete(tempPath, "TransferFavorites")
+    try IniDelete(tempPath, "TransferFavoriteLabels")
     for index, path in TransferFavorites
         IniWrite(path, tempPath, "TransferFavorites",
             "Path" Format("{:03}", index))
+    for index, path in TransferFavorites {
+        key := PathKey(path)
+        if TransferFavoriteLabels.Has(key)
+            IniWrite(TransferFavoriteLabels[key], tempPath,
+                "TransferFavoriteLabels", "Path" Format("{:03}", index))
+    }
     try IniDelete(tempPath, "RecentTargets")
     for index, path in RecentTargets
         IniWrite(path, tempPath, "RecentTargets", "Path" Format("{:03}", index))
     IniWrite(LastTransferTargetDir, tempPath, "General", "LastTransferTargetDir")
     IniWrite("1", tempPath, "General", "TransferFavoritesInitialized")
-    IniWrite("8", tempPath, "General", "ConfigVersion")
+    IniWrite("9", tempPath, "General", "ConfigVersion")
 }
 
 UpdatePinnedPathsAfterMove(mappings) {
@@ -5985,6 +6114,17 @@ RunSelfTests() {
         AssertSelfTest(!IsSameOrDescendantPath(
             "C:\Temp\Folder2", "c:\temp\folder"),
             "路径边界识别")
+        AssertSelfTest(ShouldSkipScannedFolder(
+            "C:\Work\.git", ".git", [".git"], [], []),
+            "全局排除名称进入扫描判断")
+        AssertSelfTest(!ShouldSkipScannedFolder(
+            "C:\Work\.git", ".git", [".git"], [],
+            ["C:\Work\.git"]),
+            "来源允许路径覆盖全局排除")
+        AssertSelfTest(ShouldSkipScannedFolder(
+            "C:\Work\build\bin", "bin", [],
+            ["C:\Work\build"], []),
+            "来源排除路径覆盖其后代")
         FileAppend("PopDrop v0.7 self-test: PASS`n", "*")
     } catch as err {
         FileAppend("PopDrop v0.7 self-test: FAIL - " err.Message "`n", "*")
