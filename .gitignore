@@ -9,3 +9,4 @@ cache/
 build_logs/
 release/
 config.ini
+dev_doc/

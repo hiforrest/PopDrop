@@ -72,7 +72,7 @@ WindowMode=temporary
 | `ShowRecentSidebar` | `1`=显示最近打开侧边栏，`0`=关闭。面板顶部按钮也可以随时开关。 |
 | `RecentFileCount` | 侧边栏最多显示多少个近期文件，范围 1～100。 |
 | `CachePath` | 扫描结果缓存目录。留空时使用软件目录下的 `cache` 文件夹；不可写时退化为内存缓存。 |
-| `ThumbnailPolicy` | `Fast`（默认）只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标；`Full` 允许现场生成缩略图，可能造成短暂停顿。 |
+| `ThumbnailPolicy` | `Fast` 只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标；`Full`（默认）允许现场生成缩略图，可能造成短暂停顿。 |
 | `WindowMode` | 窗口显示模式：`temporary`（默认，置顶，切换到其他窗口后自动隐藏）、`always_on_top`（始终置顶）、`normal`（普通窗口，不置顶）。 |
 | `OpenFileMode` | 普通文件的鼠标激活方式：`DoubleClick`（默认）或 `SingleClick`。缺失、空值或未知值都回退为双击。 |
 | `EscapeHidesPanel` | 按 Esc 时隐藏面板：`1`=隐藏（默认）| `0`=不隐藏。 |
@@ -115,6 +115,39 @@ OpenFileMode=Inherit
 ## 文件筛选（v0.3+）
 
 从 v0.3 开始，PopDrop 支持按文件扩展名筛选，可以在全局和文件夹级别独立配置。
+
+### 临时、锁定及系统文件过滤（v0.7.1）
+
+在“PopDrop 设置 → 过滤与显示”中可以开启总开关，并通过“管理忽略规则…”配置
+Hidden、System、Temporary 属性、未完成下载文件和自定义文件名通配规则。自定义规则
+每行一条，只支持 `*` 和 `?`，不区分大小写，也不会删除或修改真实文件。
+
+新安装和升级安装都采用“配置项缺失即使用默认值”的兼容策略：总开关、Hidden、System
+默认开启；Temporary 和未完成下载默认关闭。每个来源可选择跟随全局、启用或禁用，并可
+添加来源专属规则。固定项目始终优先显示。
+
+```ini
+[NoiseFilter]
+; Enabled：总开关；1=排除噪音文件，0=全部显示。
+Enabled=1
+; HideHidden / HideSystem：排除相应 Windows 文件属性。
+HideHidden=1
+HideSystem=1
+; Temporary 属性和未完成下载默认不排除。
+HideTemporaryAttribute=0
+HideIncompleteDownloads=0
+; CustomPatternCount 是下方 CustomPatternNNN 规则的数量。
+CustomPatternCount=2
+CustomPattern001=*.myapp-lock
+CustomPattern002=__temp__?
+
+[Folder:下载]
+NoiseFilterMode=Inherit
+
+[SourceIgnore:source-example]
+PatternCount=1
+Pattern001=*.download-marker
+```
 
 ### 筛选模式
 
@@ -240,14 +273,18 @@ FileExtensions=.png,.jpg,.jpeg,.webp,.gif
 | 配置项 | Launcher 默认值 | 说明 |
 |---|---|---|
 | `IncludeSubfolders` | `0` | 不递归子目录 |
-| `MaxFilesPerFolder` | `All` | 显示所有匹配项目 |
+| `DisplayScope` | `FilesOnly` | 仅显示当前文件夹中的文件 |
 | `SortMode` | `NameAsc` | 按文件名自然升序 |
 | `FilterMode` | `Include` | 只显示扩展名列表中的文件 |
 | `FileExtensions` | `.lnk,.url,.exe` | 只显示快捷方式和可执行文件 |
 | `StripOrderPrefix` | `1` | 隐藏数字排序前缀 |
 | `HideExtensions` | `1` | 隐藏文件扩展名 |
 
-用户显式配置的选项会覆盖这些默认值。
+用户显式配置的选项会覆盖这些默认值。在“PopDrop 设置 → 文件来源”中将“文件夹类型”
+改为“启动器文件夹（Launcher）”时，界面会立即把这些推荐值写入当前草稿；只有点击
+“保存”后才会写入 `config.ini`。切回“普通文件夹（Files）”时，界面会恢复按修改时间
+排序、显示数字前缀和扩展名，并恢复全局默认的显示范围及文件类型过滤，避免残留
+Launcher 的 `.lnk/.url/.exe` 限制。
 
 ### 数字前缀排序
 
@@ -268,6 +305,9 @@ FileExtensions=.png,.jpg,.jpeg,.webp,.gif
 ```
 
 ### 配置方式
+
+推荐在“PopDrop 设置 → 文件来源”中选择来源，然后通过“文件夹类型”下拉框切换
+“普通文件夹（Files）”或“启动器文件夹（Launcher）”。也可以按下面方式高级编辑：
 
 在 `[Folders]` 中定义分组，然后在对应的 `[Folder:名称]` 节中设置 `Mode=Launcher`：
 

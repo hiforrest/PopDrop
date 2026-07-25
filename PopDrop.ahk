@@ -4,7 +4,7 @@
 
 ;@Ahk2Exe-SetMainIcon assets\app.ico
 ;@Ahk2Exe-AddResource assets\tray.ico, 555
-;@Ahk2Exe-SetVersion 0.7.0.0
+;@Ahk2Exe-SetVersion 0.7.2.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -15,8 +15,8 @@
 ; ──── 排序模式常量 ────
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
-global APP_VERSION := "0.7.0"
-global CONFIG_VERSION := "10"
+global APP_VERSION := "0.7.2"
+global CONFIG_VERSION := "11"
 
 ; ──── 文件夹模式常量 ────
 global MODE_FILES := "Files"
@@ -34,6 +34,12 @@ global NO_EXTENSION_TOKEN := "<none>"
 global OPEN_MODE_DOUBLE := "DoubleClick"
 global OPEN_MODE_SINGLE := "SingleClick"
 global SOURCE_OPEN_MODE_INHERIT := "Inherit"
+
+; ──── 临时、锁定及系统文件过滤 ────
+global NOISE_FILTER_INHERIT := "Inherit"
+global NOISE_FILTER_ENABLED := "Enabled"
+global NOISE_FILTER_DISABLED := "Disabled"
+global NOISE_DIAGNOSTIC_LIMIT := 200
 
 if A_Args.Length && A_Args[1] = "--self-test" {
     RunSelfTests()
@@ -115,14 +121,15 @@ global DragDataObjects := Map()
 global ConfigErrors := []
 global LastValidFolderSettings := []
 global ConfigErrorsShown := false
-global ThumbnailPolicy := "Fast"
+global ThumbnailPolicy := "Full"
 global CachePathSetting := ""
 global CacheDir := ""
 global CacheFilePath := ""
 global CacheWritable := false
 global CacheWriteWarningShown := false
 global CurrentConfigFingerprint := ""
-global CurrentScanResult := {Folders: [], Recent: []}
+global CurrentScanResult := {
+    Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
 global ScanResultLoaded := false
 global WorkerRunning := false
 global WorkerPid := 0
@@ -139,6 +146,16 @@ global TransferFavorites := []
 global TransferFavoriteLabels := Map()
 global RecentTargets := []
 global GlobalExcludedFolderNames := []
+global GlobalNoiseFilter := {
+    Enabled: true,
+    HideHidden: true,
+    HideSystem: true,
+    HideTemporary: false,
+    HideIncompleteDownloads: false,
+    CustomPatterns: [],
+    CustomPatternTexts: [],
+    PatternErrors: []
+}
 global LastOpenProgramDir := ""
 global LastTransferTargetDir := ""
 global PendingViewRestore := 0
@@ -282,7 +299,7 @@ EnsureConfig() {
     "ShowRecentSidebar=1`n"
     "RecentFileCount=12`n"
     "CachePath=`n"
-    "ThumbnailPolicy=Fast`n"
+    "ThumbnailPolicy=Full`n"
     "; 窗口模式：always_on_top（默认）| temporary（失焦自动隐藏）| normal（普通窗口）`n"
     "WindowMode=temporary`n"
     "; ModifiedDesc（默认，从新到旧）| NameAsc（文件名自然升序）`n"
@@ -294,6 +311,22 @@ EnsureConfig() {
     "LastTransferTargetDir=`n"
     "TransferFavoritesInitialized=1`n"
     "GlobalExcludedNamesInitialized=1`n"
+    "`n"
+    "[NoiseFilter]`n"
+    "; <PopDrop:NoiseFilterHelp>`n"
+    "; Enabled：总开关；1=排除噪音文件，0=全部显示。`n"
+    "; HideHidden：是否排除具有 Hidden 属性的文件。`n"
+    "; HideSystem：是否排除具有 System 属性的文件。`n"
+    "; HideTemporaryAttribute：是否排除具有 Temporary 属性的文件。`n"
+    "; HideIncompleteDownloads：是否排除 *.crdownload、*.part、*.download。`n"
+    "; CustomPatternCount：下方 CustomPatternNNN 自定义文件名规则的数量。`n"
+    "; 以上选项只影响 PopDrop 显示，不会删除、移动或修改真实文件。`n"
+    "Enabled=1`n"
+    "HideHidden=1`n"
+    "HideSystem=1`n"
+    "HideTemporaryAttribute=0`n"
+    "HideIncompleteDownloads=0`n"
+    "CustomPatternCount=0`n"
     "`n"
     "; <PopDrop:area 2>`n"
     "[Folders]`n"
@@ -336,6 +369,7 @@ EnsureConfig() {
 NormalizeConfigDocument(tempPath) {
     global CONFIG_VERSION
     doc := OpenPopDropConfig(tempPath)
+    EnsureNoiseFilterConfigComments(doc)
     doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
     doc.Save()
 }
@@ -343,8 +377,21 @@ NormalizeConfigDocument(tempPath) {
 ConfigLayoutNeedsNormalization() {
     global ConfigPath, CONFIG_VERSION
     doc := OpenPopDropConfig(ConfigPath)
+    EnsureNoiseFilterConfigComments(doc)
     return doc.Dirty
         || doc.GetValue("General", "ConfigVersion", "") != CONFIG_VERSION
+}
+
+EnsureNoiseFilterConfigComments(doc) {
+    doc.EnsureCommentBlock("NoiseFilter", "; <PopDrop:NoiseFilterHelp>", [
+        "; Enabled：总开关；1=排除噪音文件，0=全部显示。",
+        "; HideHidden：是否排除具有 Hidden 属性的文件。",
+        "; HideSystem：是否排除具有 System 属性的文件。",
+        "; HideTemporaryAttribute：是否排除具有 Temporary 属性的文件。",
+        "; HideIncompleteDownloads：是否排除 *.crdownload、*.part、*.download。",
+        "; CustomPatternCount：下方 CustomPatternNNN 自定义文件名规则的数量。",
+        "; 以上选项只影响 PopDrop 显示，不会删除、移动或修改真实文件。"
+    ], 1)
 }
 
 EnsureConfigEncoding() {
@@ -391,6 +438,7 @@ LoadSettings(*) {
     global LastOpenProgramDir, LastTransferTargetDir
     global OpenAppsConfigNeedsMigration
     global GlobalOpenFileMode, OPEN_MODE_DOUBLE
+    global GlobalNoiseFilter, NOISE_FILTER_INHERIT
 
     settingErrors := []
 
@@ -404,6 +452,9 @@ LoadSettings(*) {
     EscapeHidesPanel := IniRead(
         ConfigPath, "General", "EscapeHidesPanel", "1") = "1"
     GlobalExcludedFolderNames := LoadGlobalExcludedFolderNames()
+    GlobalNoiseFilter := LoadNoiseFilterConfig()
+    for patternError in GlobalNoiseFilter.PatternErrors
+        settingErrors.Push(patternError)
 
     ; 读取窗口模式
     rawMode := StrLower(Trim(IniRead(ConfigPath, "General", "WindowMode", "temporary")))
@@ -456,7 +507,7 @@ LoadSettings(*) {
         RecentFileCount := 12
     RecentFileCount := Max(1, Min(RecentFileCount, 100))
 
-    ThumbnailPolicy := StrLower(Trim(IniRead(ConfigPath, "General", "ThumbnailPolicy", "Fast"))) = "full"
+    ThumbnailPolicy := StrLower(Trim(IniRead(ConfigPath, "General", "ThumbnailPolicy", "Full"))) = "full"
         ? "Full" : "Fast"
     CachePathSetting := Trim(IniRead(ConfigPath, "General", "CachePath", ""))
     LastOpenProgramDir := NormalizePath(
@@ -514,6 +565,10 @@ LoadSettings(*) {
                     HideExtensions: 0,
                     SourceId: ResolveFolderSourceId(f.Name, f.Path),
                     OpenFileMode: "Inherit",
+                    NoiseFilterMode: NOISE_FILTER_INHERIT,
+                    NoiseFilter: ResolveNoiseFilterForSource(
+                        NOISE_FILTER_INHERIT, []),
+                    SourceCustomPatternTexts: [],
                     ExcludedPaths: [],
                     AllowedExcludedPaths: []
                 })
@@ -521,21 +576,22 @@ LoadSettings(*) {
         }
     }
 
-    CacheDir := ResolveCacheDirectory(CachePathSetting)
-    CacheFilePath := CacheDir "\scan-cache-v2.ini"
-    CacheWritable := EnsureCacheDirectory(CacheDir)
-    newFingerprint := ComputeConfigFingerprint(LastValidFolderSettings)
-    if CurrentConfigFingerprint != newFingerprint {
-        CurrentConfigFingerprint := newFingerprint
-        CurrentScanResult := {Folders: [], Recent: []}
-        ScanResultLoaded := false
-    }
-
     PinnedPaths := []
     for entry in ReadIniSection("PinnedFiles") {
         path := NormalizePath(entry.Value)
         if path != "" && !ArrayContainsPath(PinnedPaths, path)
             PinnedPaths.Push(path)
+    }
+
+    CacheDir := ResolveCacheDirectory(CachePathSetting)
+    CacheFilePath := CacheDir "\scan-cache-v3.ini"
+    CacheWritable := EnsureCacheDirectory(CacheDir)
+    newFingerprint := ComputeConfigFingerprint(LastValidFolderSettings)
+    if CurrentConfigFingerprint != newFingerprint {
+        CurrentConfigFingerprint := newFingerprint
+        CurrentScanResult := {
+            Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
+        ScanResultLoaded := false
     }
 
     OpenApps := LoadOpenApps()
@@ -705,6 +761,7 @@ ValidateConfig() {
     global MODE_FILES, MODE_LAUNCHER
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
+    global NOISE_FILTER_INHERIT
 
     errors := []
     tempGlobalFilter := {Mode: "All", Extensions: []}
@@ -785,6 +842,8 @@ ValidateConfig() {
         folderMode := MODE_FILES
         folderStripOrderPrefix := 0
         folderHideExtensions := 0
+        folderNoiseFilterMode := NOISE_FILTER_INHERIT
+        sourcePatternTexts := LoadIgnorePatternTexts("SourceIgnore:" sourceId)
         legacySubfolderOverride := false
 
         ; 检查是否有独立配置节
@@ -969,6 +1028,19 @@ ValidateConfig() {
             }
         }
 
+        rawNoiseMode := IniRead(ConfigPath, sectionName, "NoiseFilterMode", "")
+        if Trim(rawNoiseMode) = ""
+            rawNoiseMode := IniRead(ConfigPath, "Source:" sourceId,
+                "NoiseFilterMode", NOISE_FILTER_INHERIT)
+        if !IsRecognizedNoiseFilterMode(rawNoiseMode)
+            errors.Push("[" sectionName "] 中 NoiseFilterMode 值无效："
+                rawNoiseMode "。允许的值：Inherit, Enabled, Disabled。")
+        folderNoiseFilterMode := ParseNoiseFilterMode(rawNoiseMode)
+        resolvedNoiseFilter := ResolveNoiseFilterForSource(
+            folderNoiseFilterMode, sourcePatternTexts)
+        for patternError in resolvedNoiseFilter.PatternErrors
+            errors.Push("来源“" f.Name "”" patternError)
+
         resolved.Push({
             Name: f.Name,
             Path: f.Path,
@@ -983,6 +1055,9 @@ ValidateConfig() {
             HideExtensions: folderHideExtensions,
             SourceId: sourceId,
             OpenFileMode: folderOpenFileMode,
+            NoiseFilterMode: folderNoiseFilterMode,
+            NoiseFilter: resolvedNoiseFilter,
+            SourceCustomPatternTexts: sourcePatternTexts,
             ExcludedPaths: LoadConfiguredSourcePaths(
                 "SourceExclude:" sourceId, f.Path),
             AllowedExcludedPaths: LoadConfiguredSourcePaths(
@@ -1089,6 +1164,144 @@ NormalizeExtensionList(raw) {
         result.Push(ext)
     }
     return result
+}
+
+LoadNoiseFilterConfig() {
+    patternTexts := LoadIgnorePatternTexts("NoiseFilter")
+    compiled := CompileIgnorePatterns(patternTexts, "[NoiseFilter]")
+    return {
+        Enabled: ReadConfigBoolean("NoiseFilter", "Enabled", true),
+        HideHidden: ReadConfigBoolean("NoiseFilter", "HideHidden", true),
+        HideSystem: ReadConfigBoolean("NoiseFilter", "HideSystem", true),
+        HideTemporary: ReadConfigBoolean("NoiseFilter", "HideTemporaryAttribute", false),
+        HideIncompleteDownloads: ReadConfigBoolean("NoiseFilter", "HideIncompleteDownloads", false),
+        CustomPatterns: compiled.Patterns,
+        CustomPatternTexts: compiled.Texts,
+        PatternErrors: compiled.Errors
+    }
+}
+
+ReadConfigBoolean(section, key, defaultValue) {
+    global ConfigPath
+    raw := Trim(IniRead(ConfigPath, section, key, defaultValue ? "1" : "0"))
+    if raw = "1"
+        return true
+    if raw = "0"
+        return false
+    return defaultValue
+}
+
+LoadIgnorePatternTexts(section) {
+    result := []
+    for entry in ReadIniSection(section) {
+        if RegExMatch(entry.Key, "i)^(?:Custom)?Pattern\d+$")
+            result.Push(entry.Value)
+    }
+    return NormalizeIgnorePatternTexts(result)
+}
+
+NormalizeIgnorePatternTextBlock(text) {
+    text := StrReplace(text, "`r`n", "`n")
+    text := StrReplace(text, "`r", "`n")
+    return NormalizeIgnorePatternTexts(StrSplit(text, "`n"))
+}
+
+NormalizeIgnorePatternTexts(values) {
+    result := []
+    seen := Map()
+    for value in values {
+        pattern := Trim(value)
+        folded := StrLower(pattern)
+        if pattern = "" || seen.Has(folded)
+            continue
+        seen[folded] := true
+        result.Push(pattern)
+    }
+    return result
+}
+
+CompileIgnorePatterns(patternTexts, context := "") {
+    result := []
+    texts := []
+    errors := []
+    for pattern in NormalizeIgnorePatternTexts(patternTexts) {
+        regex := WildcardPatternToRegex(pattern)
+        if regex = "" {
+            errors.Push((context != "" ? context " " : "")
+                . "中的忽略规则无法编译，已跳过：" pattern)
+            continue
+        }
+        result.Push({Text: pattern, Regex: regex})
+        texts.Push(pattern)
+    }
+    return {Patterns: result, Texts: texts, Errors: errors}
+}
+
+WildcardPatternToRegex(pattern) {
+    regex := "i)^"
+    special := "\.^$|()[]{}+"
+    for char in StrSplit(pattern) {
+        if char = "*"
+            regex .= ".*"
+        else if char = "?"
+            regex .= "."
+        else {
+            if InStr(special, char)
+                regex .= "\"
+            regex .= char
+        }
+    }
+    regex .= "$"
+    try {
+        RegExMatch("", regex)
+        return regex
+    } catch {
+        return ""
+    }
+}
+
+ParseNoiseFilterMode(raw) {
+    global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
+    folded := StrLower(Trim(raw))
+    if folded = StrLower(NOISE_FILTER_ENABLED)
+        return NOISE_FILTER_ENABLED
+    if folded = StrLower(NOISE_FILTER_DISABLED)
+        return NOISE_FILTER_DISABLED
+    return NOISE_FILTER_INHERIT
+}
+
+IsRecognizedNoiseFilterMode(raw) {
+    global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
+    folded := StrLower(Trim(raw))
+    return folded = StrLower(NOISE_FILTER_INHERIT)
+        || folded = StrLower(NOISE_FILTER_ENABLED)
+        || folded = StrLower(NOISE_FILTER_DISABLED)
+}
+
+ResolveNoiseFilterForSource(mode, sourcePatternTexts) {
+    global GlobalNoiseFilter, NOISE_FILTER_DISABLED, NOISE_FILTER_ENABLED
+    enabled := mode = NOISE_FILTER_ENABLED
+        || (mode != NOISE_FILTER_DISABLED && GlobalNoiseFilter.Enabled)
+    sourceCompiled := CompileIgnorePatterns(sourcePatternTexts, "来源附加规则")
+    return {
+        Enabled: enabled,
+        HideHidden: GlobalNoiseFilter.HideHidden,
+        HideSystem: GlobalNoiseFilter.HideSystem,
+        HideTemporary: GlobalNoiseFilter.HideTemporary,
+        HideIncompleteDownloads: GlobalNoiseFilter.HideIncompleteDownloads,
+        CustomPatterns: GlobalNoiseFilter.CustomPatterns,
+        SourceCustomPatterns: sourceCompiled.Patterns,
+        PatternErrors: sourceCompiled.Errors
+    }
+}
+
+HasDangerousIgnorePattern(patternTexts) {
+    for pattern in patternTexts {
+        folded := StrLower(Trim(pattern))
+        if folded = "*" || folded = "*.*"
+            return true
+    }
+    return false
 }
 
 GetFileExtensionType(path) {
@@ -2525,6 +2738,7 @@ PopulatePanel() {
     global ConfigErrorsShown, MODE_FILES, GroupFolderPaths
     global SCOPE_FILES_ONLY, SCOPE_RECURSIVE_FILES, FOLDER_TIME_MODIFIED
     global PendingFileOperationRefresh, PendingRefresh
+    global NOISE_FILTER_INHERIT
 
     CancelFilePointerGesture()
     SelectedFilePaths := []
@@ -2589,7 +2803,12 @@ PopulatePanel() {
                 StripOrderPrefix: 0,
                 HideExtensions: 0,
                 SourceId: ResolveFolderSourceId(f.Name, f.Path),
-                OpenFileMode: "Inherit"
+                OpenFileMode: "Inherit",
+                NoiseFilterMode: NOISE_FILTER_INHERIT,
+                NoiseFilter: ResolveNoiseFilterForSource(NOISE_FILTER_INHERIT, []),
+                SourceCustomPatternTexts: [],
+                ExcludedPaths: [],
+                AllowedExcludedPaths: []
             })
         }
     }
@@ -2844,64 +3063,56 @@ GetWindowsRecentFiles(limit) {
 }
 
 GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode,
-    globalExcludedNames := [], excludedPaths := [], allowedPaths := []) {
+    globalExcludedNames := [], excludedPaths := [], allowedPaths := [],
+    noiseFilter := 0, pinnedSet := 0, sourceName := "", diagnostics := 0) {
     global SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_LATEST_CONTENT
     files := []
     stack := [{Path: folderPath, Root: true}]
     while stack.Length {
         current := stack.Pop()
-        try {
-            Loop Files, current.Path "\*", "FD" {
-                attributes := A_LoopFileAttrib
-                isDirectory := InStr(attributes, "D") != 0
-                if isDirectory {
-                    if ShouldSkipScannedFolder(A_LoopFileFullPath,
-                        A_LoopFileName, globalExcludedNames,
-                        excludedPaths, allowedPaths)
-                        continue
-                    ; Reparse points include symlinks and junctions. Never
-                    ; recursively enter them; direct folders may still be shown.
-                    isReparsePoint := InStr(attributes, "L") != 0
-                    if current.Root && displayScope = SCOPE_FILES_AND_FOLDERS {
-                        modified := A_LoopFileTimeModified
-                        timeKind := "Directory"
-                        if folderTimeMode = FOLDER_TIME_LATEST_CONTENT
-                            && !isReparsePoint {
-                            latest := GetLatestDescendantFileTime(
-                                A_LoopFileFullPath, filter,
-                                globalExcludedNames, excludedPaths,
-                                allowedPaths)
-                            if latest != "" {
-                                modified := latest
-                                timeKind := "Content"
-                            }
+        directory := EnumerateDirectoryForScan(current.Path)
+        for entry in directory.Entries {
+            if entry.IsDirectory {
+                if ShouldSkipScannedFolder(entry.Path, entry.Name,
+                    globalExcludedNames, excludedPaths, allowedPaths)
+                    continue
+                isReparsePoint := InStr(entry.Attributes, "L") != 0
+                if current.Root && displayScope = SCOPE_FILES_AND_FOLDERS {
+                    modified := entry.Modified
+                    timeKind := "Directory"
+                    if folderTimeMode = FOLDER_TIME_LATEST_CONTENT
+                        && !isReparsePoint {
+                        latest := GetLatestDescendantFileTime(entry.Path, filter,
+                            globalExcludedNames, excludedPaths, allowedPaths,
+                            noiseFilter, pinnedSet, sourceName, diagnostics)
+                        if latest != "" {
+                            modified := latest
+                            timeKind := "Content"
                         }
-                        AddSortedCandidate(&files, {
-                            Path: A_LoopFileFullPath,
-                            Name: A_LoopFileName,
-                            Modified: modified,
-                            IsDirectory: true,
-                            TimeKind: timeKind
-                        }, limit, sortMode)
                     }
-                    if displayScope = SCOPE_RECURSIVE_FILES && !isReparsePoint
-                        stack.Push({Path: A_LoopFileFullPath, Root: false})
-                    continue
+                    AddSortedCandidate(&files, {Path: entry.Path,
+                        Name: entry.Name, Modified: modified,
+                        IsDirectory: true, TimeKind: timeKind}, limit, sortMode)
                 }
-
-                if !current.Root && displayScope != SCOPE_RECURSIVE_FILES
-                    continue
-                if !ShouldIncludeFile(A_LoopFileName, filter)
-                    continue
-                AddSortedCandidate(&files, {
-                    Path: A_LoopFileFullPath,
-                    Name: A_LoopFileName,
-                    Modified: A_LoopFileTimeModified,
-                    IsDirectory: false,
-                    TimeKind: "File"
-                }, limit, sortMode)
+                if displayScope = SCOPE_RECURSIVE_FILES && !isReparsePoint
+                    stack.Push({Path: entry.Path, Root: false})
+                continue
             }
+            if !current.Root && displayScope != SCOPE_RECURSIVE_FILES
+                continue
+            visibility := ShouldIncludeEntry(entry.Path, entry.Name,
+                entry.Attributes, noiseFilter, directory.FileNames, pinnedSet)
+            if !visibility.Include {
+                RecordHiddenNoiseItem(diagnostics, entry.Path,
+                    entry.Name, sourceName, visibility.Reason)
+                continue
+            }
+            if !ShouldIncludeFile(entry.Name, filter)
+                continue
+            AddSortedCandidate(&files, {Path: entry.Path, Name: entry.Name,
+                Modified: entry.Modified, IsDirectory: false,
+                TimeKind: "File"}, limit, sortMode)
         }
     }
     if limit = 0
@@ -2924,31 +3135,146 @@ AddSortedCandidate(&files, candidate, limit, sortMode) {
 }
 
 GetLatestDescendantFileTime(folderPath, filter, globalExcludedNames := [],
-    excludedPaths := [], allowedPaths := []) {
+    excludedPaths := [], allowedPaths := [], noiseFilter := 0,
+    pinnedSet := 0, sourceName := "", diagnostics := 0) {
     latest := ""
     stack := [folderPath]
     while stack.Length {
         current := stack.Pop()
-        try {
-            Loop Files, current "\*", "FD" {
-                attributes := A_LoopFileAttrib
-                if InStr(attributes, "D") {
-                    if ShouldSkipScannedFolder(A_LoopFileFullPath,
-                        A_LoopFileName, globalExcludedNames,
-                        excludedPaths, allowedPaths)
-                        continue
-                    if !InStr(attributes, "L")
-                        stack.Push(A_LoopFileFullPath)
+        directory := EnumerateDirectoryForScan(current)
+        for entry in directory.Entries {
+            if entry.IsDirectory {
+                if ShouldSkipScannedFolder(entry.Path, entry.Name,
+                    globalExcludedNames, excludedPaths, allowedPaths)
                     continue
-                }
-                if !ShouldIncludeFile(A_LoopFileName, filter)
-                    continue
-                if latest = "" || A_LoopFileTimeModified > latest
-                    latest := A_LoopFileTimeModified
+                if !InStr(entry.Attributes, "L")
+                    stack.Push(entry.Path)
+                continue
             }
+            visibility := ShouldIncludeEntry(entry.Path, entry.Name,
+                entry.Attributes, noiseFilter, directory.FileNames, pinnedSet)
+            if !visibility.Include {
+                RecordHiddenNoiseItem(diagnostics, entry.Path,
+                    entry.Name, sourceName, visibility.Reason)
+                continue
+            }
+            if !ShouldIncludeFile(entry.Name, filter)
+                continue
+            if latest = "" || entry.Modified > latest
+                latest := entry.Modified
         }
     }
     return latest
+}
+
+EnumerateDirectoryForScan(directoryPath) {
+    entries := []
+    fileNames := Map()
+    try {
+        Loop Files, directoryPath "\*", "FD" {
+            isDirectory := InStr(A_LoopFileAttrib, "D") != 0
+            entry := {Path: A_LoopFileFullPath, Name: A_LoopFileName,
+                Modified: A_LoopFileTimeModified, Attributes: A_LoopFileAttrib,
+                IsDirectory: isDirectory}
+            entries.Push(entry)
+            if !isDirectory
+                fileNames[StrLower(entry.Name)] := true
+        }
+    }
+    return {Entries: entries, FileNames: fileNames}
+}
+
+ShouldIncludeEntry(filePath, fileName, attributes, noiseFilter,
+    directoryFileNames, pinnedSet := 0) {
+    if IsPathInSet(pinnedSet, filePath)
+        return {Include: true, Reason: "PinnedOverride"}
+    if !IsObject(noiseFilter) || !noiseFilter.Enabled
+        return {Include: true, Reason: ""}
+    folded := StrLower(fileName)
+    if SubStr(folded, 1, 2) = "~$"
+        return {Include: false, Reason: "OfficeOwnerFile"}
+    if SubStr(folded, 1, 7) = ".~lock." && SubStr(folded, -1) = "#"
+        return {Include: false, Reason: "LibreOfficeLockFile"}
+    if folded = "desktop.ini" || folded = "thumbs.db" || folded = "ehthumbs.db"
+        return {Include: false, Reason: "WindowsMetadata"}
+    if folded = ".ds_store"
+        return {Include: false, Reason: "MacMetadata"}
+    dot := InStr(fileName, ".",, -1)
+    extension := dot > 0 ? StrLower(SubStr(fileName, dot)) : ""
+    stem := dot > 0 ? SubStr(fileName, 1, dot - 1) : fileName
+    if extension = ".laccdb" && directoryFileNames.Has(StrLower(stem ".accdb"))
+        return {Include: false, Reason: "AccessLockFile"}
+    if extension = ".ldb" && directoryFileNames.Has(StrLower(stem ".mdb"))
+        return {Include: false, Reason: "AccessLockFile"}
+    if (extension = ".dwl" || extension = ".dwl2")
+        && directoryFileNames.Has(StrLower(stem ".dwg"))
+        return {Include: false, Reason: "AutoCADInfoFile"}
+    if noiseFilter.HideHidden && InStr(attributes, "H")
+        return {Include: false, Reason: "HiddenAttribute"}
+    if noiseFilter.HideSystem && InStr(attributes, "S")
+        return {Include: false, Reason: "SystemAttribute"}
+    if noiseFilter.HideTemporary && InStr(attributes, "T")
+        return {Include: false, Reason: "TemporaryAttribute"}
+    if noiseFilter.HideIncompleteDownloads
+        && (extension = ".crdownload" || extension = ".part" || extension = ".download")
+        return {Include: false, Reason: "IncompleteDownload"}
+    if MatchesCompiledIgnorePattern(fileName, noiseFilter.CustomPatterns)
+        return {Include: false, Reason: "CustomPattern"}
+    if MatchesCompiledIgnorePattern(fileName, noiseFilter.SourceCustomPatterns)
+        return {Include: false, Reason: "SourceCustomPattern"}
+    return {Include: true, Reason: ""}
+}
+
+MatchesCompiledIgnorePattern(fileName, patterns) {
+    if !IsObject(patterns)
+        return false
+    for pattern in patterns {
+        try {
+            if RegExMatch(fileName, pattern.Regex)
+                return true
+        }
+    }
+    return false
+}
+
+BuildPathSet(paths) {
+    result := Map()
+    for path in paths
+        result[PathKey(path)] := true
+    return result
+}
+
+IsPathInSet(pathSet, path) {
+    return IsObject(pathSet) && pathSet.Has(PathKey(path))
+}
+
+RecordHiddenNoiseItem(diagnostics, path, name, sourceName, reason) {
+    global NOISE_DIAGNOSTIC_LIMIT
+    if !IsObject(diagnostics)
+        return
+    key := StrLower(sourceName) "|" PathKey(path)
+    if diagnostics.Seen.Has(key)
+        return
+    diagnostics.Seen[key] := true
+    diagnostics.Count += 1
+    if diagnostics.Items.Length < NOISE_DIAGNOSTIC_LIMIT
+        diagnostics.Items.Push({Name: name, Path: path,
+            Source: sourceName, Reason: reason})
+}
+
+NoiseFilterReasonLabel(reason) {
+    labels := Map("OfficeOwnerFile", "Office/WPS 锁定文件",
+        "LibreOfficeLockFile", "LibreOffice/OpenOffice 锁定文件",
+        "AccessLockFile", "Access 锁定文件",
+        "AutoCADInfoFile", "AutoCAD 占用信息文件",
+        "WindowsMetadata", "Windows 目录元数据",
+        "MacMetadata", "macOS 目录元数据",
+        "HiddenAttribute", "Hidden 属性", "SystemAttribute", "System 属性",
+        "TemporaryAttribute", "Temporary 属性",
+        "IncompleteDownload", "未完成下载",
+        "CustomPattern", "全局自定义规则",
+        "SourceCustomPattern", "来源附加规则")
+    return labels.Has(reason) ? labels[reason] : reason
 }
 
 ShouldSkipScannedFolder(path, name, globalExcludedNames,
@@ -3090,19 +3416,25 @@ RunScanWorkerMode() {
     readyPath := A_Args[3]
     try {
         request := ReadWorkerRequest(requestPath)
-        result := {Version: 2, Generation: request.Generation,
-            Fingerprint: request.Fingerprint, Folders: [], Recent: []}
+        diagnostics := {Count: 0, Items: [], Seen: Map()}
+        pinnedSet := BuildPathSet(request.PinnedPaths)
+        result := {Version: 3, Generation: request.Generation,
+            Fingerprint: request.Fingerprint, Folders: [], Recent: [],
+            HiddenCount: 0, HiddenItems: []}
         for folder in request.Folders {
             state := DirExist(folder.Path) ? "OK" : "Unavailable"
             files := state = "OK" ? GetSortedItems(folder.Path,
                 folder.MaxFilesPerFolder, folder.DisplayScope, folder.SortMode,
                 folder.Filter, folder.FolderTimeMode,
                 request.GlobalExcludedNames, folder.ExcludedPaths,
-                folder.AllowedExcludedPaths) : []
+                folder.AllowedExcludedPaths, folder.NoiseFilter,
+                pinnedSet, folder.Name, diagnostics) : []
             result.Folders.Push({Name: folder.Name, Path: folder.Path,
                 State: state, Files: files})
         }
         result.Recent := GetWindowsRecentFiles(request.RecentFileCount)
+        result.HiddenCount := diagnostics.Count
+        result.HiddenItems := diagnostics.Items
         WriteScanResultAtomic(result, readyPath)
     } catch as err {
         try {
@@ -3123,12 +3455,12 @@ ReadWorkerRequest(path) {
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     version := Integer(IniRead(path, "Meta", "Version", "0"))
-    if version != 1 && version != 2 && version != 3
+    if version != 4
         throw Error("unsupported request version")
     request := {Generation: IniRead(path, "Meta", "Generation", ""),
         Fingerprint: IniRead(path, "Meta", "Fingerprint", ""), Folders: [],
         RecentFileCount: Integer(IniRead(path, "Meta", "RecentFileCount", "12")),
-        GlobalExcludedNames: []}
+        GlobalExcludedNames: [], PinnedPaths: []}
     globalNameCount := Integer(
         IniRead(path, "Meta", "GlobalExcludedNameCount", "0"))
     Loop globalNameCount {
@@ -3136,6 +3468,13 @@ ReadWorkerRequest(path) {
             "GlobalExcludedName" Format("{:03}", A_Index), ""))
         if name != ""
             request.GlobalExcludedNames.Push(name)
+    }
+    pinnedCount := Integer(IniRead(path, "Meta", "PinnedPathCount", "0"))
+    Loop pinnedCount {
+        pinnedPath := NormalizePath(IniRead(path, "Meta",
+            "PinnedPath" Format("{:03}", A_Index), ""))
+        if pinnedPath != ""
+            request.PinnedPaths.Push(pinnedPath)
     }
     count := Integer(IniRead(path, "Meta", "FolderCount", "0"))
     Loop count {
@@ -3197,6 +3536,25 @@ ReadWorkerRequest(path) {
             if value != ""
                 allowedPaths.Push(value)
         }
+        customTexts := []
+        customCount := Integer(IniRead(path, section, "CustomPatternCount", "0"))
+        Loop customCount
+            customTexts.Push(IniRead(path, section,
+                "CustomPattern" Format("{:03}", A_Index), ""))
+        sourceTexts := []
+        sourceCount := Integer(IniRead(path, section, "SourcePatternCount", "0"))
+        Loop sourceCount
+            sourceTexts.Push(IniRead(path, section,
+                "SourcePattern" Format("{:03}", A_Index), ""))
+        customCompiled := CompileIgnorePatterns(customTexts, "[" section "]")
+        sourceCompiled := CompileIgnorePatterns(sourceTexts, "[" section "] 来源附加规则")
+        noiseFilter := {Enabled: IniRead(path, section, "NoiseEnabled", "1") = "1",
+            HideHidden: IniRead(path, section, "HideHidden", "1") = "1",
+            HideSystem: IniRead(path, section, "HideSystem", "1") = "1",
+            HideTemporary: IniRead(path, section, "HideTemporaryAttribute", "0") = "1",
+            HideIncompleteDownloads: IniRead(path, section, "HideIncompleteDownloads", "0") = "1",
+            CustomPatterns: customCompiled.Patterns,
+            SourceCustomPatterns: sourceCompiled.Patterns}
         request.Folders.Push({
             Name: IniRead(path, section, "Name", ""),
             Path: IniRead(path, section, "Path", ""),
@@ -3206,6 +3564,7 @@ ReadWorkerRequest(path) {
             MaxFilesPerFolder: folderMax,
             SortMode: folderSort,
             Filter: filter,
+            NoiseFilter: noiseFilter,
             ExcludedPaths: excludedPaths,
             AllowedExcludedPaths: allowedPaths
         })
@@ -3213,16 +3572,21 @@ ReadWorkerRequest(path) {
     return request
 }
 
-WriteScanResultAtomic(result, readyPath) {
+WriteScanResultAtomic(result, readyPath, includeDiagnostics := true) {
     tempPath := readyPath ".writing"
     try FileDelete(tempPath)
     try FileDelete(readyPath)
-    IniWrite("2", tempPath, "Meta", "Version")
+    IniWrite("3", tempPath, "Meta", "Version")
     IniWrite(result.Generation, tempPath, "Meta", "Generation")
     IniWrite(result.Fingerprint, tempPath, "Meta", "Fingerprint")
     IniWrite(A_Now, tempPath, "Meta", "CompletedAt")
     IniWrite(result.Folders.Length, tempPath, "Meta", "FolderCount")
     IniWrite(result.Recent.Length, tempPath, "Meta", "RecentCount")
+    hiddenCount := HasProp(result, "HiddenCount") ? result.HiddenCount : 0
+    hiddenItems := includeDiagnostics && HasProp(result, "HiddenItems")
+        ? result.HiddenItems : []
+    IniWrite(hiddenCount, tempPath, "Meta", "HiddenCount")
+    IniWrite(hiddenItems.Length, tempPath, "Meta", "HiddenRecordCount")
     for index, folder in result.Folders {
         section := "Folder" Format("{:03}", index)
         IniWrite(folder.Name, tempPath, section, "Name")
@@ -3243,6 +3607,13 @@ WriteScanResultAtomic(result, readyPath) {
         IniWrite(item.Path, tempPath, section, "Path")
         IniWrite(item.Name, tempPath, section, "Name")
         IniWrite(item.Modified, tempPath, section, "Modified")
+    }
+    for index, item in hiddenItems {
+        section := "Hidden" Format("{:03}", index)
+        IniWrite(item.Name, tempPath, section, "Name")
+        IniWrite(item.Path, tempPath, section, "Path")
+        IniWrite(item.Source, tempPath, section, "Source")
+        IniWrite(item.Reason, tempPath, section, "Reason")
     }
     FileMove(tempPath, readyPath, 1)
 }
@@ -3266,9 +3637,16 @@ EnsureCacheDirectory(path) {
 }
 
 ComputeConfigFingerprint(settings) {
-    global RecentFileCount, GlobalExcludedFolderNames
-    raw := "v3|recent=" RecentFileCount
+    global RecentFileCount, GlobalExcludedFolderNames, GlobalNoiseFilter, PinnedPaths
+    raw := "v4|recent=" RecentFileCount
         . "|excludedNames=" JoinArray(GlobalExcludedFolderNames, ",")
+        . "|noiseEnabled=" (GlobalNoiseFilter.Enabled ? 1 : 0)
+        . "|hidden=" (GlobalNoiseFilter.HideHidden ? 1 : 0)
+        . "|system=" (GlobalNoiseFilter.HideSystem ? 1 : 0)
+        . "|temporary=" (GlobalNoiseFilter.HideTemporary ? 1 : 0)
+        . "|downloads=" (GlobalNoiseFilter.HideIncompleteDownloads ? 1 : 0)
+        . "|patterns=" JoinArray(GlobalNoiseFilter.CustomPatternTexts, Chr(30))
+        . "|pinned=" JoinNormalizedPaths(PinnedPaths)
     for folder in settings {
         raw .= "|" folder.Name "|" StrLower(RTrim(folder.Path, "\"))
         raw .= "|mode=" folder.Mode
@@ -3280,6 +3658,8 @@ ComputeConfigFingerprint(settings) {
         raw .= "|ext=" JoinArray(folder.Filter.Extensions, ",")
         raw .= "|excludedPaths=" JoinNormalizedPaths(folder.ExcludedPaths)
         raw .= "|allowedPaths=" JoinNormalizedPaths(folder.AllowedExcludedPaths)
+        raw .= "|noiseMode=" folder.NoiseFilterMode
+        raw .= "|sourcePatterns=" JoinArray(folder.SourceCustomPatternTexts, Chr(30))
     }
     return HashString(raw)
 }
@@ -3308,7 +3688,7 @@ LoadDiskScanCache() {
 ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
     try {
         version := Integer(IniRead(path, "Meta", "Version", "0"))
-        if version != 1 && version != 2
+        if version != 3
             return 0
         generation := IniRead(path, "Meta", "Generation", "")
         fingerprint := IniRead(path, "Meta", "Fingerprint", "")
@@ -3317,7 +3697,8 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
         if expectedFingerprint != "" && fingerprint != expectedFingerprint
             return 0
         result := {Version: version, Generation: generation, Fingerprint: fingerprint,
-            Folders: [], Recent: []}
+            Folders: [], Recent: [], HiddenCount: Integer(
+                IniRead(path, "Meta", "HiddenCount", "0")), HiddenItems: []}
         folderCount := Integer(IniRead(path, "Meta", "FolderCount", "0"))
         if folderCount < 0 || folderCount > 1000
             return 0
@@ -3357,6 +3738,17 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
                     Name: IniRead(path, section, "Name", GetFileName(itemPath)),
                     Modified: IniRead(path, section, "Modified", "")})
         }
+        hiddenRecordCount := Integer(IniRead(path, "Meta", "HiddenRecordCount", "0"))
+        if hiddenRecordCount < 0 || hiddenRecordCount > 200
+            return 0
+        Loop hiddenRecordCount {
+            section := "Hidden" Format("{:03}", A_Index)
+            itemPath := IniRead(path, section, "Path", "")
+            if itemPath != ""
+                result.HiddenItems.Push({Name: IniRead(path, section, "Name", GetFileName(itemPath)),
+                    Path: itemPath, Source: IniRead(path, section, "Source", ""),
+                    Reason: IniRead(path, section, "Reason", "")})
+        }
         return result
     } catch {
         return 0
@@ -3365,9 +3757,9 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
 
 WriteScanRequest(path, generation) {
     global LastValidFolderSettings, CurrentConfigFingerprint, RecentFileCount
-    global GlobalExcludedFolderNames
+    global GlobalExcludedFolderNames, PinnedPaths
     try FileDelete(path)
-    IniWrite("3", path, "Meta", "Version")
+    IniWrite("4", path, "Meta", "Version")
     IniWrite(generation, path, "Meta", "Generation")
     IniWrite(CurrentConfigFingerprint, path, "Meta", "Fingerprint")
     IniWrite(LastValidFolderSettings.Length, path, "Meta", "FolderCount")
@@ -3377,6 +3769,9 @@ WriteScanRequest(path, generation) {
     for index, name in GlobalExcludedFolderNames
         IniWrite(name, path, "Meta",
             "GlobalExcludedName" Format("{:03}", index))
+    IniWrite(PinnedPaths.Length, path, "Meta", "PinnedPathCount")
+    for index, pinnedPath in PinnedPaths
+        IniWrite(pinnedPath, path, "Meta", "PinnedPath" Format("{:03}", index))
     for index, folder in LastValidFolderSettings {
         section := "Folder" Format("{:03}", index)
         IniWrite(folder.Name, path, section, "Name")
@@ -3388,6 +3783,18 @@ WriteScanRequest(path, generation) {
         IniWrite(folder.SortMode, path, section, "SortMode")
         IniWrite(folder.Filter.Mode, path, section, "FilterMode")
         IniWrite(JoinArray(folder.Filter.Extensions, ","), path, section, "FileExtensions")
+        noise := folder.NoiseFilter
+        IniWrite(noise.Enabled ? "1" : "0", path, section, "NoiseEnabled")
+        IniWrite(noise.HideHidden ? "1" : "0", path, section, "HideHidden")
+        IniWrite(noise.HideSystem ? "1" : "0", path, section, "HideSystem")
+        IniWrite(noise.HideTemporary ? "1" : "0", path, section, "HideTemporaryAttribute")
+        IniWrite(noise.HideIncompleteDownloads ? "1" : "0", path, section, "HideIncompleteDownloads")
+        IniWrite(noise.CustomPatterns.Length, path, section, "CustomPatternCount")
+        for patternIndex, pattern in noise.CustomPatterns
+            IniWrite(pattern.Text, path, section, "CustomPattern" Format("{:03}", patternIndex))
+        IniWrite(noise.SourceCustomPatterns.Length, path, section, "SourcePatternCount")
+        for patternIndex, pattern in noise.SourceCustomPatterns
+            IniWrite(pattern.Text, path, section, "SourcePattern" Format("{:03}", patternIndex))
         IniWrite(folder.ExcludedPaths.Length, path, section, "ExcludedPathCount")
         for pathIndex, excludedPath in folder.ExcludedPaths
             IniWrite(excludedPath, path, section,
@@ -3491,7 +3898,7 @@ PollWorkerResult() {
             if CacheWritable {
                 try {
                     cacheTemp := CacheFilePath ".writing"
-                    FileCopy(WorkerReadyPath, cacheTemp, 1)
+                    WriteScanResultAtomic(result, cacheTemp, false)
                     FileMove(cacheTemp, CacheFilePath, 1)
                 } catch {
                     CacheWritable := false
@@ -6174,9 +6581,11 @@ DropGiveFeedback(this, effect) {
 
 RunSelfTests() {
     global NO_EXTENSION_TOKEN
+    global MODE_FILES, MODE_LAUNCHER, SCOPE_FILES_ONLY, SORT_NAME_ASC
     global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
     try {
         RunConfigDocumentSelfTests()
+        RunNoiseFilterSelfTests()
         AssertSelfTest(ParseGlobalOpenFileMode("") = OPEN_MODE_DOUBLE,
             "缺失全局打开方式回退为双击")
         AssertSelfTest(ParseGlobalOpenFileMode("broken") = OPEN_MODE_DOUBLE,
@@ -6233,11 +6642,148 @@ RunSelfTests() {
             "C:\Work\build\bin", "bin", [],
             ["C:\Work\build"], []),
             "来源排除路径覆盖其后代")
-        FileAppend("PopDrop v0.7 self-test: PASS`n", "*")
+        launcherSource := {
+            Mode: MODE_FILES, IncludeSubfolders: true,
+            DisplayScope: "RecursiveFiles", SortMode: "ModifiedDesc",
+            Filter: {Mode: "All", Extensions: []},
+            StripOrderPrefix: 0, HideExtensions: 0
+        }
+        ApplyLauncherSourceDefaults(launcherSource)
+        AssertSelfTest(!launcherSource.IncludeSubfolders
+            && launcherSource.DisplayScope = SCOPE_FILES_ONLY
+            && launcherSource.SortMode = SORT_NAME_ASC
+            && launcherSource.Filter.Mode = "Include"
+            && JoinArray(launcherSource.Filter.Extensions, ",") = ".lnk,.url,.exe"
+            && launcherSource.StripOrderPrefix
+            && launcherSource.HideExtensions,
+            "Launcher 文件夹类型应用完整默认特性")
+        FileAppend("PopDrop v0.7.2 self-test: PASS`n", "*")
     } catch as err {
-        FileAppend("PopDrop v0.7 self-test: FAIL - " err.Message "`n", "*")
+        FileAppend("PopDrop v0.7.2 self-test: FAIL - " err.Message "`n", "*")
         ExitApp(1)
     }
+}
+
+RunNoiseFilterSelfTests() {
+    global GlobalNoiseFilter
+    global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
+    global SCOPE_FILES_ONLY, SORT_NAME_ASC, FOLDER_TIME_MODIFIED
+    compiled := CompileIgnorePatterns(["*.myapp-lock", "__temp__?",
+        "*.MYAPP-LOCK", "file[1].*", ""], "self-test")
+    AssertSelfTest(compiled.Texts.Length = 3, "忽略规则去空行和去重")
+    AssertSelfTest(MatchesCompiledIgnorePattern("STATE.MYAPP-LOCK", compiled.Patterns),
+        "星号规则大小写不敏感")
+    AssertSelfTest(MatchesCompiledIgnorePattern("__temp__中", compiled.Patterns)
+        && !MatchesCompiledIgnorePattern("__temp__两个", compiled.Patterns),
+        "问号规则匹配一个 Unicode 字符")
+    AssertSelfTest(MatchesCompiledIgnorePattern("file[1].txt", compiled.Patterns),
+        "正则特殊字符先转义")
+    AssertSelfTest(HasDangerousIgnorePattern(["*"])
+        && HasDangerousIgnorePattern(["*.*"]), "过宽规则警告")
+
+    noise := {Enabled: true, HideHidden: true, HideSystem: true,
+        HideTemporary: false, HideIncompleteDownloads: false,
+        CustomPatterns: [], SourceCustomPatterns: []}
+    names := Map()
+    for name in ["客户.accdb", "客户.laccdb", "孤立.laccdb",
+        "旧库.mdb", "旧库.ldb", "设计图.dwg", "设计图.dwl",
+        "设计图.dwl2", "孤立.dwl"]
+        names[StrLower(name)] := true
+    AssertSelfTest(!ShouldIncludeEntry("C:\x\~$报告.docx", "~$报告.docx",
+        "A", noise, names).Include, "Office/WPS 锁定文件隐藏")
+    AssertSelfTest(ShouldIncludeEntry("C:\x\~说明.txt", "~说明.txt",
+        "A", noise, names).Include, "普通波浪号文件显示")
+    AssertSelfTest(!ShouldIncludeEntry("C:\x\.~lock.报告.odt#",
+        ".~lock.报告.odt#", "A", noise, names).Include,
+        "LibreOffice 锁定文件隐藏")
+    for metadata in ["desktop.ini", "Thumbs.db", "ehthumbs.db", ".DS_Store"]
+        AssertSelfTest(!ShouldIncludeEntry("C:\x\" metadata, metadata,
+            "A", noise, names).Include, "目录元数据隐藏：" metadata)
+    AssertSelfTest(!ShouldIncludeEntry("C:\x\客户.laccdb", "客户.laccdb",
+        "A", noise, names).Include, "Access 关联文件隐藏")
+    AssertSelfTest(ShouldIncludeEntry("C:\x\孤立.laccdb", "孤立.laccdb",
+        "A", noise, names).Include, "孤立 Access 文件显示")
+    AssertSelfTest(!ShouldIncludeEntry("C:\x\旧库.ldb", "旧库.ldb",
+        "A", noise, names).Include, "MDB 关联 LDB 隐藏")
+    AssertSelfTest(!ShouldIncludeEntry("C:\x\设计图.dwl2", "设计图.dwl2",
+        "A", noise, names).Include, "AutoCAD 关联文件隐藏")
+    AssertSelfTest(ShouldIncludeEntry("C:\x\孤立.dwl", "孤立.dwl",
+        "A", noise, names).Include, "孤立 AutoCAD 文件显示")
+    for recovery in ["设计图.bak", "设计图.sv$", "设计图.ac$", "任意.tmp"]
+        AssertSelfTest(ShouldIncludeEntry("C:\x\" recovery, recovery,
+            "A", noise, names).Include, "恢复文件默认显示：" recovery)
+    AssertSelfTest(!ShouldIncludeEntry("C:\x\隐藏.txt", "隐藏.txt",
+        "HA", noise, names).Include, "Hidden 属性过滤")
+    AssertSelfTest(!ShouldIncludeEntry("C:\x\系统.txt", "系统.txt",
+        "SA", noise, names).Include, "System 属性过滤")
+    AssertSelfTest(ShouldIncludeEntry("C:\x\临时.txt", "临时.txt",
+        "TA", noise, names).Include, "Temporary 属性默认显示")
+    AssertSelfTest(ShouldIncludeEntry("C:\x\属性未知.txt", "属性未知.txt",
+        "", noise, names).Include, "属性失败时显示")
+    for download in ["a.crdownload", "a.part", "a.download"]
+        AssertSelfTest(ShouldIncludeEntry("C:\x\" download, download,
+            "A", noise, names).Include, "未完成下载默认显示")
+    pinned := BuildPathSet(["C:\x\~$固定.docx"])
+    AssertSelfTest(ShouldIncludeEntry("C:\x\~$固定.docx", "~$固定.docx",
+        "HS", noise, names, pinned).Include, "固定项目优先")
+
+    GlobalNoiseFilter := {Enabled: true, HideHidden: true, HideSystem: true,
+        HideTemporary: false, HideIncompleteDownloads: false,
+        CustomPatterns: [], CustomPatternTexts: [], PatternErrors: []}
+    AssertSelfTest(ResolveNoiseFilterForSource(NOISE_FILTER_INHERIT, []).Enabled,
+        "全局开启加来源继承")
+    GlobalNoiseFilter.Enabled := false
+    AssertSelfTest(ResolveNoiseFilterForSource(NOISE_FILTER_ENABLED, []).Enabled,
+        "全局关闭加来源启用")
+    GlobalNoiseFilter.Enabled := true
+    AssertSelfTest(!ResolveNoiseFilterForSource(NOISE_FILTER_DISABLED, []).Enabled,
+        "全局开启加来源禁用")
+
+    testDir := A_Temp "\PopDrop-noise-self-test-"
+        . DllCall("kernel32\GetCurrentProcessId", "uint") . "-" A_TickCount
+    try {
+        DirCreate(testDir)
+        for fileName in ["~$报告.docx", "报告.docx", ".~lock.报告.odt#",
+            "desktop.ini", "Thumbs.db", ".DS_Store", "客户.accdb",
+            "客户.laccdb", "孤立.laccdb", "设计图.dwg", "设计图.dwl",
+            "设计图.dwl2", "孤立.dwl", "设计图.bak", "设计图.sv$"]
+            FileAppend("test", testDir "\" fileName, "UTF-8")
+        childDir := testDir "\子目录"
+        DirCreate(childDir)
+        normalPath := childDir "\正常.txt"
+        noisePath := childDir "\~$较新.docx"
+        FileAppend("normal", normalPath, "UTF-8")
+        FileAppend("noise", noisePath, "UTF-8")
+        FileSetTime("20240101000000", normalPath, "M")
+        FileSetTime("20250101000000", noisePath, "M")
+        latestDiag := {Count: 0, Items: [], Seen: Map()}
+        latest := GetLatestDescendantFileTime(childDir,
+            {Mode: "All", Extensions: []}, [], [], [], noise, Map(),
+            "中文测试来源", latestDiag)
+        AssertSelfTest(latest = FileGetTime(normalPath, "M"),
+            "隐藏文件不参与文件夹最新内容时间")
+        diagnostics := {Count: 0, Items: [], Seen: Map()}
+        files := GetSortedItems(testDir, 0, SCOPE_FILES_ONLY, SORT_NAME_ASC,
+            {Mode: "All", Extensions: []}, FOLDER_TIME_MODIFIED,
+            [], [], [], noise, Map(), "中文测试来源", diagnostics)
+        for hiddenName in ["~$报告.docx", ".~lock.报告.odt#", "desktop.ini",
+            "Thumbs.db", ".DS_Store", "客户.laccdb", "设计图.dwl", "设计图.dwl2"]
+            AssertSelfTest(!ScanResultHasName(files, hiddenName), "扫描隐藏：" hiddenName)
+        for visibleName in ["报告.docx", "孤立.laccdb", "孤立.dwl",
+            "设计图.bak", "设计图.sv$"]
+            AssertSelfTest(ScanResultHasName(files, visibleName), "扫描保留：" visibleName)
+        AssertSelfTest(diagnostics.Count = 8, "隐藏诊断计数")
+    } finally {
+        try DirDelete(testDir, true)
+    }
+}
+
+ScanResultHasName(files, targetName) {
+    for file in files {
+        if StrLower(file.Name) = StrLower(targetName)
+            return true
+    }
+    return false
 }
 
 RunConfigDocumentSelfTests() {
@@ -6249,7 +6795,7 @@ RunConfigDocumentSelfTests() {
     (
     "; <PopDrop:area 1>`n"
     "[General]`n"
-    "ConfigVersion=10`n"
+    "ConfigVersion=11`n"
     "; 人工注释必须保留`n"
     "CustomValue=a=b`n"
     "; <PopDrop:area 2>`n"
@@ -6276,6 +6822,13 @@ RunConfigDocumentSelfTests() {
             {Key: "File001", Value: "C:\Temp\$1=a.txt"},
             {Key: "File002", Value: "D:\中文\文件.txt"}
         ], 2)
+        doc.SetValue("NoiseFilter", "Enabled", "1", 1)
+        doc.SetValue("NoiseFilter", "UnknownNoiseOption", "保留", 1)
+        EnsureNoiseFilterConfigComments(doc)
+        doc.ReplaceSection("SourceIgnore:test", [
+            {Key: "PatternCount", Value: "1"},
+            {Key: "Pattern001", Value: "*.lock-marker"}
+        ], 6)
         doc.Save()
 
         raw := FileRead(testPath, "RAW")
@@ -6296,6 +6849,19 @@ RunConfigDocumentSelfTests() {
         area3 := InStr(text, "; <PopDrop:area 3>")
         AssertSelfTest(area2 < pinned && pinned < area3,
             "错位节必须回到指定区域")
+        area1 := InStr(text, "; <PopDrop:area 1>")
+        noiseSection := InStr(text, "[NoiseFilter]")
+        AssertSelfTest(area1 < noiseSection && noiseSection < area2,
+            "NoiseFilter 配置节位于全局区域")
+        area6 := InStr(text, "; <PopDrop:area 6>")
+        sourceIgnore := InStr(text, "[SourceIgnore:test]")
+        AssertSelfTest(area6 < sourceIgnore,
+            "来源附加规则配置节位于扫描规则区域")
+        AssertSelfTest(InStr(text, "UnknownNoiseOption=保留"),
+            "噪音过滤节未知配置项保留")
+        AssertSelfTest(InStr(text, "; HideHidden：是否排除具有 Hidden 属性的文件。")
+            && InStr(text, "; CustomPatternCount：下方 CustomPatternNNN"),
+            "噪音过滤配置项说明写入且可诊断")
     } finally {
         try FileDelete(testPath)
     }

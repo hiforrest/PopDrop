@@ -80,6 +80,7 @@ LoadSettingsIntoDraft() {
     global ShowRecentSidebar, RecentFileCount, MaxFilesPerFolder, SortMode
     global LastValidFolderSettings, OpenApps, TransferFavorites, RecentTargets
     global TransferFavoriteLabels, GlobalExcludedFolderNames
+    global GlobalNoiseFilter
 
     sources := []
     for source in LastValidFolderSettings
@@ -112,7 +113,13 @@ LoadSettingsIntoDraft() {
             SortMode: SortMode,
             DefaultDisplayScope: ReadGlobalDisplayScopeForDraft(),
             DefaultFolderTimeMode: ReadGlobalFolderTimeForDraft(),
-            DefaultFilter: ReadGlobalFilterForDraft()
+            DefaultFilter: ReadGlobalFilterForDraft(),
+            NoiseFilter: {Enabled: GlobalNoiseFilter.Enabled,
+                HideHidden: GlobalNoiseFilter.HideHidden,
+                HideSystem: GlobalNoiseFilter.HideSystem,
+                HideTemporary: GlobalNoiseFilter.HideTemporary,
+                HideIncompleteDownloads: GlobalNoiseFilter.HideIncompleteDownloads,
+                CustomPatternTexts: GlobalNoiseFilter.CustomPatternTexts.Clone()}
         },
         Sources: sources,
         Applications: apps,
@@ -234,6 +241,8 @@ CloneSettingsSource(source) {
         HideExtensions: source.HideExtensions,
         SourceId: source.SourceId,
         OpenFileMode: ParseSourceOpenFileMode(source.OpenFileMode),
+        NoiseFilterMode: ParseNoiseFilterMode(source.NoiseFilterMode),
+        SourceCustomPatternTexts: source.SourceCustomPatternTexts.Clone(),
         ExcludedPaths: HasProp(source, "ExcludedPaths")
             ? source.ExcludedPaths.Clone() : [],
         AllowedExcludedPaths: HasProp(source, "AllowedExcludedPaths")
@@ -299,7 +308,10 @@ BuildSourcesSettingsPage(c, tabs) {
 
     g.AddGroupBox("x30 y280 w818 h354", "来源设置")
     g.AddText("x50 y315 w70", "名称：")
-    c.SourceName := g.AddEdit("x122 yp-4 w330")
+    c.SourceName := g.AddEdit("x122 yp-4 w300")
+    g.AddText("x450 yp+4 w90", "文件夹类型：")
+    c.SourceType := g.AddDropDownList("x540 yp-4 w275",
+        ["普通文件夹（Files）", "启动器文件夹（Launcher）"])
     g.AddText("x50 y353 w70", "文件夹：")
     c.SourcePath := g.AddEdit("x122 yp-4 w532")
     c.SourceBrowse := g.AddButton("x+7 yp w70", "浏览…")
@@ -323,11 +335,16 @@ BuildSourcesSettingsPage(c, tabs) {
     g.AddText("x460 yp+4 w70", "排序：")
     c.SourceSort := g.AddDropDownList("x530 yp-4 w220",
         ["修改时间（最新在前）", "名称（升序）"])
-    c.ExcludedCount := g.AddText("x50 y552 w190", "排除子文件夹：0 个")
+    g.AddText("x50 y543 w100", "排除噪音文件：")
+    c.SourceNoiseMode := g.AddDropDownList("x154 yp-4 w250",
+        ["跟随全局设置", "启用", "禁用"])
+    c.SourceNoiseRules := g.AddButton("x420 yp w132", "附加忽略规则…")
+    c.SourceNoiseRuleCount := g.AddText("x565 yp+4 w180 c666666", "0 条附加规则")
+    c.ExcludedCount := g.AddText("x50 y581 w190", "排除子文件夹：0 个")
     c.ManageExcluded := g.AddButton("x240 yp-5 w82", "管理…")
     c.AllowedCount := g.AddText("x390 yp+5 w220", "允许覆盖全局排除：0 个")
     c.ManageAllowed := g.AddButton("x618 yp-5 w82", "管理…")
-    c.SourceStatus := g.AddText("x50 y596 w760 h26 c666666", "")
+    c.SourceStatus := g.AddText("x50 y612 w760 h18 c666666", "")
 
     c.SourceList.OnEvent("ItemSelect", SourceSelected.Bind(c))
     c.SourceAdd.OnEvent("Click", AddSourceToDraft.Bind(c))
@@ -340,8 +357,11 @@ BuildSourcesSettingsPage(c, tabs) {
         OpenSourcePathManager.Bind(c, "ExcludedPaths"))
     c.ManageAllowed.OnEvent("Click",
         OpenSourcePathManager.Bind(c, "AllowedExcludedPaths"))
+    c.SourceNoiseRules.OnEvent("Click", OpenSourceIgnoreRules.Bind(c))
+    c.SourceType.OnEvent("Change", SourceTypeChanged.Bind(c))
     for ctrl in [c.SourceName, c.SourcePath, c.SourceScope,
-        c.SourceOpenMode, c.SourceFolderTime, c.SourceMax, c.SourceSort]
+        c.SourceOpenMode, c.SourceFolderTime, c.SourceMax, c.SourceSort,
+        c.SourceNoiseMode]
         ctrl.OnEvent("Change", SourceControlChanged.Bind(c))
 }
 
@@ -416,8 +436,13 @@ BuildDisplaySettingsPage(c, tabs) {
     g.AddText("x250 yp+3 w86", "显示数量：")
     c.RecentCount := g.AddEdit("x338 yp-4 w82 Number")
     g.AddText("x430 yp+4 w120 c666666", "（1–100）")
-    g.AddText("x50 y558 w650 c666666",
-        "数量限制只影响界面显示，不会删除任何文件。")
+    c.NoiseFilterEnabled := g.AddCheckBox("x50 y552",
+        "隐藏常见临时、锁定及系统文件（推荐）")
+    c.ManageNoiseRules := g.AddButton("x650 yp-5 w138", "管理忽略规则…")
+    g.AddText("x70 y579 w555 c666666",
+        "自动隐藏 Office 锁定文件、系统目录信息等通常不需要显示的文件。")
+    c.HiddenNoiseCount := g.AddText("x630 y582 w130 c666666 Right", "本次共隐藏 0 个")
+    c.ViewHiddenNoise := g.AddButton("x770 y575 w55", "查看…")
 
     c.ExcludedNameAdd.OnEvent("Click", AddExcludedName.Bind(c))
     c.ExcludedNameRemove.OnEvent("Click", RemoveExcludedName.Bind(c))
@@ -426,6 +451,9 @@ BuildDisplaySettingsPage(c, tabs) {
     c.GlobalSort.OnEvent("Change", DisplayControlChanged.Bind(c))
     c.ShowRecent.OnEvent("Click", DisplayControlChanged.Bind(c))
     c.RecentCount.OnEvent("Change", DisplayControlChanged.Bind(c))
+    c.NoiseFilterEnabled.OnEvent("Click", DisplayControlChanged.Bind(c))
+    c.ManageNoiseRules.OnEvent("Click", OpenNoiseFilterManager.Bind(c))
+    c.ViewHiddenNoise.OnEvent("Click", OpenHiddenNoiseItems.Bind(c))
 }
 
 LoadGeneralControls(c) {
@@ -466,6 +494,7 @@ WindowModeToIndex(mode) {
 
 LoadDisplayControls(c) {
     global SORT_MODIFIED_DESC
+    global CurrentScanResult
     c.Loading := true
     try {
         d := c.Draft.General
@@ -474,6 +503,13 @@ LoadDisplayControls(c) {
         c.ShowRecent.Value := d.ShowRecentSidebar
         c.RecentCount.Value := d.RecentFileCount
         c.RecentCount.Enabled := !!d.ShowRecentSidebar
+        c.NoiseFilterEnabled.Value := d.NoiseFilter.Enabled
+        hiddenCount := IsObject(CurrentScanResult) && HasProp(CurrentScanResult, "HiddenCount")
+            ? CurrentScanResult.HiddenCount : 0
+        c.HiddenNoiseCount.Text := "本次共隐藏 " hiddenCount " 个"
+        c.ViewHiddenNoise.Enabled := IsObject(CurrentScanResult)
+            && HasProp(CurrentScanResult, "HiddenItems")
+            && CurrentScanResult.HiddenItems.Length > 0
     } finally c.Loading := false
 }
 
@@ -487,6 +523,7 @@ DisplayControlChanged(c, *) {
     d.ShowRecentSidebar := !!c.ShowRecent.Value
     d.RecentFileCount := Trim(c.RecentCount.Value)
     c.RecentCount.Enabled := d.ShowRecentSidebar
+    d.NoiseFilter.Enabled := !!c.NoiseFilterEnabled.Value
 }
 
 RefreshSourceList(c, preferredId := "") {
@@ -556,9 +593,11 @@ FindDraftSource(c, sourceId := "") {
 }
 
 LoadSelectedSourceToControls(c) {
+    global MODE_LAUNCHER
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS
     global FOLDER_TIME_MODIFIED, OPEN_MODE_SINGLE, OPEN_MODE_DOUBLE
     global SORT_MODIFIED_DESC
+    global NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
     found := FindDraftSource(c)
     if !IsObject(found) {
         SetSourceControlsEnabled(c, false)
@@ -570,6 +609,7 @@ LoadSelectedSourceToControls(c) {
         SetSourceControlsEnabled(c, true)
         c.SourceName.Value := s.Name
         c.SourcePath.Value := s.Path
+        c.SourceType.Choose(s.Mode = MODE_LAUNCHER ? 2 : 1)
         c.SourceScope.Choose(s.DisplayScope = SCOPE_FILES_ONLY ? 1
             : s.DisplayScope = SCOPE_FILES_AND_FOLDERS ? 2 : 3)
         RefreshInheritedOpenModeLabels(c)
@@ -578,6 +618,9 @@ LoadSelectedSourceToControls(c) {
         c.SourceFolderTime.Choose(s.FolderTimeMode = FOLDER_TIME_MODIFIED ? 1 : 2)
         c.SourceMax.Value := s.MaxFilesPerFolder
         c.SourceSort.Choose(s.SortMode = SORT_MODIFIED_DESC ? 1 : 2)
+        c.SourceNoiseMode.Choose(s.NoiseFilterMode = NOISE_FILTER_ENABLED ? 2
+            : s.NoiseFilterMode = NOISE_FILTER_DISABLED ? 3 : 1)
+        c.SourceNoiseRuleCount.Text := s.SourceCustomPatternTexts.Length " 条附加规则"
         c.ExcludedCount.Text := "排除子文件夹：" s.ExcludedPaths.Length " 个"
         c.AllowedCount.Text := "允许覆盖全局排除："
             . s.AllowedExcludedPaths.Length " 个"
@@ -586,9 +629,10 @@ LoadSelectedSourceToControls(c) {
 }
 
 SetSourceControlsEnabled(c, enabled) {
-    for ctrl in [c.SourceName, c.SourcePath, c.SourceBrowse, c.SourceOpen,
+    for ctrl in [c.SourceName, c.SourceType, c.SourcePath, c.SourceBrowse, c.SourceOpen,
         c.SourceScope, c.SourceOpenMode, c.SourceFolderTime, c.SourceMax,
-        c.SourceSort, c.ManageExcluded, c.ManageAllowed]
+        c.SourceSort, c.SourceNoiseMode, c.SourceNoiseRules,
+        c.ManageExcluded, c.ManageAllowed]
         ctrl.Enabled := enabled
     if !enabled {
         c.SourceName.Value := ""
@@ -596,6 +640,7 @@ SetSourceControlsEnabled(c, enabled) {
         c.SourceStatus.Text := "请选择一个来源。"
         c.ExcludedCount.Text := "排除子文件夹：0 个"
         c.AllowedCount.Text := "允许覆盖全局排除：0 个"
+        c.SourceNoiseRuleCount.Text := "0 条附加规则"
     }
 }
 
@@ -628,11 +673,58 @@ SourceControlChanged(c, *) {
     RefreshSourceListRow(c)
 }
 
+SourceTypeChanged(c, *) {
+    global MODE_FILES, MODE_LAUNCHER
+    if c.Loading
+        return
+    found := FindDraftSource(c)
+    if !IsObject(found)
+        return
+    source := found.Value
+    newMode := c.SourceType.Value = 2 ? MODE_LAUNCHER : MODE_FILES
+    changed := source.Mode != newMode
+    source.Mode := newMode
+    if changed {
+        if newMode = MODE_LAUNCHER
+            ApplyLauncherSourceDefaults(source)
+        else
+            ApplyFilesSourceDefaults(c, source)
+    }
+    LoadSelectedSourceToControls(c)
+    RefreshSourceListRow(c)
+}
+
+ApplyLauncherSourceDefaults(source) {
+    global SCOPE_FILES_ONLY, SORT_NAME_ASC
+    source.IncludeSubfolders := false
+    source.DisplayScope := SCOPE_FILES_ONLY
+    source.SortMode := SORT_NAME_ASC
+    source.Filter := {Mode: "Include", Extensions: [".lnk", ".url", ".exe"]}
+    source.StripOrderPrefix := 1
+    source.HideExtensions := 1
+}
+
+ApplyFilesSourceDefaults(c, source) {
+    global SCOPE_RECURSIVE_FILES, SORT_MODIFIED_DESC
+    source.DisplayScope := c.Draft.General.DefaultDisplayScope
+    source.IncludeSubfolders :=
+        source.DisplayScope = SCOPE_RECURSIVE_FILES
+    source.SortMode := SORT_MODIFIED_DESC
+    source.Filter := {
+        Mode: c.Draft.General.DefaultFilter.Mode,
+        Extensions: c.Draft.General.DefaultFilter.Extensions.Clone()
+    }
+    source.StripOrderPrefix := 0
+    source.HideExtensions := 0
+}
+
 CommitCurrentSourceControlsToDraft(c) {
+    global MODE_FILES, MODE_LAUNCHER
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     global SOURCE_OPEN_MODE_INHERIT, OPEN_MODE_SINGLE, OPEN_MODE_DOUBLE
     global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
     if c.Loading
         return
     found := FindDraftSource(c)
@@ -641,6 +733,7 @@ CommitCurrentSourceControlsToDraft(c) {
     s := found.Value
     s.Name := Trim(c.SourceName.Value)
     s.Path := NormalizePath(c.SourcePath.Value)
+    s.Mode := c.SourceType.Value = 2 ? MODE_LAUNCHER : MODE_FILES
     scopes := [SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES]
     s.DisplayScope := scopes[Max(1, c.SourceScope.Value)]
     s.IncludeSubfolders := s.DisplayScope = SCOPE_RECURSIVE_FILES
@@ -650,6 +743,8 @@ CommitCurrentSourceControlsToDraft(c) {
         ? FOLDER_TIME_LATEST_CONTENT : FOLDER_TIME_MODIFIED
     s.MaxFilesPerFolder := Trim(c.SourceMax.Value)
     s.SortMode := c.SourceSort.Value = 2 ? SORT_NAME_ASC : SORT_MODIFIED_DESC
+    noiseModes := [NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED]
+    s.NoiseFilterMode := noiseModes[Max(1, c.SourceNoiseMode.Value)]
 }
 
 RefreshSourceListRow(c) {
@@ -669,6 +764,7 @@ RefreshSourceListRow(c) {
 AddSourceToDraft(c, *) {
     global MODE_FILES, SCOPE_RECURSIVE_FILES
     global SORT_MODIFIED_DESC, SOURCE_OPEN_MODE_INHERIT
+    global NOISE_FILTER_INHERIT
     path := SelectPanelFile("D3", "", "选择监控来源")
     if path = ""
         return
@@ -707,6 +803,7 @@ AddSourceToDraft(c, *) {
         },
         StripOrderPrefix: 0, HideExtensions: 0,
         SourceId: id, OpenFileMode: SOURCE_OPEN_MODE_INHERIT,
+        NoiseFilterMode: NOISE_FILTER_INHERIT, SourceCustomPatternTexts: [],
         ExcludedPaths: [], AllowedExcludedPaths: []
     })
     RefreshSourceList(c, id)
@@ -888,6 +985,141 @@ CloseSettingsChild(c, child, *) {
     try WinActivate("ahk_id " c.Gui.Hwnd)
 }
 
+OpenNoiseFilterManager(c, *) {
+    if IsObject(c.Child)
+        return
+    child := Gui("+Owner" c.Gui.Hwnd " -MaximizeBox -MinimizeBox", "管理忽略规则")
+    c.Child := child
+    child.SetFont("s9", "Microsoft YaHei UI")
+    child.MarginX := 16
+    child.MarginY := 14
+    n := c.Draft.General.NoiseFilter
+    child.AddGroupBox("xm ym w600 h142", "文件属性与下载状态")
+    hideHidden := child.AddCheckBox("x34 y48", "隐藏具有 Hidden 属性的文件")
+    hideSystem := child.AddCheckBox("x320 yp", "隐藏具有 System 属性的文件")
+    hideTemporary := child.AddCheckBox("x34 y82", "隐藏具有 Temporary 属性的文件")
+    hideDownloads := child.AddCheckBox("x320 yp", "隐藏未完成的下载文件")
+    hideHidden.Value := n.HideHidden
+    hideSystem.Value := n.HideSystem
+    hideTemporary.Value := n.HideTemporary
+    hideDownloads.Value := n.HideIncompleteDownloads
+    child.AddText("x34 y116 w545 c666666",
+        "未完成下载规则：*.crdownload、*.part、*.download（默认关闭）。")
+    child.AddGroupBox("xm y166 w600 h310", "自定义忽略规则")
+    child.AddText("x34 y194 w548 c555555",
+        "每行一条，只匹配文件名；* 匹配任意数量字符，? 匹配一个字符，不区分大小写。")
+    patterns := child.AddEdit("x34 y230 w548 h205 Multi VScroll -Wrap")
+    patterns.Value := JoinArray(n.CustomPatternTexts, "`r`n")
+    child.AddText("x34 y445 w548 c666666",
+        "空行会忽略，重复规则只保留一条。规则不会删除或修改文件。")
+    ok := child.AddButton("x438 y494 w78 Default", "确定")
+    cancel := child.AddButton("x+8 yp w78", "取消")
+    ok.OnEvent("Click", AcceptNoiseFilterManager.Bind(c, hideHidden,
+        hideSystem, hideTemporary, hideDownloads, patterns, child))
+    cancel.OnEvent("Click", CloseSettingsChild.Bind(c, child))
+    child.OnEvent("Close", CloseSettingsChild.Bind(c, child))
+    child.OnEvent("Escape", CloseSettingsChild.Bind(c, child))
+    c.Gui.Opt("+Disabled")
+    child.Show("w632 h542")
+}
+
+AcceptNoiseFilterManager(c, hideHidden, hideSystem, hideTemporary,
+    hideDownloads, patterns, child, *) {
+    compiled := CompileIgnorePatterns(NormalizeIgnorePatternTextBlock(patterns.Value),
+        "自定义忽略规则")
+    if compiled.Errors.Length {
+        message := "以下规则无效，将不会保存：`n`n"
+        for item in compiled.Errors
+            message .= "• " item "`n"
+        return SettingsMessage(c, message, "忽略规则无效", "Iconx")
+    }
+    n := c.Draft.General.NoiseFilter
+    n.HideHidden := !!hideHidden.Value
+    n.HideSystem := !!hideSystem.Value
+    n.HideTemporary := !!hideTemporary.Value
+    n.HideIncompleteDownloads := !!hideDownloads.Value
+    n.CustomPatternTexts := compiled.Texts
+    CloseSettingsChild(c, child)
+}
+
+OpenSourceIgnoreRules(c, *) {
+    if IsObject(c.Child)
+        return
+    found := FindDraftSource(c)
+    if !IsObject(found)
+        return
+    source := found.Value
+    child := Gui("+Owner" c.Gui.Hwnd " -MaximizeBox -MinimizeBox", "来源附加忽略规则")
+    c.Child := child
+    child.SetFont("s9", "Microsoft YaHei UI")
+    child.MarginX := 16
+    child.MarginY := 14
+    child.AddText("xm ym w548 h66", "这些规则只应用于来源“" source.Name
+        "”，匹配的文件名将不会在 PopDrop 中显示。"
+        . "`n每行一条：* 表示任意多个字符，? 表示任意一个字符；匹配不区分大小写。"
+        . "`n例如：*.myapp-lock 会隐藏 report.myapp-lock。")
+    patterns := child.AddEdit("xm y+10 w548 h230 Multi VScroll -Wrap")
+    patterns.Value := JoinArray(source.SourceCustomPatternTexts, "`r`n")
+    child.AddText("xm y+8 w548 c666666",
+        "来源选择“禁用”时，内置、全局和这些附加规则均不应用。")
+    ok := child.AddButton("x402 y386 w78 Default", "确定")
+    cancel := child.AddButton("x+8 yp w78", "取消")
+    ok.OnEvent("Click", AcceptSourceIgnoreRules.Bind(c, source.SourceId, patterns, child))
+    cancel.OnEvent("Click", CloseSettingsChild.Bind(c, child))
+    child.OnEvent("Close", CloseSettingsChild.Bind(c, child))
+    child.OnEvent("Escape", CloseSettingsChild.Bind(c, child))
+    c.Gui.Opt("+Disabled")
+    child.Show("w580 h434")
+}
+
+AcceptSourceIgnoreRules(c, sourceId, patterns, child, *) {
+    compiled := CompileIgnorePatterns(NormalizeIgnorePatternTextBlock(patterns.Value),
+        "来源附加规则")
+    if compiled.Errors.Length {
+        message := "以下规则无效，将不会保存：`n`n"
+        for item in compiled.Errors
+            message .= "• " item "`n"
+        return SettingsMessage(c, message, "忽略规则无效", "Iconx")
+    }
+    found := FindDraftSource(c, sourceId)
+    if IsObject(found)
+        found.Value.SourceCustomPatternTexts := compiled.Texts
+    CloseSettingsChild(c, child)
+    LoadSelectedSourceToControls(c)
+}
+
+OpenHiddenNoiseItems(c, *) {
+    global CurrentScanResult
+    if IsObject(c.Child)
+        return
+    if !IsObject(CurrentScanResult) || !HasProp(CurrentScanResult, "HiddenItems")
+        || !CurrentScanResult.HiddenItems.Length
+        return SettingsMessage(c, "当前没有可查看的诊断记录。请刷新 PopDrop 后再试。",
+            "已隐藏项目", "Iconi")
+    child := Gui("+Owner" c.Gui.Hwnd " -MaximizeBox -MinimizeBox", "本次已隐藏项目")
+    c.Child := child
+    child.SetFont("s9", "Microsoft YaHei UI")
+    child.MarginX := 14
+    child.MarginY := 12
+    total := HasProp(CurrentScanResult, "HiddenCount")
+        ? CurrentScanResult.HiddenCount : CurrentScanResult.HiddenItems.Length
+    child.AddText("xm ym w820", "本次共隐藏 " total " 个项目；诊断列表最多保留 200 条。")
+    list := child.AddListView("xm y+10 w820 h360 Report -Multi NoSortHdr",
+        ["文件名", "来源", "原因", "完整路径"])
+    list.ModifyCol(1, 175)
+    list.ModifyCol(2, 120)
+    list.ModifyCol(3, 170)
+    list.ModifyCol(4, 330)
+    for item in CurrentScanResult.HiddenItems
+        list.Add("", item.Name, item.Source, NoiseFilterReasonLabel(item.Reason), item.Path)
+    close := child.AddButton("x756 y414 w78 Default", "关闭")
+    close.OnEvent("Click", CloseSettingsChild.Bind(c, child))
+    child.OnEvent("Close", CloseSettingsChild.Bind(c, child))
+    child.OnEvent("Escape", CloseSettingsChild.Bind(c, child))
+    c.Gui.Opt("+Disabled")
+    child.Show("w848 h460")
+}
+
 RefreshApplicationList(c, preferredId := "") {
     if preferredId = ""
         preferredId := c.SelectedAppId
@@ -952,6 +1184,7 @@ OpenApplicationEditor(c, existing, *) {
     specified := child.AddRadio("xm y+12", "指定扩展名：")
     extensions := child.AddEdit("x120 yp-4 w360",
         JoinArray(app.Extensions, ", "))
+    hint := child.AddText("x120 y+2 w360 cGray", "多个扩展名用 , 分割")
     allFiles.Value := app.Extensions.Length = 0
     specified.Value := app.Extensions.Length > 0
     extensions.Enabled := specified.Value
@@ -966,7 +1199,7 @@ OpenApplicationEditor(c, existing, *) {
     child.OnEvent("Close", CloseSettingsChild.Bind(c, child))
     child.OnEvent("Escape", CloseSettingsChild.Bind(c, child))
     c.Gui.Opt("+Disabled")
-    child.Show("w508 h242")
+    child.Show("w508 h262")
 }
 
 BrowseExecutableForEditor(pathControl, nameControl, *) {
@@ -1282,11 +1515,17 @@ SettingsDraftSignature(draft) {
         g.EscapeHidesPanel ? "1" : "0",
         g.ShowRecentSidebar ? "1" : "0",
         g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode)
+    n := g.NoiseFilter
+    parts.Push("N", n.Enabled ? "1" : "0", n.HideHidden ? "1" : "0",
+        n.HideSystem ? "1" : "0", n.HideTemporary ? "1" : "0",
+        n.HideIncompleteDownloads ? "1" : "0",
+        JoinArray(n.CustomPatternTexts, Chr(30)))
     for s in draft.Sources {
         parts.Push("S", s.SourceId, s.Name, PathKey(s.Path), s.Mode,
             s.DisplayScope, s.FolderTimeMode, s.MaxFilesPerFolder "",
             s.SortMode, s.Filter.Mode, JoinArray(s.Filter.Extensions, ","),
             s.StripOrderPrefix "", s.HideExtensions "", s.OpenFileMode,
+            s.NoiseFilterMode, JoinArray(s.SourceCustomPatternTexts, Chr(30)),
             JoinNormalizedPaths(s.ExcludedPaths),
             JoinNormalizedPaths(s.AllowedExcludedPaths))
     }
@@ -1339,10 +1578,12 @@ DestroySettingsGui(c) {
 }
 
 ValidateSettingsDraft(c) {
+    global MODE_FILES, MODE_LAUNCHER
     global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
     errors := []
     warnings := []
     d := c.Draft
@@ -1377,12 +1618,17 @@ ValidateSettingsDraft(c) {
             paths[normalizedPathKey] := s.Name
         if !DirExist(s.Path)
             warnings.Push("来源“" s.Name "”当前不可访问：" s.Path)
+        if !ValueInArray(s.Mode, [MODE_FILES, MODE_LAUNCHER])
+            errors.Push("来源“" s.Name "”的文件夹类型无效。")
         if !ValueInArray(s.DisplayScope,
             [SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES])
             errors.Push("来源“" s.Name "”的显示内容设置无效。")
         if !ValueInArray(s.OpenFileMode,
             [SOURCE_OPEN_MODE_INHERIT, OPEN_MODE_SINGLE, OPEN_MODE_DOUBLE])
             errors.Push("来源“" s.Name "”的打开文件设置无效。")
+        if !ValueInArray(s.NoiseFilterMode,
+            [NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED])
+            errors.Push("来源“" s.Name "”的临时及系统文件过滤设置无效。")
         if !ValueInArray(s.FolderTimeMode,
             [FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT])
             errors.Push("来源“" s.Name "”的文件夹排序设置无效。")
@@ -1400,6 +1646,10 @@ ValidateSettingsDraft(c) {
                 || !IsSameOrDescendantPath(path, s.Path)
                 errors.Push("来源“" s.Name "”的允许路径不在来源内部：" path)
         }
+        sourcePatterns := CompileIgnorePatterns(s.SourceCustomPatternTexts,
+            "来源“" s.Name "”")
+        for item in sourcePatterns.Errors
+            errors.Push(item)
     }
     Loop d.Sources.Length {
         left := d.Sources[A_Index]
@@ -1452,6 +1702,10 @@ ValidateSettingsDraft(c) {
         else
             excluded[key] := true
     }
+    globalPatterns := CompileIgnorePatterns(d.General.NoiseFilter.CustomPatternTexts,
+        "全局自定义忽略规则")
+    for item in globalPatterns.Errors
+        errors.Push(item)
     return {Errors: errors, Warnings: warnings}
 }
 
@@ -1497,6 +1751,19 @@ SaveSettingsDraft(c, *) {
             "YesNo Icon!") != "Yes"
             return false
     }
+    dangerous := HasDangerousIgnorePattern(c.Draft.General.NoiseFilter.CustomPatternTexts)
+    if !dangerous {
+        for source in c.Draft.Sources {
+            if HasDangerousIgnorePattern(source.SourceCustomPatternTexts) {
+                dangerous := true
+                break
+            }
+        }
+    }
+    if dangerous && SettingsMessage(c,
+        "规则 * 或 *.* 可能隐藏来源中的绝大多数文件。`n`n是否仍要保存？",
+        "忽略规则范围过宽", "YesNo Icon!") != "Yes"
+        return false
     newHotkey := Trim(c.Draft.General.Hotkey)
     if !CanRegisterSettingsHotkey(newHotkey, ConfiguredHotkey) {
         SettingsMessage(c, "快捷键“" newHotkey
@@ -1589,6 +1856,27 @@ WriteSettingsDraft(draft, tempPath) {
     doc.SetValue("General", "ShowRecentSidebar",
         g.ShowRecentSidebar ? "1" : "0", 1)
     doc.SetValue("General", "RecentFileCount", g.RecentFileCount, 1)
+    noise := g.NoiseFilter
+    EnsureNoiseFilterConfigComments(doc)
+    noiseEntries := [{Key: "Enabled", Value: noise.Enabled ? "1" : "0"},
+        {Key: "HideHidden", Value: noise.HideHidden ? "1" : "0"},
+        {Key: "HideSystem", Value: noise.HideSystem ? "1" : "0"},
+        {Key: "HideTemporaryAttribute", Value: noise.HideTemporary ? "1" : "0"},
+        {Key: "HideIncompleteDownloads", Value: noise.HideIncompleteDownloads ? "1" : "0"},
+        {Key: "CustomPatternCount", Value: noise.CustomPatternTexts.Length}]
+    noiseKnownKeys := ["Enabled", "HideHidden", "HideSystem",
+        "HideTemporaryAttribute", "HideIncompleteDownloads", "CustomPatternCount"]
+    for entry in doc.GetEntries("NoiseFilter") {
+        if RegExMatch(entry.Key, "i)^CustomPattern\d+$")
+            noiseKnownKeys.Push(entry.Key)
+    }
+    for index, pattern in noise.CustomPatternTexts {
+        key := "CustomPattern" Format("{:03}", index)
+        noiseEntries.Push({Key: key, Value: pattern})
+        if !ValueInArray(key, noiseKnownKeys)
+            noiseKnownKeys.Push(key)
+    }
+    doc.ReplaceKnownKeys("NoiseFilter", noiseEntries, noiseKnownKeys, 1)
 
     oldFolders := doc.GetEntries("Folders")
     oldNames := []
@@ -1626,11 +1914,17 @@ WriteSettingsDraft(draft, tempPath) {
         doc.SetValue(section, "SourceId", source.SourceId, 2)
         doc.SetValue(section, "OpenFileMode",
             ParseSourceOpenFileMode(source.OpenFileMode), 2)
+        doc.SetValue(section, "NoiseFilterMode",
+            ParseNoiseFilterMode(source.NoiseFilterMode), 2)
         sourceSection := "Source:" source.SourceId
         doc.SetValue(sourceSection, "Name", source.Name, 3)
         doc.SetValue(sourceSection, "Path", source.Path, 3)
         doc.SetValue(sourceSection, "OpenFileMode",
             ParseSourceOpenFileMode(source.OpenFileMode), 3)
+        doc.SetValue(sourceSection, "NoiseFilterMode",
+            ParseNoiseFilterMode(source.NoiseFilterMode), 3)
+        WriteIgnorePatternSection(doc, "SourceIgnore:" source.SourceId,
+            source.SourceCustomPatternTexts)
         WriteSourcePathSection(doc,
             "SourceExclude:" source.SourceId, source.Path, source.ExcludedPaths)
         WriteSourcePathSection(doc,
@@ -1654,6 +1948,7 @@ WriteSettingsDraft(draft, tempPath) {
                 doc.DeleteSection("Source:" oldId)
                 doc.DeleteSection("SourceExclude:" oldId)
                 doc.DeleteSection("SourceAllow:" oldId)
+                doc.DeleteSection("SourceIgnore:" oldId)
             }
         }
     }
@@ -1704,6 +1999,17 @@ WriteSettingsDraft(draft, tempPath) {
     doc.SetValue("General", "GlobalExcludedNamesInitialized", "1", 1)
     doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
     doc.Save()
+}
+
+WriteIgnorePatternSection(doc, section, patternTexts) {
+    if !patternTexts.Length {
+        doc.DeleteSection(section)
+        return
+    }
+    entries := [{Key: "PatternCount", Value: patternTexts.Length}]
+    for index, pattern in patternTexts
+        entries.Push({Key: "Pattern" Format("{:03}", index), Value: pattern})
+    doc.ReplaceSection(section, entries, 6)
 }
 
 WriteSourcePathSection(doc, section, sourceRoot, paths) {

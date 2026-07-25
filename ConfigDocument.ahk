@@ -234,6 +234,28 @@ class PopDropConfigDocument {
         this.Dirty := true
     }
 
+    EnsureCommentBlock(section, marker, comments, area) {
+        this.AssertName(section, "节名")
+        if Trim(marker) = "" || SubStr(LTrim(marker), 1, 1) != ";"
+            throw Error("配置注释标记必须是分号注释。")
+        this.EnsureSection(section, area)
+        info := this.RequireUniqueSection(section)
+        Loop info.End - info.Header {
+            if Trim(this.Lines[info.Header + A_Index], " `t") = Trim(marker, " `t")
+                return
+        }
+        insertAt := info.Header + 1
+        additions := [marker]
+        for line in comments {
+            if SubStr(LTrim(line), 1, 1) != ";"
+                throw Error("配置说明必须是分号注释。")
+            additions.Push(line)
+        }
+        for offset, line in additions
+            this.Lines.InsertAt(insertAt + offset - 1, line)
+        this.Dirty := true
+    }
+
     DeleteSection(section) {
         info := this.RequireUniqueSection(section, false)
         if !IsObject(info)
@@ -411,7 +433,7 @@ class PopDropConfigDocument {
 
     AreaForSection(section) {
         folded := StrLower(section)
-        if folded = "general"
+        if folded = "general" || folded = "noisefilter"
             return 1
         if folded = "folders" || folded = "pinnedfiles"
             || SubStr(folded, 1, 7) = "folder:"
@@ -430,6 +452,7 @@ class PopDropConfigDocument {
         if folded = "excludedfoldernames"
             || SubStr(folded, 1, 14) = "sourceexclude:"
             || SubStr(folded, 1, 12) = "sourceallow:"
+            || SubStr(folded, 1, 13) = "sourceignore:"
             return 6
         return 0
     }
@@ -438,7 +461,7 @@ class PopDropConfigDocument {
         folded := StrLower(section)
         area := this.AreaForSection(section)
         if area = 1
-            return 10
+            return folded = "general" ? 10 : 20
         if area = 2 {
             if folded = "folders"
                 return 10
@@ -462,7 +485,9 @@ class PopDropConfigDocument {
                 return 10
             if SubStr(folded, 1, 12) = "sourceallow:"
                 return 20
-            return 30
+            if SubStr(folded, 1, 13) = "sourceignore:"
+                return 30
+            return 40
         }
         return 100
     }

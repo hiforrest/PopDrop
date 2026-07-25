@@ -4,7 +4,7 @@
 
 <img src="assets/logo.webp" width="192px">
 
-按一下 `F2`，一个文件面板出现在屏幕最前面。找到文件，拖走，关掉。全程不到三秒。
+按一下 `F2`，一个文件面板出现在屏幕最前面。找到文件，操作，关掉。全程不到三秒。
 
 PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近打开的文件、固定好的文件集中在一个面板里，随时取用，用完就关。面板默认使用临时窗口模式，切换到其他窗口后自动隐藏。
 
@@ -57,11 +57,14 @@ PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近
 
 优先使用托盘菜单中的“PopDrop 设置…”：四个原生标签页可以管理常规选项、监控来源、
 打开软件、复制/移动常用位置和排除规则。只有高级选项才需要直接编辑同目录下的
-`config.ini`；设置窗口底部保留了“高级设置…”入口。示例：
+`config.ini`；设置窗口底部保留了“高级设置…”入口。监控来源的“文件夹类型”可直接
+选择普通文件夹（Files）或启动器文件夹（Launcher）。选择 Launcher 会自动套用启动器
+推荐值；切回 Files 会恢复按修改时间排序、显示完整文件名及普通文件类型过滤。
+示例：
 
 ```ini
 [General]
-ConfigVersion=10
+ConfigVersion=11
 Hotkey=F2
 OpenFileMode=DoubleClick
 EscapeHidesPanel=1
@@ -75,6 +78,14 @@ ThumbnailHorizontalGap=24
 ThumbnailVerticalGap=4
 ThumbnailTextLines=2
 ShowRecentSidebar=1
+
+[NoiseFilter]
+Enabled=1
+HideHidden=1
+HideSystem=1
+HideTemporaryAttribute=0
+HideIncompleteDownloads=0
+CustomPatternCount=0
 
 [Folders]
 文档=%USERPROFILE%\Documents
