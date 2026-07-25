@@ -25,7 +25,7 @@
 
 ```ini
 [General]
-ConfigVersion=9
+ConfigVersion=10
 Hotkey=F2
 OpenFileMode=DoubleClick
 MaxFilesPerFolder=8
@@ -50,6 +50,10 @@ WindowMode=temporary
 下载=%USERPROFILE%\Downloads
 项目=%USERPROFILE%\Documents\Projects
 ```
+
+配置文件使用 UTF-16LE 和 CRLF。六个 `; <PopDrop:area N>` 行是普通 INI
+注释，同时也是程序的布局锚点，请勿删除或重复。程序保存时会保留未修改的注释和
+未知配置项，并在完整校验通过后原子替换原文件。
 
 ### 配置项说明
 

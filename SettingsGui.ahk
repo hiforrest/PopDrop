@@ -258,9 +258,10 @@ BuildGeneralSettingsPage(c, tabs) {
     g.AddGroupBox("x30 y55 w818 h142", "打开文件")
     c.GlobalDouble := g.AddRadio("x50 y84 Group", "双击（默认）")
     c.GlobalSingle := g.AddRadio("x180 yp", "单击")
-    g.AddText("x50 y120 w770 h54 c555555",
+    g.AddText("x50 y120 w770 h70 c555555",
         "单击会立即打开文件。按住 Ctrl 或 Shift 可以多选，拖拽不受影响；"
-        . "文件夹仍然需要双击打开。")
+        . "文件夹仍然需要双击打开。"
+        . "`n可在「文件来源」页中对每个文件夹单独配置单击或双击打开方式。")
 
     g.AddGroupBox("x30 y211 w818 h112", "快捷键")
     g.AddText("x50 y246 w150", "呼出/隐藏 PopDrop：")
@@ -1574,62 +1575,65 @@ RestoreConfigBackupToTemp(tempPath) {
 }
 
 WriteSettingsDraft(draft, tempPath) {
-    global OPEN_MODE_DOUBLE
+    global OPEN_MODE_DOUBLE, CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
     g := draft.General
-    IniWrite(ParseGlobalOpenFileMode(g.OpenFileMode), tempPath,
-        "General", "OpenFileMode")
-    IniWrite(g.Hotkey, tempPath, "General", "Hotkey")
-    IniWrite(g.WindowMode, tempPath, "General", "WindowMode")
-    IniWrite(g.EscapeHidesPanel ? "1" : "0", tempPath,
-        "General", "EscapeHidesPanel")
-    IniWrite(g.MaxFilesPerFolder, tempPath, "General", "MaxFilesPerFolder")
-    IniWrite(g.SortMode, tempPath, "General", "SortMode")
-    IniWrite(g.ShowRecentSidebar ? "1" : "0", tempPath,
-        "General", "ShowRecentSidebar")
-    IniWrite(g.RecentFileCount, tempPath, "General", "RecentFileCount")
+    doc.SetValue("General", "OpenFileMode",
+        ParseGlobalOpenFileMode(g.OpenFileMode), 1)
+    doc.SetValue("General", "Hotkey", g.Hotkey, 1)
+    doc.SetValue("General", "WindowMode", g.WindowMode, 1)
+    doc.SetValue("General", "EscapeHidesPanel",
+        g.EscapeHidesPanel ? "1" : "0", 1)
+    doc.SetValue("General", "MaxFilesPerFolder", g.MaxFilesPerFolder, 1)
+    doc.SetValue("General", "SortMode", g.SortMode, 1)
+    doc.SetValue("General", "ShowRecentSidebar",
+        g.ShowRecentSidebar ? "1" : "0", 1)
+    doc.SetValue("General", "RecentFileCount", g.RecentFileCount, 1)
 
-    oldFolders := ReadIniSectionFrom(tempPath, "Folders")
+    oldFolders := doc.GetEntries("Folders")
     oldNames := []
     for entry in oldFolders
         oldNames.Push(entry.Key)
-    try IniDelete(tempPath, "Folders")
+    folderEntries := []
+    for source in draft.Sources
+        folderEntries.Push({Key: source.Name, Value: source.Path})
+    doc.ReplaceSection("Folders", folderEntries, 2)
+
     sourceIds := []
     activeIds := Map()
     for source in draft.Sources {
-        IniWrite(source.Path, tempPath, "Folders", source.Name)
         section := "Folder:" source.Name
         if HasProp(source, "OriginalName")
             && source.OriginalName != source.Name {
-            for entry in ReadIniSectionFrom(tempPath,
-                "Folder:" source.OriginalName)
-                IniWrite(entry.Value, tempPath, section, entry.Key)
+            doc.SetValues(section,
+                doc.GetEntries("Folder:" source.OriginalName), 2)
         }
-        IniWrite(source.Mode, tempPath, section, "Mode")
-        IniWrite(source.MaxFilesPerFolder, tempPath, section,
-            "MaxFilesPerFolder")
-        IniWrite(source.DisplayScope = "RecursiveFiles" ? "1" : "0",
-            tempPath, section, "IncludeSubfolders")
-        IniWrite(source.DisplayScope, tempPath, section, "DisplayScope")
-        IniWrite(source.FolderTimeMode, tempPath, section, "FolderTimeMode")
-        IniWrite(source.SortMode, tempPath, section, "SortMode")
-        IniWrite(source.Filter.Mode, tempPath, section, "FilterMode")
-        IniWrite(JoinArray(source.Filter.Extensions, ","), tempPath,
-            section, "FileExtensions")
-        IniWrite(source.StripOrderPrefix ? "1" : "0", tempPath,
-            section, "StripOrderPrefix")
-        IniWrite(source.HideExtensions ? "1" : "0", tempPath,
-            section, "HideExtensions")
-        IniWrite(source.SourceId, tempPath, section, "SourceId")
-        IniWrite(ParseSourceOpenFileMode(source.OpenFileMode), tempPath,
-            section, "OpenFileMode")
+        doc.SetValue(section, "Mode", source.Mode, 2)
+        doc.SetValue(section, "MaxFilesPerFolder",
+            source.MaxFilesPerFolder, 2)
+        doc.SetValue(section, "IncludeSubfolders",
+            source.DisplayScope = "RecursiveFiles" ? "1" : "0", 2)
+        doc.SetValue(section, "DisplayScope", source.DisplayScope, 2)
+        doc.SetValue(section, "FolderTimeMode", source.FolderTimeMode, 2)
+        doc.SetValue(section, "SortMode", source.SortMode, 2)
+        doc.SetValue(section, "FilterMode", source.Filter.Mode, 2)
+        doc.SetValue(section, "FileExtensions",
+            JoinArray(source.Filter.Extensions, ","), 2)
+        doc.SetValue(section, "StripOrderPrefix",
+            source.StripOrderPrefix ? "1" : "0", 2)
+        doc.SetValue(section, "HideExtensions",
+            source.HideExtensions ? "1" : "0", 2)
+        doc.SetValue(section, "SourceId", source.SourceId, 2)
+        doc.SetValue(section, "OpenFileMode",
+            ParseSourceOpenFileMode(source.OpenFileMode), 2)
         sourceSection := "Source:" source.SourceId
-        IniWrite(source.Name, tempPath, sourceSection, "Name")
-        IniWrite(source.Path, tempPath, sourceSection, "Path")
-        IniWrite(ParseSourceOpenFileMode(source.OpenFileMode), tempPath,
-            sourceSection, "OpenFileMode")
-        WriteSourcePathSection(tempPath,
+        doc.SetValue(sourceSection, "Name", source.Name, 3)
+        doc.SetValue(sourceSection, "Path", source.Path, 3)
+        doc.SetValue(sourceSection, "OpenFileMode",
+            ParseSourceOpenFileMode(source.OpenFileMode), 3)
+        WriteSourcePathSection(doc,
             "SourceExclude:" source.SourceId, source.Path, source.ExcludedPaths)
-        WriteSourcePathSection(tempPath,
+        WriteSourcePathSection(doc,
             "SourceAllow:" source.SourceId, source.Path,
             source.AllowedExcludedPaths)
         sourceIds.Push(source.SourceId)
@@ -1644,59 +1648,76 @@ WriteSettingsDraft(draft, tempPath) {
             }
         }
         if !keep {
-            oldId := IniRead(tempPath, "Folder:" oldName, "SourceId", "")
-            try IniDelete(tempPath, "Folder:" oldName)
+            oldId := doc.GetValue("Folder:" oldName, "SourceId", "")
+            doc.DeleteSection("Folder:" oldName)
             if oldId != "" && !activeIds.Has(StrLower(oldId)) {
-                try IniDelete(tempPath, "Source:" oldId)
-                try IniDelete(tempPath, "SourceExclude:" oldId)
-                try IniDelete(tempPath, "SourceAllow:" oldId)
+                doc.DeleteSection("Source:" oldId)
+                doc.DeleteSection("SourceExclude:" oldId)
+                doc.DeleteSection("SourceAllow:" oldId)
             }
         }
     }
-    IniWrite(JoinArray(sourceIds, ","), tempPath, "Sources", "Order")
+    doc.SetValue("Sources", "Order", JoinArray(sourceIds, ","), 3)
 
-    for id in ReadOpenAppIdsFrom(tempPath)
-        try IniDelete(tempPath, "OpenApp:" id)
-    try IniDelete(tempPath, "OpenApps")
     appIds := []
+    activeAppIds := Map()
+    for app in draft.Applications
+        activeAppIds[StrLower(app.Id)] := true
+    oldAppIds := ParseOpenAppOrder(doc.GetValue("OpenApps", "Order", ""))
+    for entry in doc.GetEntries("OpenApps") {
+        if RegExMatch(entry.Key, "i)^App\d+$")
+            && !ArrayContainsTextInsensitive(oldAppIds, entry.Value)
+            oldAppIds.Push(entry.Value)
+    }
+    for id in oldAppIds {
+        if !activeAppIds.Has(StrLower(id))
+            doc.DeleteSection("OpenApp:" id)
+    }
     for app in draft.Applications {
         appIds.Push(app.Id)
         section := "OpenApp:" app.Id
-        IniWrite(app.Path, tempPath, section, "Path")
-        IniWrite(app.Name, tempPath, section, "Name")
-        IniWrite(app.Path, tempPath, section, "Icon")
-        IniWrite(JoinArray(app.Extensions, ","), tempPath,
-            section, "Extensions")
-        IniWrite(app.Enabled ? "1" : "0", tempPath, section, "Enabled")
+        doc.ReplaceKnownKeys(section, [
+            {Key: "Path", Value: app.Path},
+            {Key: "Name", Value: app.Name},
+            {Key: "Icon", Value: app.Path},
+            {Key: "Extensions", Value: JoinArray(app.Extensions, ",")},
+            {Key: "Enabled", Value: app.Enabled ? "1" : "0"}
+        ], ["Path", "Name", "Icon", "Extensions", "Enabled"], 4)
     }
-    IniWrite(JoinArray(appIds, ","), tempPath, "OpenApps", "Order")
+    doc.ReplaceSection("OpenApps",
+        [{Key: "Order", Value: JoinArray(appIds, ",")}], 4)
 
-    try IniDelete(tempPath, "TransferFavorites")
-    try IniDelete(tempPath, "TransferFavoriteLabels")
+    favoriteEntries := []
+    labelEntries := []
     for index, target in draft.CommonDestinations {
         key := "Path" Format("{:03}", index)
-        IniWrite(target.Path, tempPath, "TransferFavorites", key)
-        IniWrite(target.Name, tempPath, "TransferFavoriteLabels", key)
+        favoriteEntries.Push({Key: key, Value: target.Path})
+        labelEntries.Push({Key: key, Value: target.Name})
     }
-    IniWrite("1", tempPath, "General", "TransferFavoritesInitialized")
-    try IniDelete(tempPath, "RecentTargets")
-    for index, path in draft.RecentDestinations
-        IniWrite(path, tempPath, "RecentTargets",
-            "Path" Format("{:03}", index))
-    try IniDelete(tempPath, "ExcludedFolderNames")
-    for index, name in draft.GlobalExcludedNames
-        IniWrite(name, tempPath, "ExcludedFolderNames",
-            "Name" Format("{:03}", index))
-    IniWrite("1", tempPath, "General",
-        "GlobalExcludedNamesInitialized")
-    IniWrite("9", tempPath, "General", "ConfigVersion")
+    doc.ReplaceSection("TransferFavorites", favoriteEntries, 5)
+    doc.ReplaceSection("TransferFavoriteLabels", labelEntries, 5)
+    doc.SetValue("General", "TransferFavoritesInitialized", "1", 1)
+    doc.ReplaceSection("RecentTargets",
+        ConfigEntriesFromValues(draft.RecentDestinations, "Path"), 5)
+    doc.ReplaceSection("ExcludedFolderNames",
+        ConfigEntriesFromValues(draft.GlobalExcludedNames, "Name"), 6)
+    doc.SetValue("General", "GlobalExcludedNamesInitialized", "1", 1)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
 }
 
-WriteSourcePathSection(tempPath, section, sourceRoot, paths) {
-    try IniDelete(tempPath, section)
+WriteSourcePathSection(doc, section, sourceRoot, paths) {
+    if !paths.Length {
+        doc.DeleteSection(section)
+        return
+    }
+    entries := []
     for index, path in paths
-        IniWrite(GetRelativeSourcePath(path, sourceRoot), tempPath,
-            section, "Path" Format("{:03}", index))
+        entries.Push({
+            Key: "Path" Format("{:03}", index),
+            Value: GetRelativeSourcePath(path, sourceRoot)
+        })
+    doc.ReplaceSection(section, entries, 6)
 }
 
 GetRelativeSourcePath(path, root) {

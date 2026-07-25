@@ -61,7 +61,7 @@ PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近
 
 ```ini
 [General]
-ConfigVersion=9
+ConfigVersion=10
 Hotkey=F2
 OpenFileMode=DoubleClick
 EscapeHidesPanel=1
@@ -93,6 +93,10 @@ OpenFileMode=SingleClick
 无修饰键且未发生拖拽的左键释放时打开文件。
 
 所有配置项详解见 **[使用指南](USAGE.md)**。
+
+`config.ini` 中的 `; <PopDrop:area 1>`～`; <PopDrop:area 6>` 是注释形式的
+布局锚点。程序用它们把自动维护的配置节放回正确区域；请保留这些标记。设置界面和
+面板快捷操作只改动相关键或受管理列表，其他注释、未知键和人工排版保持原样。
 
 手工配置打开软件时，只需在 `[OpenApps]` 的 `Order=` 中列出可读 ID，再添加对应的
 `[OpenApp:<ID>]` 段；例如 `Order=7z,everedit`。应用段中只有 `Path` 必填，

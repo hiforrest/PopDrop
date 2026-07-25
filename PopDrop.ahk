@@ -16,6 +16,7 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global APP_VERSION := "0.7.0"
+global CONFIG_VERSION := "10"
 
 ; ──── 文件夹模式常量 ────
 global MODE_FILES := "Files"
@@ -152,6 +153,7 @@ global GlobalOpenFileMode := OPEN_MODE_DOUBLE
 global SettingsDialog := 0
 global EscapeHidesPanel := true
 
+#Include ConfigDocument.ahk
 #Include SettingsGui.ahk
 
 ; ──── 单击激活手势和重复激活抑制 ────
@@ -234,9 +236,11 @@ SelectPanelFile(options, rootDir := "", title := "", filter := "") {
 }
 
 EnsureConfig() {
-    global ConfigPath
+    global ConfigPath, CONFIG_VERSION
     if FileExist(ConfigPath) {
         EnsureConfigEncoding()
+        if ConfigLayoutNeedsNormalization()
+            AtomicConfigEdit(NormalizeConfigDocument)
         return
     }
 
@@ -254,8 +258,9 @@ EnsureConfig() {
     "; PopDrop 配置文件`n"
     "; 修改后，在面板中点“刷新”即可重新读取。`n"
     "`n"
+    "; <PopDrop:area 1>`n"
     "[General]`n"
-    "ConfigVersion=9`n"
+    "ConfigVersion=" CONFIG_VERSION "`n"
     "Hotkey=F2`n"
     "; DoubleClick（默认）| SingleClick`n"
     "OpenFileMode=DoubleClick`n"
@@ -290,17 +295,24 @@ EnsureConfig() {
     "TransferFavoritesInitialized=1`n"
     "GlobalExcludedNamesInitialized=1`n"
     "`n"
+    "; <PopDrop:area 2>`n"
     "[Folders]`n"
     "文档=%USERPROFILE%\Documents`n"
     "下载=D:\download`n"
     "`n"
     "[PinnedFiles]`n"
     "`n"
+    "; <PopDrop:area 3>`n"
+    "[Sources]`n"
+    "Order=`n"
+    "`n"
+    "; <PopDrop:area 4>`n"
     "[OpenApps]`n"
     "; 顺序和稳定 ID，例如：Order=7zip,everedit`n"
     "; 详情保存在 [OpenApp:<ID>]；ID 建议只使用字母、数字、-、_`n"
     "Order=`n"
     "`n"
+    "; <PopDrop:area 5>`n"
     "[TransferFavorites]`n"
     "Path001=" defaultDesktop "`n"
     "Path002=" defaultDownloads "`n"
@@ -309,6 +321,7 @@ EnsureConfig() {
     "`n"
     "[RecentTargets]`n"
     "`n"
+    "; <PopDrop:area 6>`n"
     "[ExcludedFolderNames]`n"
     "Name001=.git`n"
     "Name002=.svn`n"
@@ -316,21 +329,46 @@ EnsureConfig() {
     "Name004=node_modules`n"
     "Name005=__pycache__`n"
     )
-    ; IniRead/IniWrite use the Windows profile API, which requires UTF-16 for
-    ; reliable Chinese text on every system locale.
+    ; The layout-aware editor stores one UTF-16LE BOM and CRLF line endings.
     FileAppend(defaultConfig, ConfigPath, "UTF-16")
+}
+
+NormalizeConfigDocument(tempPath) {
+    global CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
+}
+
+ConfigLayoutNeedsNormalization() {
+    global ConfigPath, CONFIG_VERSION
+    doc := OpenPopDropConfig(ConfigPath)
+    return doc.Dirty
+        || doc.GetValue("General", "ConfigVersion", "") != CONFIG_VERSION
 }
 
 EnsureConfigEncoding() {
     global ConfigPath
+    tempPath := ""
     try {
         rawBytes := FileRead(ConfigPath, "RAW")
         if rawBytes.Size >= 2 && NumGet(rawBytes, 0, "ushort") = 0xFEFF
             return
         contents := FileRead(ConfigPath, "UTF-8")
-        output := FileOpen(ConfigPath, "w", "UTF-16")
-        output.Write(contents)
-        output.Close()
+        tempPath := ConfigPath ".encoding-"
+            . DllCall("kernel32\GetCurrentProcessId", "uint")
+        try FileDelete(tempPath)
+        output := FileOpen(tempPath, "w", "UTF-16")
+        try output.Write(contents)
+        finally output.Close()
+        if !DllCall("kernel32\ReplaceFileW", "wstr", ConfigPath,
+            "wstr", tempPath, "ptr", 0, "uint", 0x2,
+            "ptr", 0, "ptr", 0, "int")
+            throw OSError(A_LastError, "无法安全转换配置文件编码")
+    } catch {
+        if tempPath != ""
+            try FileDelete(tempPath)
+        throw
     }
 }
 
@@ -1610,29 +1648,45 @@ SaveOpenApps() {
 }
 
 WriteOpenAppsConfig(tempPath) {
-    global OpenApps, LastOpenProgramDir
-    for id in ReadOpenAppIdsFrom(tempPath)
-        try IniDelete(tempPath, "OpenApp:" id)
-    try IniDelete(tempPath, "OpenApps")
+    global OpenApps, LastOpenProgramDir, CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    activeIds := Map()
+    for app in OpenApps
+        activeIds[StrLower(app.Id)] := true
+    oldIds := ParseOpenAppOrder(doc.GetValue("OpenApps", "Order", ""))
+    for entry in doc.GetEntries("OpenApps") {
+        if RegExMatch(entry.Key, "i)^App\d+$")
+            && !ArrayContainsTextInsensitive(oldIds, entry.Value)
+            oldIds.Push(entry.Value)
+    }
+    for id in oldIds {
+        if !activeIds.Has(StrLower(id))
+            doc.DeleteSection("OpenApp:" id)
+    }
     ids := []
     for app in OpenApps
         ids.Push(app.Id)
-    IniWrite(JoinArray(ids, ","), tempPath, "OpenApps", "Order")
+    doc.ReplaceSection("OpenApps",
+        [{Key: "Order", Value: JoinArray(ids, ",")}], 4)
 
     for app in OpenApps {
         section := "OpenApp:" app.Id
-        IniWrite(app.Path, tempPath, section, "Path")
+        entries := [{Key: "Path", Value: app.Path}]
         if app.Name != GetExecutableDisplayName(app.Path)
-            IniWrite(app.Name, tempPath, section, "Name")
+            entries.Push({Key: "Name", Value: app.Name})
         if !PathsEqual(app.Icon, app.Path)
-            IniWrite(app.Icon, tempPath, section, "Icon")
+            entries.Push({Key: "Icon", Value: app.Icon})
         if app.Extensions.Length
-            IniWrite(JoinArray(app.Extensions, ","), tempPath, section, "Extensions")
+            entries.Push({Key: "Extensions",
+                Value: JoinArray(app.Extensions, ",")})
         if !app.Enabled
-            IniWrite("0", tempPath, section, "Enabled")
+            entries.Push({Key: "Enabled", Value: "0"})
+        doc.ReplaceKnownKeys(section, entries,
+            ["Path", "Name", "Icon", "Extensions", "Enabled"], 4)
     }
-    IniWrite(LastOpenProgramDir, tempPath, "General", "LastOpenProgramDir")
-    IniWrite("9", tempPath, "General", "ConfigVersion")
+    doc.SetValue("General", "LastOpenProgramDir", LastOpenProgramDir, 1)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
 }
 
 ShouldIncludeFile(filename, filter) {
@@ -1759,12 +1813,13 @@ GetDefaultTransferFavoritePaths() {
 }
 
 WriteInitialTransferFavoritesConfig(favorites, tempPath) {
-    try IniDelete(tempPath, "TransferFavorites")
-    for index, path in favorites
-        IniWrite(path, tempPath, "TransferFavorites",
-            "Path" Format("{:03}", index))
-    IniWrite("1", tempPath, "General", "TransferFavoritesInitialized")
-    IniWrite("9", tempPath, "General", "ConfigVersion")
+    global CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    doc.ReplaceSection("TransferFavorites",
+        ConfigEntriesFromValues(favorites, "Path"), 5)
+    doc.SetValue("General", "TransferFavoritesInitialized", "1", 1)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
 }
 
 AtomicConfigEdit(editor) {
@@ -1774,11 +1829,30 @@ AtomicConfigEdit(editor) {
         . "-" A_TickCount
     try FileDelete(tempPath)
     try {
-        if FileExist(ConfigPath)
+        configExisted := FileExist(ConfigPath) != ""
+        baseline := configExisted ? FileRead(ConfigPath, "RAW") : 0
+        if configExisted
             FileCopy(ConfigPath, tempPath, 1)
         else
             FileAppend("", tempPath, "UTF-16")
         editor.Call(tempPath)
+        ; The callback edits only the private temporary copy. Re-open it before
+        ; replacement so malformed/duplicate sections, wrong layout or BOM
+        ; corruption can never reach the live config.
+        verified := OpenPopDropConfig(tempPath)
+        verified.Save()
+        ; Do not silently overwrite a manual edit or another writer that
+        ; completed after this transaction copied its baseline.
+        if configExisted {
+            if !FileExist(ConfigPath)
+                throw Error("配置文件在保存期间被删除；已取消本次写入。")
+            current := FileRead(ConfigPath, "RAW")
+            if !BuffersEqual(baseline, current)
+                throw Error("配置文件在保存期间被其他程序修改；"
+                    "已保留外部修改并取消本次写入，请刷新后重试。")
+        } else if FileExist(ConfigPath) {
+            throw Error("配置文件在保存期间由其他程序创建；已取消本次写入。")
+        }
         ; ReplaceFileW is atomic on the same volume and preserves metadata.
         replaced := DllCall("kernel32\ReplaceFileW", "wstr", ConfigPath,
             "wstr", tempPath, "ptr", 0, "uint", 0x2,
@@ -1794,6 +1868,31 @@ AtomicConfigEdit(editor) {
         try FileDelete(tempPath)
         throw
     }
+}
+
+BuffersEqual(left, right) {
+    if left.Size != right.Size
+        return false
+    Loop left.Size {
+        offset := A_Index - 1
+        if NumGet(left, offset, "UChar") != NumGet(right, offset, "UChar")
+            return false
+    }
+    return true
+}
+
+AtomicConfigSetValue(section, key, value, area := 1) {
+    AtomicConfigEdit(WriteSingleConfigValue.Bind(
+        section, key, value, area))
+}
+
+WriteSingleConfigValue(section, key, value, area, tempPath) {
+    global CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    doc.SetValue(section, key, value, area)
+    if StrLower(section) != "general" || StrLower(key) != "configversion"
+        doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
 }
 
 NormalizePath(path) {
@@ -2077,7 +2176,7 @@ InstallHotkey(newHotkey) {
             "PopDrop", "Icon!")
         newHotkey := "F2"
         ConfiguredHotkey := newHotkey
-        IniWrite(newHotkey, ConfigPath, "General", "Hotkey")
+        AtomicConfigSetValue("General", "Hotkey", newHotkey)
         Hotkey(newHotkey, TogglePanel, "On")
     }
 
@@ -2217,17 +2316,18 @@ RequestNativeLayout() {
 }
 
 ToggleViewMode(*) {
-    global ViewMode, ConfigPath
+    global ViewMode
     ViewMode := ViewMode = "Thumbnail" ? "List" : "Thumbnail"
-    IniWrite(ViewMode, ConfigPath, "General", "ViewMode")
+    AtomicConfigSetValue("General", "ViewMode", ViewMode)
     ApplyViewMode()
     UpdateViewButtons()
 }
 
 ToggleRecentSidebar(*) {
-    global ShowRecentSidebar, ConfigPath
+    global ShowRecentSidebar
     ShowRecentSidebar := !ShowRecentSidebar
-    IniWrite(ShowRecentSidebar ? "1" : "0", ConfigPath, "General", "ShowRecentSidebar")
+    AtomicConfigSetValue("General", "ShowRecentSidebar",
+        ShowRecentSidebar ? "1" : "0")
     if ShowRecentSidebar
         PopulateRecentSidebar()
     UpdateViewButtons()
@@ -2235,7 +2335,7 @@ ToggleRecentSidebar(*) {
 }
 
 ToggleWindowMode(*) {
-    global WindowMode, ConfigPath
+    global WindowMode
     global WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY
 
     previousMode := WindowMode
@@ -2243,7 +2343,7 @@ ToggleWindowMode(*) {
         ? WINDOW_MODE_TEMPORARY
         : WINDOW_MODE_ALWAYS_ON_TOP
 
-    try IniWrite(WindowMode, ConfigPath, "General", "WindowMode")
+    try AtomicConfigSetValue("General", "WindowMode", WindowMode)
     catch as err {
         WindowMode := previousMode
         ShowPanelMsgBox(
@@ -4094,11 +4194,12 @@ SavePinnedFiles() {
 }
 
 WritePinnedFilesConfig(tempPath) {
-    global PinnedPaths
-    try IniDelete(tempPath, "PinnedFiles")
-    for index, path in PinnedPaths
-        IniWrite(path, tempPath, "PinnedFiles", "File" Format("{:03}", index))
-    IniWrite("9", tempPath, "General", "ConfigVersion")
+    global PinnedPaths, CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    doc.ReplaceSection("PinnedFiles",
+        ConfigEntriesFromValues(PinnedPaths, "File"), 2)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
 }
 
 ArrayContainsPath(paths, target) {
@@ -4279,23 +4380,26 @@ SaveOpenFileSettings(settingsGui, globalDouble, globalSingle, sourceState, *) {
 }
 
 WriteOpenFileModeSettings(globalMode, entries, tempPath) {
-    IniWrite(ParseGlobalOpenFileMode(globalMode), tempPath,
-        "General", "OpenFileMode")
+    global CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    doc.SetValue("General", "OpenFileMode",
+        ParseGlobalOpenFileMode(globalMode), 1)
     sourceIds := []
     for entry in entries {
         sourceIds.Push(entry.Id)
         folderSection := "Folder:" entry.Name
         sourceSection := "Source:" entry.Id
-        IniWrite(entry.Id, tempPath, folderSection, "SourceId")
-        IniWrite(ParseSourceOpenFileMode(entry.Mode), tempPath,
-            folderSection, "OpenFileMode")
-        IniWrite(entry.Name, tempPath, sourceSection, "Name")
-        IniWrite(entry.Path, tempPath, sourceSection, "Path")
-        IniWrite(ParseSourceOpenFileMode(entry.Mode), tempPath,
-            sourceSection, "OpenFileMode")
+        doc.SetValue(folderSection, "SourceId", entry.Id, 2)
+        doc.SetValue(folderSection, "OpenFileMode",
+            ParseSourceOpenFileMode(entry.Mode), 2)
+        doc.SetValue(sourceSection, "Name", entry.Name, 3)
+        doc.SetValue(sourceSection, "Path", entry.Path, 3)
+        doc.SetValue(sourceSection, "OpenFileMode",
+            ParseSourceOpenFileMode(entry.Mode), 3)
     }
-    IniWrite(JoinArray(sourceIds, ","), tempPath, "Sources", "Order")
-    IniWrite("9", tempPath, "General", "ConfigVersion")
+    doc.SetValue("Sources", "Order", JoinArray(sourceIds, ","), 3)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
 }
 
 CloseOpenFileSettings(settingsGui, *) {
@@ -4457,16 +4561,16 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
         contextMenu.Disable(revealText)
 
     contextMenu.Add()
-    copyFilesText := "复制文件`tCtrl+C"
-    copyPathsText := "复制路径`tCtrl+Shift+C"
-    contextMenu.Add(copyFilesText, CopyFileObjectsToClipboard.Bind(paths.Clone()))
-    contextMenu.Add(copyPathsText, CopyPathTextToClipboard.Bind(paths.Clone()))
-
-    contextMenu.Add()
     copyMenu := BuildTransferTargetMenu("copy", paths)
     moveMenu := BuildTransferTargetMenu("move", paths)
     contextMenu.Add("复制到…", copyMenu)
     contextMenu.Add("移动到…", moveMenu)
+
+    contextMenu.Add()
+    copyFilesText := "复制文件`tCtrl+C"
+    copyPathsText := "复制路径`tCtrl+Shift+C"
+    contextMenu.Add(copyFilesText, CopyFileObjectsToClipboard.Bind(paths.Clone()))
+    contextMenu.Add(copyPathsText, CopyPathTextToClipboard.Bind(paths.Clone()))
 
     contextMenu.Add()
     addCount := 0
@@ -5475,24 +5579,27 @@ SaveTransferTargets() {
 
 WriteTransferTargetsConfig(tempPath) {
     global TransferFavorites, TransferFavoriteLabels
-    global RecentTargets, LastTransferTargetDir
-    try IniDelete(tempPath, "TransferFavorites")
-    try IniDelete(tempPath, "TransferFavoriteLabels")
-    for index, path in TransferFavorites
-        IniWrite(path, tempPath, "TransferFavorites",
-            "Path" Format("{:03}", index))
+    global RecentTargets, LastTransferTargetDir, CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    doc.ReplaceSection("TransferFavorites",
+        ConfigEntriesFromValues(TransferFavorites, "Path"), 5)
+    labelEntries := []
     for index, path in TransferFavorites {
         key := PathKey(path)
         if TransferFavoriteLabels.Has(key)
-            IniWrite(TransferFavoriteLabels[key], tempPath,
-                "TransferFavoriteLabels", "Path" Format("{:03}", index))
+            labelEntries.Push({
+                Key: "Path" Format("{:03}", index),
+                Value: TransferFavoriteLabels[key]
+            })
     }
-    try IniDelete(tempPath, "RecentTargets")
-    for index, path in RecentTargets
-        IniWrite(path, tempPath, "RecentTargets", "Path" Format("{:03}", index))
-    IniWrite(LastTransferTargetDir, tempPath, "General", "LastTransferTargetDir")
-    IniWrite("1", tempPath, "General", "TransferFavoritesInitialized")
-    IniWrite("9", tempPath, "General", "ConfigVersion")
+    doc.ReplaceSection("TransferFavoriteLabels", labelEntries, 5)
+    doc.ReplaceSection("RecentTargets",
+        ConfigEntriesFromValues(RecentTargets, "Path"), 5)
+    doc.SetValue("General", "LastTransferTargetDir",
+        LastTransferTargetDir, 1)
+    doc.SetValue("General", "TransferFavoritesInitialized", "1", 1)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
 }
 
 UpdatePinnedPathsAfterMove(mappings) {
@@ -6069,6 +6176,7 @@ RunSelfTests() {
     global NO_EXTENSION_TOKEN
     global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
     try {
+        RunConfigDocumentSelfTests()
         AssertSelfTest(ParseGlobalOpenFileMode("") = OPEN_MODE_DOUBLE,
             "缺失全局打开方式回退为双击")
         AssertSelfTest(ParseGlobalOpenFileMode("broken") = OPEN_MODE_DOUBLE,
@@ -6129,6 +6237,67 @@ RunSelfTests() {
     } catch as err {
         FileAppend("PopDrop v0.7 self-test: FAIL - " err.Message "`n", "*")
         ExitApp(1)
+    }
+}
+
+RunConfigDocumentSelfTests() {
+    testPath := A_Temp "\PopDrop-config-self-test-"
+        . DllCall("kernel32\GetCurrentProcessId", "uint")
+        . "-" A_TickCount ".ini"
+    try FileDelete(testPath)
+    testConfig :=
+    (
+    "; <PopDrop:area 1>`n"
+    "[General]`n"
+    "ConfigVersion=10`n"
+    "; 人工注释必须保留`n"
+    "CustomValue=a=b`n"
+    "; <PopDrop:area 2>`n"
+    "; [Folder:这里只是注释示例]`n"
+    "; <PopDrop:area 3>`n"
+    "[Sources]`n"
+    "Order=`n"
+    "; <PopDrop:area 4>`n"
+    "[OpenApps]`n"
+    "Order=`n"
+    "; <PopDrop:area 5>`n"
+    "[TransferFavorites]`n"
+    "; <PopDrop:area 6>`n"
+    "[ExcludedFolderNames]`n"
+    "Name001=.git`n"
+    "[PinnedFiles]`n"
+    "File001=旧值`n"
+    )
+    FileAppend(testConfig, testPath, "UTF-16")
+    try {
+        doc := OpenPopDropConfig(testPath)
+        AssertSelfTest(doc.Dirty, "错位配置节应触发布局修复")
+        doc.ReplaceSection("PinnedFiles", [
+            {Key: "File001", Value: "C:\Temp\$1=a.txt"},
+            {Key: "File002", Value: "D:\中文\文件.txt"}
+        ], 2)
+        doc.Save()
+
+        raw := FileRead(testPath, "RAW")
+        AssertSelfTest(NumGet(raw, 0, "UShort") = 0xFEFF
+            && NumGet(raw, 2, "UShort") != 0xFEFF,
+            "UTF-16LE 只能有一个 BOM")
+        text := FileRead(testPath, "UTF-16")
+        AssertSelfTest(InStr(text, "; 人工注释必须保留"),
+            "保留人工注释")
+        AssertSelfTest(InStr(text, "; [Folder:这里只是注释示例]"),
+            "注释节头不能被当成真实配置节")
+        AssertSelfTest(InStr(text, "File001=C:\Temp\$1=a.txt"),
+            "配置值中的美元符号和等号必须原样保留")
+        AssertSelfTest(InStr(text, "`r`n") && !RegExMatch(text, "(?<!\r)\n"),
+            "写回统一使用 CRLF")
+        area2 := InStr(text, "; <PopDrop:area 2>")
+        pinned := InStr(text, "[PinnedFiles]")
+        area3 := InStr(text, "; <PopDrop:area 3>")
+        AssertSelfTest(area2 < pinned && pinned < area3,
+            "错位节必须回到指定区域")
+    } finally {
+        try FileDelete(testPath)
     }
 }
 
