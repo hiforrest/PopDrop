@@ -61,10 +61,11 @@ PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近
 
 ```ini
 [General]
-ConfigVersion=8
+ConfigVersion=9
 Hotkey=F2
 OpenFileMode=DoubleClick
-MaxFilesPerFolder=8
+EscapeHidesPanel=1
+MaxFilesPerFolder=10
 DisplayScope=FilesOnly
 FolderTimeMode=DirectoryModified
 WindowMode=temporary
@@ -77,8 +78,8 @@ ShowRecentSidebar=1
 
 [Folders]
 文档=%USERPROFILE%\Documents
-下载=D:\download
-项目=D:\Projects\Current
+下载=%USERPROFILE%\Downloads
+项目=%USERPROFILE%\Documents\Projects
 
 [Folder:下载]
 OpenFileMode=SingleClick

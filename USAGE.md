@@ -25,7 +25,7 @@
 
 ```ini
 [General]
-ConfigVersion=8
+ConfigVersion=9
 Hotkey=F2
 OpenFileMode=DoubleClick
 MaxFilesPerFolder=8
@@ -47,8 +47,8 @@ WindowMode=temporary
 
 [Folders]
 文档=%USERPROFILE%\Documents
-下载=D:\download
-项目=D:\Projects\Current
+下载=%USERPROFILE%\Downloads
+项目=%USERPROFILE%\Documents\Projects
 ```
 
 ### 配置项说明
@@ -71,6 +71,7 @@ WindowMode=temporary
 | `ThumbnailPolicy` | `Fast`（默认）只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标；`Full` 允许现场生成缩略图，可能造成短暂停顿。 |
 | `WindowMode` | 窗口显示模式：`temporary`（默认，置顶，切换到其他窗口后自动隐藏）、`always_on_top`（始终置顶）、`normal`（普通窗口，不置顶）。 |
 | `OpenFileMode` | 普通文件的鼠标激活方式：`DoubleClick`（默认）或 `SingleClick`。缺失、空值或未知值都回退为双击。 |
+| `EscapeHidesPanel` | 按 Esc 时隐藏面板：`1`=隐藏（默认）| `0`=不隐藏。 |
 | `SortMode` | 排序模式：`ModifiedDesc`（修改时间从新到旧，默认）、`NameAsc`（文件名自然升序）。支持文件夹级覆盖。 |
 | 快捷键语法 | AutoHotkey v2 格式：`^`=Ctrl，`!`=Alt，`+`=Shift，`#`=Win。例如 `^!Space`=Ctrl+Alt+Space。 |
 
@@ -78,7 +79,7 @@ WindowMode=temporary
 
 ## 单击或双击打开文件
 
-点击面板顶部“配置”可选择全局打开方式，并为每个监控来源选择：
+点击托盘菜单中的“PopDrop 设置…”或在面板顶部点击“配置”打开图形化设置窗口，在“常规”和“文件来源”页中选择全局打开方式，并为每个监控来源选择：
 
 - `Inherit`：跟随全局设置（默认）
 - `SingleClick`：单击普通文件立即打开
@@ -172,7 +173,8 @@ FileExtensions=.png,.jpg,.jpeg,.webp,.gif
 [General]
 Hotkey=F2
 MaxFilesPerFolder=8
-IncludeSubfolders=0
+DisplayScope=FilesOnly
+FolderTimeMode=DirectoryModified
 ThumbnailSize=96
 ThumbnailHorizontalGap=24
 ThumbnailVerticalGap=4
@@ -189,14 +191,14 @@ FilterMode=All
 
 [Folder:下载]
 ; 排除临时文件和下载片段
-IncludeSubfolders=0
+DisplayScope=FilesOnly
 MaxFilesPerFolder=12
 FilterMode=Exclude
 FileExtensions=.tmp,.part,.crdownload,.download
 
 [Folder:素材]
 ; 只显示图片文件
-IncludeSubfolders=1
+DisplayScope=RecursiveFiles
 MaxFilesPerFolder=20
 FilterMode=Include
 FileExtensions=.png,.jpg,.jpeg,.webp,.gif
@@ -453,8 +455,8 @@ ID。迁移失败时原配置不会被破坏，并会显示配置错误。
 TransferFavoritesInitialized=1
 
 [TransferFavorites]
-Path001=C:\Users\用户名\Desktop
-Path002=C:\Users\用户名\Downloads
+Path001=%USERPROFILE%\Desktop
+Path002=%USERPROFILE%\Downloads
 Path003=D:\项目交付
 Path004=E:\素材归档
 ```
