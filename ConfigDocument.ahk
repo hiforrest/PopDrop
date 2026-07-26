@@ -434,6 +434,7 @@ class PopDropConfigDocument {
     AreaForSection(section) {
         folded := StrLower(section)
         if folded = "general" || folded = "noisefilter"
+            || folded = "externaltransfer"
             return 1
         if folded = "folders" || folded = "pinnedfiles"
             || SubStr(folded, 1, 7) = "folder:"
@@ -460,8 +461,13 @@ class PopDropConfigDocument {
     RankForSection(section) {
         folded := StrLower(section)
         area := this.AreaForSection(section)
-        if area = 1
-            return folded = "general" ? 10 : 20
+        if area = 1 {
+            if folded = "general"
+                return 10
+            if folded = "externaltransfer"
+                return 20
+            return 30
+        }
         if area = 2 {
             if folded = "folders"
                 return 10

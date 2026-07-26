@@ -81,6 +81,8 @@ LoadSettingsIntoDraft() {
     global LastValidFolderSettings, OpenApps, TransferFavorites, RecentTargets
     global TransferFavoriteLabels, GlobalExcludedFolderNames
     global GlobalNoiseFilter
+    global TransferUrlFallbackEnabled, TransferAllowHttp
+    global TransferMaxConcurrent, TransferShowNotifications
 
     sources := []
     for source in LastValidFolderSettings
@@ -111,6 +113,10 @@ LoadSettingsIntoDraft() {
             RecentFileCount: RecentFileCount,
             MaxFilesPerFolder: MaxFilesPerFolder,
             SortMode: SortMode,
+            EnablePublicUrlFallback: TransferUrlFallbackEnabled,
+            AllowHttp: TransferAllowHttp,
+            TransferMaxConcurrent: TransferMaxConcurrent,
+            ShowCompletionNotifications: TransferShowNotifications,
             DefaultDisplayScope: ReadGlobalDisplayScopeForDraft(),
             DefaultFolderTimeMode: ReadGlobalFolderTimeForDraft(),
             DefaultFilter: ReadGlobalFilterForDraft(),
@@ -285,11 +291,26 @@ BuildGeneralSettingsPage(c, tabs) {
     c.EscapeHide := g.AddCheckBox("x50 y420",
         "按 Esc 隐藏 PopDrop")
 
+    g.AddGroupBox("x30 y507 w818 h116", "外部内容投放")
+    c.EnableUrlFallback := g.AddCheckBox("x50 y536",
+        "允许公开 HTTPS 文件 URL 作为最后兜底")
+    c.AllowHttp := g.AddCheckBox("x410 yp",
+        "允许不加密 HTTP（不推荐）")
+    g.AddText("x50 y576 w118", "后台最大并发：")
+    c.TransferMax := g.AddEdit("x170 yp-4 w62 Number")
+    g.AddText("x240 yp+4 w100 c666666", "（1–6）")
+    c.TransferNotify := g.AddCheckBox("x410 yp",
+        "面板隐藏时显示批次完成通知")
+
     c.GlobalDouble.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.GlobalSingle.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.Hotkey.OnEvent("Change", GeneralControlChanged.Bind(c))
     c.WindowMode.OnEvent("Change", GeneralControlChanged.Bind(c))
     c.EscapeHide.OnEvent("Click", GeneralControlChanged.Bind(c))
+    c.EnableUrlFallback.OnEvent("Click", GeneralControlChanged.Bind(c))
+    c.AllowHttp.OnEvent("Click", GeneralControlChanged.Bind(c))
+    c.TransferMax.OnEvent("Change", GeneralControlChanged.Bind(c))
+    c.TransferNotify.OnEvent("Click", GeneralControlChanged.Bind(c))
 }
 
 BuildSourcesSettingsPage(c, tabs) {
@@ -466,6 +487,10 @@ LoadGeneralControls(c) {
         c.Hotkey.Value := d.Hotkey
         c.WindowMode.Choose(WindowModeToIndex(d.WindowMode))
         c.EscapeHide.Value := d.EscapeHidesPanel
+        c.EnableUrlFallback.Value := d.EnablePublicUrlFallback
+        c.AllowHttp.Value := d.AllowHttp
+        c.TransferMax.Value := d.TransferMaxConcurrent
+        c.TransferNotify.Value := d.ShowCompletionNotifications
     } finally c.Loading := false
 }
 
@@ -480,6 +505,10 @@ GeneralControlChanged(c, *) {
     d.WindowMode := [WINDOW_MODE_ALWAYS_ON_TOP,
         WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL][Max(1, c.WindowMode.Value)]
     d.EscapeHidesPanel := !!c.EscapeHide.Value
+    d.EnablePublicUrlFallback := !!c.EnableUrlFallback.Value
+    d.AllowHttp := !!c.AllowHttp.Value
+    d.TransferMaxConcurrent := Trim(c.TransferMax.Value)
+    d.ShowCompletionNotifications := !!c.TransferNotify.Value
     RefreshInheritedOpenModeLabels(c)
 }
 
@@ -1514,7 +1543,10 @@ SettingsDraftSignature(draft) {
     parts.Push(g.OpenFileMode, g.Hotkey, g.WindowMode,
         g.EscapeHidesPanel ? "1" : "0",
         g.ShowRecentSidebar ? "1" : "0",
-        g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode)
+        g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode,
+        g.EnablePublicUrlFallback ? "1" : "0",
+        g.AllowHttp ? "1" : "0", g.TransferMaxConcurrent "",
+        g.ShowCompletionNotifications ? "1" : "0")
     n := g.NoiseFilter
     parts.Push("N", n.Enabled ? "1" : "0", n.HideHidden ? "1" : "0",
         n.HideSystem ? "1" : "0", n.HideTemporary ? "1" : "0",
@@ -1596,6 +1628,8 @@ ValidateSettingsDraft(c) {
         errors.Push("每个来源最多显示数量必须是 1–100 的整数。")
     if !IsIntegerText(d.General.RecentFileCount, 1, 100)
         errors.Push("最近文件显示数量必须是 1–100 的整数。")
+    if !IsIntegerText(d.General.TransferMaxConcurrent, 1, 6)
+        errors.Push("外部传输最大并发数必须是 1–6 的整数。")
 
     names := Map()
     paths := Map()
@@ -1856,6 +1890,14 @@ WriteSettingsDraft(draft, tempPath) {
     doc.SetValue("General", "ShowRecentSidebar",
         g.ShowRecentSidebar ? "1" : "0", 1)
     doc.SetValue("General", "RecentFileCount", g.RecentFileCount, 1)
+    doc.SetValue("ExternalTransfer", "EnablePublicUrlFallback",
+        g.EnablePublicUrlFallback ? "1" : "0", 1)
+    doc.SetValue("ExternalTransfer", "AllowHttp",
+        g.AllowHttp ? "1" : "0", 1)
+    doc.SetValue("ExternalTransfer", "MaxConcurrent",
+        g.TransferMaxConcurrent, 1)
+    doc.SetValue("ExternalTransfer", "ShowCompletionNotifications",
+        g.ShowCompletionNotifications ? "1" : "0", 1)
     noise := g.NoiseFilter
     EnsureNoiseFilterConfigComments(doc)
     noiseEntries := [{Key: "Enabled", Value: noise.Enabled ? "1" : "0"},
