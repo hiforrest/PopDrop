@@ -439,7 +439,9 @@ class PopDropConfigDocument {
         if folded = "folders" || folded = "pinnedfiles"
             || SubStr(folded, 1, 7) = "folder:"
             return 2
-        if folded = "sources"
+        if folded = "sources" || folded = "workspaces"
+            || SubStr(folded, 1, 10) = "workspace:"
+            || SubStr(folded, 1, 16) = "workspacepinned:"
             || (SubStr(folded, 1, 7) = "source:"
                 && SubStr(folded, 1, 14) != "sourceexclude:"
                 && SubStr(folded, 1, 12) != "sourceallow:")
@@ -475,8 +477,17 @@ class PopDropConfigDocument {
                 return 20
             return 30
         }
-        if area = 3
-            return folded = "sources" ? 10 : 20
+        if area = 3 {
+            if folded = "workspaces"
+                return 10
+            if SubStr(folded, 1, 10) = "workspace:"
+                return 20
+            if SubStr(folded, 1, 16) = "workspacepinned:"
+                return 25
+            if folded = "sources"
+                return 30
+            return 40
+        }
         if area = 4
             return folded = "openapps" ? 10 : 20
         if area = 5 {

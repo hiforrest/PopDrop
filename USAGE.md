@@ -28,7 +28,7 @@ Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之�
 
 ```ini
 [General]
-ConfigVersion=12
+ConfigVersion=14
 Hotkey=F2
 OpenFileMode=DoubleClick
 MaxFilesPerFolder=8
@@ -39,19 +39,36 @@ ThumbnailSize=96
 ThumbnailHorizontalGap=24
 ThumbnailVerticalGap=4
 ThumbnailTextLines=2
-WindowWidth=980
-WindowHeight=620
+WindowWidth=766
+WindowHeight=576
 ViewMode=Thumbnail
-ShowRecentSidebar=1
+ShowRecentSidebar=0
 RecentFileCount=12
 CachePath=
 ThumbnailPolicy=Full
 WindowMode=temporary
 
-[Folders]
-文档=%USERPROFILE%\Documents
-下载=%USERPROFILE%\Downloads
-项目=%USERPROFILE%\Documents\Projects
+[Workspaces]
+Order=workspace-default
+Active=workspace-default
+PinnedScopeVersion=1
+
+[Workspace:workspace-default]
+Name=默认工作区
+SourceOrder=source-documents,source-downloads
+
+[WorkspacePinned:workspace-default]
+File001=%USERPROFILE%\Desktop\常用文档.docx
+
+[Source:source-documents]
+WorkspaceId=workspace-default
+Name=文档
+Path=%USERPROFILE%\Documents
+
+[Source:source-downloads]
+WorkspaceId=workspace-default
+Name=下载
+Path=%USERPROFILE%\Downloads
 ```
 
 配置文件使用 UTF-16LE 和 CRLF。六个 `; <PopDrop:area N>` 行是普通 INI
@@ -63,6 +80,8 @@ WindowMode=temporary
 | 配置项 | 作用 |
 |---|---|
 | `[Folders]` | 每一行是一个分组，格式是 `显示名称=文件夹路径`。路径支持 `%USERPROFILE%` 等环境变量。 |
+| `[Workspaces]` | 保存稳定工作区顺序、当前工作区和固定项作用域迁移标记。 |
+| `[WorkspacePinned:<WorkspaceId>]` | 对应稳定工作区身份的固定项列表，键为 `File001`、`File002` 等。 |
 | `DisplayScope` | `FilesOnly`=仅当前目录文件；`FilesAndFolders`=当前目录文件和直接子文件夹；`RecursiveFiles`=递归文件平铺。 |
 | `FolderTimeMode` | `DirectoryModified`=文件夹自身时间；`LatestContent`=允许扫描的后代文件最新时间。 |
 | `IncludeSubfolders` | v0.6 及更早版本兼容项；缺少 `DisplayScope` 时，`0` 迁移为 `FilesOnly`，`1` 迁移为 `RecursiveFiles`。 |
@@ -84,11 +103,102 @@ WindowMode=temporary
 
 ---
 
+## 工作区（v0.9+）
+
+工作区保存不同的文件来源组合及来源专属设置。主面板顶部常驻显示当前工作区；选择另一
+项后立即刷新，只向扫描 worker 发送新工作区的来源，并显示该工作区自己的固定项。
+Windows 最近文件区域仍然显示，因为它属于共享设置。
+
+工作区包含来源名称、路径、顺序、Files/Launcher 类型、显示范围与数量、排序、文件夹
+时间、过滤、噪音过滤覆盖、附加忽略规则、排除/允许子路径、来源打开方式及固定项。
+它不包含快捷键、窗口行为、共享默认值、最近记录、打开软件或复制/移动常用位置。
+
+在“PopDrop 设置 → 工作区设置 → 当前工作区”中：
+
+1. 顶部下拉框切换已有工作区。
+2. “管理工作区…”可以新建、复制当前工作区、重命名和删除。
+3. 新建时可复制当前来源和固定项（推荐），也可创建不含来源和固定项的空白工作区。
+4. 空工作区在主面板显示明确提示，不会被当作配置错误。
+
+设置窗口只使用左侧树形导航切换页面，不再显示功能重复的顶部标签栏。单行下拉框、
+文本框和按钮采用统一的紧凑高度。新配置的主窗口默认尺寸为 766×576，近期栏默认
+关闭；已有配置仍沿用用户保存的值。主面板重新打开时会把保存过的超宽宽度限制到
+980，避免恢复成接近最大化的宽屏状态，但显示后仍可自由拖动缩放。
+
+如特定 Windows 缩放比例或字体造成控件仍有 1–2 像素偏差，可在 `PopDrop.ahk`
+顶部集中调整以下参数；主面板、设置页和子窗口会一起生效：
+
+- `UI_SINGLE_LINE_HEIGHT := 26`：按钮及单行文本框的逻辑像素总高度。
+- `UI_DROPDOWN_FIELD_HEIGHT := 22`：下拉框内部文字选择区的逻辑像素高度。下拉框
+  仍偏高时减小，偏矮时增大；每改 1，在 200% 缩放下约变化 2 个物理像素。
+- `UI_DROPDOWN_Y_OFFSET_PX := 1`：所有下拉框的物理像素纵向偏移。正数向下，
+  负数向上；这是物理像素值，不需要按 DPI 换算。
+- `UI_EDIT_TEXT_Y_OFFSET_PX := 0`：只移动单行文本框中的文字和插入光标；正数向下，
+  负数向上，不改变文本框外框。
+- `UI_DROPDOWN_TEXT_Y_OFFSET_PX := 0`：只移动下拉框选择区和弹出列表中的文字；
+  正数向下，负数向上，不改变下拉框外框、箭头或位置。
+
+后两个文字偏移参数使用物理像素，可以直接按截图中看到的像素差调整。例如文字仍偏上
+2 个物理像素时，把对应参数从 `0` 改为 `2`。不要为了移动文字而修改
+`UI_SINGLE_LINE_HEIGHT` 或 `UI_DROPDOWN_FIELD_HEIGHT`，否则会破坏已经对齐的外框。
+
+工作区名称不区分大小写且不能重复。名称只是显示文本；内部使用稳定 `WorkspaceId`。
+复制工作区时会为副本及其中每个来源生成新 ID，因此两个工作区可以使用同一路径和不同
+来源设置，后续修改互不影响。同一工作区内仍禁止来源重名或路径重复。
+
+设置窗口有未保存修改时，切换工作区或打开管理窗口会询问“保存并继续、放弃修改并继续、
+取消”。保存失败时保留原草稿和当前工作区。至少保留一个工作区；删除当前工作区前会
+明确显示将切换到哪个剩余工作区。删除工作区不会删除真实文件。
+
+配置结构：
+
+```ini
+[Workspaces]
+Order=workspace-default,workspace-design
+Active=workspace-design
+PinnedScopeVersion=1
+
+[Workspace:workspace-design]
+Name=设计项目
+SourceOrder=source-design-assets
+
+[WorkspacePinned:workspace-design]
+File001=D:\Design\项目说明.docx
+
+[Source:source-design-assets]
+WorkspaceId=workspace-design
+Name=设计素材
+Path=D:\Design\Assets
+Mode=Files
+DisplayScope=RecursiveFiles
+MaxFilesPerFolder=30
+SortMode=ModifiedDesc
+OpenFileMode=Inherit
+```
+
+`[Workspaces]` 保存顺序、当前 ID 和固定项作用域迁移标记；`[Workspace:<ID>]` 保存显示
+名称与来源顺序；`[WorkspacePinned:<ID>]` 保存该工作区自己的固定项；
+`[Source:<ID>]` 保存来源本身及全部来源专属设置。来源的排除、允许和附加忽略规则继续
+使用 `[SourceExclude:<SourceId>]`、`[SourceAllow:<SourceId>]` 和
+`[SourceIgnore:<SourceId>]`，因此重命名工作区或来源不会丢失规则。
+
+首次启动 v0.9 时，旧 `[Folders]` 顺序、`[Folder:名称]` 覆盖及稳定 `SourceId` 会在
+一个原子事务中迁移到“默认工作区”，当前工作区也设为它。写入前创建 `config.ini.bak`；
+临时文件经过完整布局、重复节/键、UTF‑16LE BOM 校验后才替换原文件。失败时原配置不变。
+旧节作为兼容快照保留，不再作为 v0.9 的运行时来源。
+
+从早期 v0.9 配置升级到配置版本 14 时，旧 `[PinnedFiles]` 中的共享固定项会在同一套
+备份和原子写入机制下迁移到当时的当前工作区。以后移动或删除真实文件时，PopDrop 会
+同步修正所有工作区中指向该项目的固定记录，但不会影响其他不相关的工作区固定项。
+
+---
+
 ## 单击或双击打开文件
 
-点击托盘菜单中的“PopDrop 设置…”或在面板顶部点击“配置”打开图形化设置窗口，在“常规”和“文件来源”页中选择全局打开方式，并为每个监控来源选择：
+点击托盘菜单中的“PopDrop 设置…”或在面板顶部点击“设置”打开图形化设置窗口，在
+“共享设置 · 通用”和“当前工作区”页中选择共享默认打开方式，并为每个来源选择：
 
-- `Inherit`：跟随全局设置（默认）
+- `Inherit`：使用共享默认值（默认）
 - `SingleClick`：单击普通文件立即打开
 - `DoubleClick`：双击普通文件打开
 
@@ -107,7 +217,7 @@ OpenFileMode=Inherit
 
 单击模式只改变普通文件的鼠标激活次数。`Ctrl`/`Shift` 选择、框选和拖拽不会打开
 文件；文件夹（包括直接显示的子文件夹和固定文件夹）仍然需要双击。固定项和最近文件
-使用全局值。同一个文件显示在两个来源分组时，分别使用当前分组的来源设置。
+使用共享默认值。同一个文件显示在两个来源分组时，分别使用当前分组的来源设置。
 
 来源首次迁移时会获得稳定 `SourceId`，并在 `[Sources]` / `[Source:<ID>]` 中保留身份；
 单独修改来源名称或路径、以及调整顺序，都不会丢失打开方式。通常无需手工编辑这些
@@ -126,7 +236,7 @@ Hidden、System、Temporary 属性、未完成下载文件和自定义文件名�
 每行一条，只支持 `*` 和 `?`，不区分大小写，也不会删除或修改真实文件。
 
 新安装和升级安装都采用“配置项缺失即使用默认值”的兼容策略：总开关、Hidden、System
-默认开启；Temporary 和未完成下载默认关闭。每个来源可选择跟随全局、启用或禁用，并可
+默认开启；Temporary 和未完成下载默认关闭。每个来源可选择使用共享默认值、启用或禁用，并可
 添加来源专属规则。固定项目始终优先显示。
 
 ```ini
@@ -192,9 +302,9 @@ FileExtensions=.png,.jpg,.jpeg,.webp,.gif
 
 **继承规则：**
 
-- 没有 `[Folder:名称]` 配置节：完全继承全局设置。
-- `IncludeSubfolders` 缺失：继承全局值。
-- `MaxFilesPerFolder` 缺失：继承全局值。
+- 没有 `[Folder:名称]` 配置节：完全继承共享设置。
+- `IncludeSubfolders` 缺失：继承共享默认值。
+- `MaxFilesPerFolder` 缺失：继承共享默认值。
 - `FilterMode=Inherit` 或缺失：**整体**继承全局筛选模式及扩展名列表。
 - `FilterMode=All`：该文件夹显示所有文件，忽略 `FileExtensions`。
 - `FilterMode=Include` 或 `Exclude`：使用自己的 `FileExtensions`，不会继承全局扩展名列表。
@@ -244,7 +354,7 @@ FilterMode=Include
 FileExtensions=.png,.jpg,.jpeg,.webp,.gif
 
 [Folder:项目]
-; 未配置独立节，完全继承全局设置（All）
+; 未配置独立节，完全继承共享设置（All）
 ```
 
 ### 注意事项
@@ -286,7 +396,7 @@ FileExtensions=.png,.jpg,.jpeg,.webp,.gif
 用户显式配置的选项会覆盖这些默认值。在“PopDrop 设置 → 文件来源”中将“文件夹类型”
 改为“启动器文件夹（Launcher）”时，界面会立即把这些推荐值写入当前草稿；只有点击
 “保存”后才会写入 `config.ini`。切回“普通文件夹（Files）”时，界面会恢复按修改时间
-排序、显示数字前缀和扩展名，并恢复全局默认的显示范围及文件类型过滤，避免残留
+排序、显示数字前缀和扩展名，并恢复共享默认的显示范围及文件类型过滤，避免残留
 Launcher 的 `.lnk/.url/.exe` 限制。
 
 ### 数字前缀排序
@@ -621,7 +731,11 @@ ShowCompletionNotifications=1
 固定项分组或「＋ 固定项」按钮；文件夹会作为单独的固定项加入，不会展开或添加其中
 的内容。拖到 Files/Launcher 来源时则按上一节的来源投放规则执行。
 
-固定列表继续保存在 `config.ini` 的 `[PinnedFiles]` 里，与旧配置完全兼容。选择固定项后点击「－ 固定项」，只移除面板里的记录，不会影响原文件或文件夹。双击固定文件夹会在资源管理器中打开。
+每个工作区拥有独立固定列表，保存在
+`[WorkspacePinned:<WorkspaceId>]`。切换工作区会立即切换固定项；同一路径可以在多个
+工作区分别固定、排序或移除。旧版 `[PinnedFiles]` 会安全迁移到升级时的当前工作区。
+选择固定项后点击「－ 固定项」，只移除当前工作区的面板记录，不会影响原文件、文件夹
+或其他工作区。双击固定文件夹会在资源管理器中打开。
 
 - 新加入的一批固定项会显示在最前面，并保持这批项目拖入时的原始顺序。
 - 拖动单个固定项到另一个固定项上，可以调整前后顺序；顺序会立即保存。

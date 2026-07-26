@@ -1,6 +1,6 @@
 # PopDrop
 
-当前版本：**v0.8.8**
+当前版本：**v0.9.0**
 
 <img src="assets/logo.webp" width="192px">
 
@@ -33,6 +33,7 @@ PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近
 
 - **一键呼出**：默认 `F2`，在任何软件中按一下，面板就在最前面打开
 - **多目录最新文件**：同时添加下载、桌面、文档、项目等多个目录，每个分组独立显示
+- **多工作区**：主面板直接切换不同来源组合和各自的固定项；最近文件和通用设置继续共享
 - **缩略图网格**：图片、视频、PDF 优先显示系统缩略图，也可切换为文件名列表
 - **固定项**：把常用文件或文件夹加入面板顶部，移出固定项不会影响原项目
 - **按来源投放**：拖到 Files 来源即可复制或移动到对应真实文件夹，拖动中实时显示目标、动作和系统光标
@@ -42,6 +43,8 @@ PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近
   保留较大版本，目标目录最终只落一份
 - **下载入口与传输中心**：状态栏右侧稳定显示“↓ 下载”；必要时显示整体进度、短暂完成
   提示或未查看失败。传输中心按批次保留选择，并显示完成进度及平均传输速度
+- **统一表单文字对齐**：单行文本框和下拉框在不改变外框尺寸的前提下垂直居中文字，
+  并提供按物理像素微调的集中参数
 - **Launcher 投放**：普通文件、文件夹和程序会创建 `.lnk`；已有 `.lnk/.url` 只复制，不移动原项目
 - **固定项投放区**：拖到固定项分组或「＋ 固定项」按钮只加入固定项，不复制、移动或删除真实文件
 - **新项目优先**：新加入的一批固定项显示在最前，并保持这批项目原有顺序
@@ -63,16 +66,17 @@ PopDrop 是一款 Windows 文件快捷面板，把你常用的文件夹、最近
 
 ## 快速配置
 
-优先使用托盘菜单中的“PopDrop 设置…”：四个原生标签页可以管理常规选项、监控来源、
-打开软件、复制/移动常用位置和排除规则。只有高级选项才需要直接编辑同目录下的
-`config.ini`；设置窗口底部保留了“高级设置…”入口。监控来源的“文件夹类型”可直接
+优先使用托盘菜单中的“PopDrop 设置…”：左侧导航把页面分为“共享设置”和“工作区设置”，
+可管理通用选项、当前工作区来源、打开软件、复制/移动常用位置和排除规则。只有高级选项才需要直接编辑同目录下的
+`config.ini`；左侧树形导航是唯一的页面切换入口，设置窗口底部保留了“高级设置…”入口。
+监控来源的“文件夹类型”可直接
 选择普通文件夹（Files）或启动器文件夹（Launcher）。选择 Launcher 会自动套用启动器
 推荐值；切回 Files 会恢复按修改时间排序、显示完整文件名及普通文件类型过滤。
 示例：
 
 ```ini
 [General]
-ConfigVersion=12
+ConfigVersion=14
 Hotkey=F2
 OpenFileMode=DoubleClick
 EscapeHidesPanel=1
@@ -85,7 +89,9 @@ ThumbnailSize=96
 ThumbnailHorizontalGap=24
 ThumbnailVerticalGap=4
 ThumbnailTextLines=2
-ShowRecentSidebar=1
+WindowWidth=766
+WindowHeight=576
+ShowRecentSidebar=0
 
 [NoiseFilter]
 Enabled=1
@@ -95,25 +101,52 @@ HideTemporaryAttribute=0
 HideIncompleteDownloads=0
 CustomPatternCount=0
 
-[Folders]
-文档=%USERPROFILE%\Documents
-下载=%USERPROFILE%\Downloads
-项目=%USERPROFILE%\Documents\Projects
+[Workspaces]
+Order=workspace-default
+Active=workspace-default
+PinnedScopeVersion=1
 
-[Folder:下载]
+[Workspace:workspace-default]
+Name=默认工作区
+SourceOrder=source-downloads
+
+[WorkspacePinned:workspace-default]
+
+[Source:source-downloads]
+WorkspaceId=workspace-default
+Name=下载
+Path=%USERPROFILE%\Downloads
 OpenFileMode=SingleClick
 ```
 
 `ThumbnailTextLines=1` 时，过长文件名会按图标宽度显示省略号；选择项目后，状态栏仍会
 显示完整路径，切换到列表视图时也会恢复完整文本。双行模式维持原有显示方式。
 
+## 工作区
+
+主面板顶部的“工作区”下拉框显示并切换当前工作区，切换后会自动刷新，只扫描新工作区
+的来源。工作区保存来源列表、顺序、来源专属设置和固定项；快捷键、窗口行为、共享
+默认值、最近文件、软件列表和常用位置始终应用于所有工作区。
+
+在“PopDrop 设置 → 工作区设置 → 当前工作区”中编辑来源，点击“管理工作区…”可以新建、
+复制、重命名或删除工作区。复制会复制来源和固定项，并为工作区和每个来源生成新的
+稳定身份，后续修改互不影响。新建空白工作区不包含来源或固定项。至少保留一个工作区；
+删除工作区只删除其配置记录，不会删除任何真实文件。
+
+v0.8 及更早版本的 `[Folders]`、`[Folder:名称]` 和来源规则会在首次启动 v0.9 时，通过
+原子配置事务迁移到“默认工作区”。原配置会先保存在 `config.ini.bak`；共享设置及人工
+注释、未知键、编码、换行和六个布局锚点保持不变。
+
+旧版共享 `[PinnedFiles]` 会在首次启动配置版本 14 时迁移到当时的当前工作区；之后每个
+工作区分别保存在 `[WorkspacePinned:<WorkspaceId>]`，切换工作区时固定项同步切换。
+
 外部内容投放的安全默认值位于 `[ExternalTransfer]`：公开 HTTPS URL 兜底开启、
 HTTP 关闭、全局最大并发 3、面板隐藏时按批次通知。均可在“PopDrop 设置 → 常规”中
 修改。源码版还需要先运行 `native\build.ps1` 生成与 AutoHotkey 位数一致的
 `PopDropTransfer.exe`；发布包应把对应 helper 放在 `PopDrop.exe` 同目录。
 
-“PopDrop 设置”的“常规”和“文件来源”页可选择全局打开方式，并为每个监控来源选择“跟随全局设置”、
-“单击”或“双击”。固定项和最近文件使用全局值；文件夹始终需要双击。单击模式只在
+“PopDrop 设置”的“共享设置 · 通用”和“当前工作区”页可选择共享默认打开方式，并为每个来源选择
+“使用共享默认值”、“单击”或“双击”。各工作区的固定项和共享的最近文件都使用共享默认值；文件夹始终需要双击。单击模式只在
 无修饰键且未发生拖拽的左键释放时打开文件。
 
 所有配置项详解见 **[使用指南](USAGE.md)**。

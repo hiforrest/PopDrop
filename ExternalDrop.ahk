@@ -250,10 +250,10 @@ ClipboardFormatName(id) {
         13, "CF_UNICODETEXT", 15, "CF_HDROP", 17, "CF_DIBV5")
     if standard.Has(id)
         return standard[id]
-    buffer := Buffer(512 * 2, 0)
+    formatNameBuffer := Buffer(512 * 2, 0)
     length := DllCall("user32\GetClipboardFormatNameW", "uint", id,
-        "ptr", buffer.Ptr, "int", 512, "int")
-    return length ? StrGet(buffer, length) : "Format#" id
+        "ptr", formatNameBuffer.Ptr, "int", 512, "int")
+    return length ? StrGet(formatNameBuffer.Ptr, length) : "Format#" id
 }
 
 TymedDisplay(value) {
@@ -905,7 +905,7 @@ CompleteTransferBatchUi(batch) {
             OpenFolderPath.Bind(batch.TargetPath))
     else if failed
         SetUserStatus("外部内容接收失败：" (batch.Error != ""
-            ? batch.Error : "请打开传输中心查看详情。"))
+            ? batch.Error : "请打开下载任务查看详情。"))
     if !PanelVisible && TransferShowNotifications {
         title := failed ? "PopDrop 传输需要注意" : "PopDrop 传输完成"
         message := success " 项已保存到「" batch.TargetName "」"
@@ -925,7 +925,7 @@ OpenTransferCenter(*) {
         return
     }
     center := Gui("+Owner" Panel.Hwnd " +Resize -MinimizeBox",
-        "PopDrop 传输中心")
+        "下载任务")
     center.SetFont("s9", "Microsoft YaHei UI")
     center.MarginX := 12
     center.MarginY := 10
@@ -943,11 +943,11 @@ OpenTransferCenter(*) {
     center.List.ModifyCol(5, 120)
     center.List.ModifyCol(6, 80)
     center.List.ModifyCol(7, 135)
-    center.CancelItem := center.AddButton("xm y+10 w92", "取消此项")
-    center.CancelBatch := center.AddButton("x+8 yp w92", "取消整批")
-    center.Retry := center.AddButton("x+8 yp w76", "重试")
-    center.OpenFolder := center.AddButton("x+8 yp w110", "打开目标文件夹")
-    center.Clear := center.AddButton("x+8 yp w116", "清除已完成记录")
+    center.CancelItem := AddUiButton(center, "xm y+10 w92", "取消此项")
+    center.CancelBatch := AddUiButton(center, "x+8 yp w92", "取消整批")
+    center.Retry := AddUiButton(center, "x+8 yp w76", "重试")
+    center.OpenFolder := AddUiButton(center, "x+8 yp w110", "打开目标文件夹")
+    center.Clear := AddUiButton(center, "x+8 yp w116", "清除已完成记录")
     center.CancelItem.OnEvent("Click", CancelSelectedTransfer.Bind(false))
     center.CancelBatch.OnEvent("Click", CancelSelectedTransfer.Bind(true))
     center.Retry.OnEvent("Click", RetrySelectedTransfer)
@@ -1008,7 +1008,9 @@ RefreshTransferCenter() {
     list.Delete()
     TransferCenterRows := Map()
     selectedRow := 0
-    for id, batch in TransferBatches {
+    batchIds := TransferBatchIdsNewestFirst()
+    for id in batchIds {
+        batch := TransferBatches[id]
         batchLabel := SubStr(StrReplace(id, "batch-", ""), 1, 8)
         if !batch.Items.Length {
             row := list.Add("", batchLabel, "正在准备…",
@@ -1044,6 +1046,34 @@ RefreshTransferCenter() {
     if selectedRow
         list.Modify(selectedRow, "Select Focus Vis")
     list.Opt("+Redraw")
+}
+
+TransferBatchIdsNewestFirst() {
+    global TransferBatches
+    ordered := []
+    sequence := 0
+    for id, batch in TransferBatches {
+        sequence += 1
+        entry := {
+            Id: id,
+            Created: HasProp(batch, "Created") ? batch.Created : "",
+            Sequence: sequence
+        }
+        insertAt := ordered.Length + 1
+        for index, existing in ordered {
+            if entry.Created > existing.Created
+                || (entry.Created = existing.Created
+                    && entry.Sequence > existing.Sequence) {
+                insertAt := index
+                break
+            }
+        }
+        ordered.InsertAt(insertAt, entry)
+    }
+    ids := []
+    for entry in ordered
+        ids.Push(entry.Id)
+    return ids
 }
 
 TransferStatusLabel(status) {

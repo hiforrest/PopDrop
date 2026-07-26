@@ -4,7 +4,7 @@
 
 ;@Ahk2Exe-SetMainIcon assets\app.ico
 ;@Ahk2Exe-AddResource assets\tray.ico, 555
-;@Ahk2Exe-SetVersion 0.8.0.0
+;@Ahk2Exe-SetVersion 0.9.0.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -15,8 +15,8 @@
 ; ──── 排序模式常量 ────
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
-global APP_VERSION := "0.8.8"
-global CONFIG_VERSION := "12"
+global APP_VERSION := "0.9.0"
+global CONFIG_VERSION := "14"
 
 ; ──── 文件夹模式常量 ────
 global MODE_FILES := "Files"
@@ -92,6 +92,12 @@ global ItemOpenContexts := Map()
 global RecentItemPaths := Map()
 global PinnedPaths := []
 global FolderSettings := []
+global Workspaces := []
+global ActiveWorkspaceId := ""
+global ActiveWorkspaceName := ""
+global WorkspaceSelector := 0
+global WorkspaceSelectorIds := []
+global SettingsController := 0
 global MaxFilesPerFolder := 8
 global IncludeSubfolders := false
 global ThumbnailSize := 96
@@ -99,11 +105,29 @@ global ThumbnailHorizontalGap := 24
 global ThumbnailVerticalGap := 4
 global ThumbnailTextLines := 2
 global ThumbnailImageList := 0
-global WindowWidth := 980
-global WindowHeight := 620
+global WindowWidth := 766
+global WindowHeight := 576
 global ViewMode := "Thumbnail"
-global ShowRecentSidebar := true
+global ShowRecentSidebar := false
 global RecentFileCount := 12
+; Native single-line control tuning. Buttons and edits use the full logical
+; height. A DropDownList adds its own frame around the selection field, so its
+; inner field must be shorter to produce the same outer height.
+global UI_SINGLE_LINE_HEIGHT := 26
+global UI_DROPDOWN_FIELD_HEIGHT := 22
+; Physical-pixel correction applied to every DropDownList after creation.
+; Positive values move it down; negative values move it up.
+global UI_DROPDOWN_Y_OFFSET_PX := 1
+; Text-only physical-pixel corrections. These do not change any control's
+; outer size or position. Positive values move text down.
+global UI_EDIT_TEXT_Y_OFFSET_PX := 0
+global UI_DROPDOWN_TEXT_Y_OFFSET_PX := 0
+; Owner-drawn combo boxes keep a copy of their string items as a defensive
+; fallback. Some Windows builds report itemID=-1 while painting the closed
+; selection field, and native text retrieval can then return no text.
+global UiDropDownTextItems := Map()
+global UiDropDownParentSubclassCallback := 0
+global UiDropDownSubclassedParents := Map()
 global ConfiguredHotkey := "F2"
 global ActiveHotkey := ""
 global PanelVisible := false
@@ -134,6 +158,7 @@ global ActiveDropHighlightedGroup := 0
 global PinnedDropDiscoveryActive := false
 global ConfigErrors := []
 global LastValidFolderSettings := []
+global LastValidWorkspaceId := ""
 global ConfigErrorsShown := false
 global ThumbnailPolicy := "Full"
 global CachePathSetting := ""
@@ -209,7 +234,10 @@ global WindowMode := WINDOW_MODE_ALWAYS_ON_TOP
 global AutoHidePauseDepth := 0
 
 EnsureConfig()
+EnsureWorkspaceConfig()
 LoadSettings()
+OnMessage(0x002B, DrawUiDropDownItem) ; WM_DRAWITEM
+OnMessage(0x002C, MeasureUiDropDownItem) ; WM_MEASUREITEM
 BuildPanel()
 ApplyWindowIcon()
 ApplyWindowMode()
@@ -310,10 +338,10 @@ EnsureConfig() {
     "ThumbnailHorizontalGap=24`n"
     "ThumbnailVerticalGap=4`n"
     "ThumbnailTextLines=2`n"
-    "WindowWidth=980`n"
-    "WindowHeight=620`n"
+    "WindowWidth=766`n"
+    "WindowHeight=576`n"
     "ViewMode=Thumbnail`n"
-    "ShowRecentSidebar=1`n"
+    "ShowRecentSidebar=0`n"
     "RecentFileCount=12`n"
     "CachePath=`n"
     "ThumbnailPolicy=Full`n"
@@ -356,13 +384,35 @@ EnsureConfig() {
     "`n"
     "; <PopDrop:area 2>`n"
     "[Folders]`n"
-    "文档=%USERPROFILE%\Documents`n"
-    "下载=D:\download`n"
+    "; v0.8 及更早版本兼容快照；工作区来源保存在第三区。`n"
     "`n"
     "[PinnedFiles]`n"
+    "; v0.9.0 旧版共享固定项迁移入口；迁移后固定项按工作区保存在第三区。`n"
     "`n"
     "; <PopDrop:area 3>`n"
+    "[Workspaces]`n"
+    "Order=workspace-default`n"
+    "Active=workspace-default`n"
+    "PinnedScopeVersion=1`n"
+    "`n"
+    "[Workspace:workspace-default]`n"
+    "Name=默认工作区`n"
+    "SourceOrder=source-documents,source-downloads`n"
+    "`n"
+    "[WorkspacePinned:workspace-default]`n"
+    "`n"
+    "[Source:source-documents]`n"
+    "WorkspaceId=workspace-default`n"
+    "Name=文档`n"
+    "Path=%USERPROFILE%\Documents`n"
+    "`n"
+    "[Source:source-downloads]`n"
+    "WorkspaceId=workspace-default`n"
+    "Name=下载`n"
+    "Path=" defaultDownloads "`n"
+    "`n"
     "[Sources]`n"
+    "; v0.8 及更早版本兼容快照。`n"
     "Order=`n"
     "`n"
     "; <PopDrop:area 4>`n"
@@ -390,6 +440,257 @@ EnsureConfig() {
     )
     ; The layout-aware editor stores one UTF-16LE BOM and CRLF line endings.
     FileAppend(defaultConfig, ConfigPath, "UTF-16")
+}
+
+EnsureWorkspaceConfig() {
+    global ConfigPath
+    doc := OpenPopDropConfig(ConfigPath)
+    order := ParseStableIdOrder(doc.GetValue("Workspaces", "Order", ""))
+    if order.Length {
+        ValidateWorkspaceDocument(doc, order)
+        if doc.GetValue("Workspaces", "PinnedScopeVersion", "") != "1" {
+            if FileExist(ConfigPath)
+                FileCopy(ConfigPath, ConfigPath ".bak", 1)
+            AtomicConfigEdit(MigrateSharedPinnedFilesToWorkspaces)
+        }
+        return
+    }
+    ; Migration is its own atomic transaction. Keep the same recoverable
+    ; backup convention used by the settings window.
+    if FileExist(ConfigPath)
+        FileCopy(ConfigPath, ConfigPath ".bak", 1)
+    AtomicConfigEdit(MigrateLegacyConfigToWorkspaces)
+}
+
+MigrateLegacyConfigToWorkspaces(tempPath) {
+    global CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    existing := ParseStableIdOrder(doc.GetValue("Workspaces", "Order", ""))
+    if existing.Length {
+        ValidateWorkspaceDocument(doc, existing)
+        return
+    }
+
+    workspaceId := NewStableId("workspace")
+    sourceIds := []
+    seen := Map()
+    legacyOrder := ParseSourceIdOrder(doc.GetValue("Sources", "Order", ""))
+    for entry in doc.GetEntries("Folders") {
+        name := Trim(entry.Key)
+        path := entry.Value
+        if name = "" || Trim(path) = ""
+            continue
+        sourceId := Trim(doc.GetValue("Folder:" name, "SourceId", ""))
+        if !IsSafeSourceId(sourceId)
+            sourceId := FindLegacySourceId(doc, legacyOrder, name, path)
+        if !IsSafeSourceId(sourceId)
+            sourceId := NewStableId("source")
+        sourceId := MakeUniqueSourceId(sourceId, seen)
+        sourceIds.Push(sourceId)
+
+        sourceSection := "Source:" sourceId
+        doc.SetValue(sourceSection, "WorkspaceId", workspaceId, 3)
+        doc.SetValue(sourceSection, "Name", name, 3)
+        doc.SetValue(sourceSection, "Path", path, 3)
+        for key in ["Mode", "MaxFilesPerFolder", "IncludeSubfolders",
+            "DisplayScope", "FolderTimeMode", "SortMode", "FilterMode",
+            "FileExtensions", "StripOrderPrefix", "HideExtensions",
+            "OpenFileMode", "NoiseFilterMode"] {
+            found := GetDocumentEntry(doc, "Folder:" name, key)
+            if IsObject(found)
+                doc.SetValue(sourceSection, key, found.Value, 3)
+        }
+    }
+
+    doc.ReplaceSection("Workspaces", [
+        {Key: "Order", Value: workspaceId},
+        {Key: "Active", Value: workspaceId},
+        {Key: "PinnedScopeVersion", Value: "1"}
+    ], 3)
+    workspaceName := UniqueMigratedWorkspaceName(doc)
+    doc.ReplaceKnownKeys("Workspace:" workspaceId, [
+        {Key: "Name", Value: workspaceName},
+        {Key: "SourceOrder", Value: JoinArray(sourceIds, ",")}
+    ], ["Name", "SourceOrder"], 3)
+    legacyPinned := ReadPinnedPathsFromDocument(doc, "PinnedFiles")
+    WritePinnedPathsToDocument(doc,
+        "WorkspacePinned:" workspaceId, legacyPinned, 3)
+    WritePinnedPathsToDocument(doc, "PinnedFiles", [], 2)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
+}
+
+MigrateSharedPinnedFilesToWorkspaces(tempPath) {
+    global CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    order := ParseStableIdOrder(doc.GetValue("Workspaces", "Order", ""))
+    if !order.Length
+        throw Error("固定项迁移前找不到工作区。")
+    activeId := Trim(doc.GetValue("Workspaces", "Active", ""))
+    if !ArrayContainsTextInsensitive(order, activeId)
+        activeId := order[1]
+    targetSection := "WorkspacePinned:" activeId
+    migrated := ReadPinnedPathsFromDocument(doc, targetSection)
+    for path in ReadPinnedPathsFromDocument(doc, "PinnedFiles") {
+        if !ArrayContainsPath(migrated, path)
+            migrated.Push(path)
+    }
+    WritePinnedPathsToDocument(doc, targetSection, migrated, 3)
+    WritePinnedPathsToDocument(doc, "PinnedFiles", [], 2)
+    doc.SetValue("Workspaces", "PinnedScopeVersion", "1", 3)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
+}
+
+ReadPinnedPathsFromDocument(doc, section) {
+    result := []
+    for entry in doc.GetEntries(section) {
+        if !RegExMatch(entry.Key, "i)^File\d+$")
+            continue
+        path := NormalizePath(entry.Value)
+        if path != "" && !ArrayContainsPath(result, path)
+            result.Push(path)
+    }
+    return result
+}
+
+WritePinnedPathsToDocument(doc, section, paths, area := 3) {
+    knownKeys := []
+    knownSet := Map()
+    for entry in doc.GetEntries(section) {
+        if RegExMatch(entry.Key, "i)^File\d+$") {
+            knownKeys.Push(entry.Key)
+            knownSet[StrLower(entry.Key)] := true
+        }
+    }
+    entries := ConfigEntriesFromValues(paths, "File")
+    for entry in entries {
+        if !knownSet.Has(StrLower(entry.Key)) {
+            knownKeys.Push(entry.Key)
+            knownSet[StrLower(entry.Key)] := true
+        }
+    }
+    doc.ReplaceKnownKeys(section, entries, knownKeys, area)
+}
+
+UniqueMigratedWorkspaceName(doc) {
+    used := Map()
+    for section in doc.GetSectionNames() {
+        if SubStr(StrLower(section), 1, 10) != "workspace:"
+            continue
+        name := Trim(doc.GetValue(section, "Name", ""))
+        if name != ""
+            used[StrLower(name)] := true
+    }
+    base := "默认工作区"
+    if !used.Has(StrLower(base))
+        return base
+    suffix := 2
+    while used.Has(StrLower(base " " suffix))
+        suffix += 1
+    return base " " suffix
+}
+
+FindLegacySourceId(doc, ids, name, path) {
+    for id in ids {
+        if StrLower(Trim(doc.GetValue("Source:" id, "Name", "")))
+            = StrLower(name)
+            return id
+    }
+    target := PathKey(path)
+    for id in ids {
+        stored := doc.GetValue("Source:" id, "Path", "")
+        if Trim(stored) != "" && PathKey(stored) = target
+            return id
+    }
+    return ""
+}
+
+GetDocumentEntry(doc, section, key) {
+    for entry in doc.GetEntries(section) {
+        if StrLower(entry.Key) = StrLower(key)
+            return entry
+    }
+    return 0
+}
+
+ValidateWorkspaceDocument(doc, order) {
+    seenNames := Map()
+    seenIds := Map()
+    for workspaceId in order {
+        if !IsSafeStableId(workspaceId)
+            throw Error("工作区 ID 无效：" workspaceId)
+        foldedId := StrLower(workspaceId)
+        if seenIds.Has(foldedId)
+            throw Error("工作区 ID 重复：" workspaceId)
+        seenIds[foldedId] := true
+        section := "Workspace:" workspaceId
+        name := Trim(doc.GetValue(section, "Name", ""))
+        if !IsSafeWorkspaceName(name)
+            throw Error("工作区名称无效：" name)
+        foldedName := StrLower(name)
+        if seenNames.Has(foldedName)
+            throw Error("工作区名称重复：" name)
+        seenNames[foldedName] := true
+        sourceSeen := Map()
+        for sourceId in ParseStableIdOrder(
+            doc.GetValue(section, "SourceOrder", "")) {
+            if sourceSeen.Has(StrLower(sourceId))
+                throw Error("工作区“" name "”包含重复来源 ID：" sourceId)
+            sourceSeen[StrLower(sourceId)] := true
+            sourceSection := "Source:" sourceId
+            owner := Trim(doc.GetValue(sourceSection, "WorkspaceId", ""))
+            if owner != "" && StrLower(owner) != foldedId
+                throw Error("来源 " sourceId " 属于其他工作区。")
+            if Trim(doc.GetValue(sourceSection, "Name", "")) = ""
+                throw Error("来源 " sourceId " 缺少名称。")
+            if Trim(doc.GetValue(sourceSection, "Path", "")) = ""
+                throw Error("来源 " sourceId " 缺少路径。")
+        }
+    }
+    active := Trim(doc.GetValue("Workspaces", "Active", ""))
+    if active = "" || !seenIds.Has(StrLower(active))
+        throw Error("当前工作区不存在于工作区顺序中。")
+}
+
+ParseStableIdOrder(raw) {
+    result := []
+    seen := Map()
+    for part in StrSplit(raw, ",") {
+        id := Trim(part)
+        key := StrLower(id)
+        if !IsSafeStableId(id) || seen.Has(key)
+            continue
+        seen[key] := true
+        result.Push(id)
+    }
+    return result
+}
+
+IsSafeStableId(id) {
+    id := Trim(id)
+    return id != "" && RegExMatch(id, "i)^[a-z0-9][a-z0-9_-]{0,79}$")
+}
+
+IsSafeWorkspaceName(name) {
+    name := Trim(name)
+    return name != "" && StrLen(name) <= 80
+        && !RegExMatch(name, "[\[\]=,`r`n]")
+}
+
+NewStableId(prefix) {
+    guid := Buffer(16, 0)
+    if DllCall("ole32\CoCreateGuid", "ptr", guid.Ptr, "int") = 0 {
+        text := Buffer(78, 0)
+        DllCall("ole32\StringFromGUID2", "ptr", guid.Ptr,
+            "ptr", text.Ptr, "int", 39)
+        value := StrLower(StrGet(text))
+        value := StrReplace(value, "{")
+        value := StrReplace(value, "}")
+        return prefix "-" value
+    }
+    return prefix "-" Format("{:08X}{:08X}", A_TickCount,
+        DllCall("kernel32\GetCurrentProcessId", "uint"))
 }
 
 NormalizeConfigDocument(tempPath) {
@@ -449,7 +750,8 @@ LoadSettings(*) {
     global ConfigPath, ConfiguredHotkey, MaxFilesPerFolder
     global IncludeSubfolders, ThumbnailSize, ThumbnailHorizontalGap, ThumbnailVerticalGap
     global ThumbnailTextLines
-    global FolderSettings, PinnedPaths
+    global FolderSettings, PinnedPaths, Workspaces
+    global ActiveWorkspaceId, ActiveWorkspaceName, LastValidWorkspaceId
     global WindowWidth, WindowHeight, ViewMode, ShowRecentSidebar, RecentFileCount
     global ThumbnailPolicy, CachePathSetting, CacheDir, CacheFilePath, CacheWritable
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
@@ -517,18 +819,20 @@ LoadSettings(*) {
         ThumbnailTextLines := 2
     ThumbnailTextLines := Max(1, Min(ThumbnailTextLines, 2))
 
-    try WindowWidth := Integer(IniRead(ConfigPath, "General", "WindowWidth", "980"))
+    try WindowWidth := Integer(IniRead(ConfigPath, "General", "WindowWidth", "766"))
     catch
-        WindowWidth := 980
-    try WindowHeight := Integer(IniRead(ConfigPath, "General", "WindowHeight", "620"))
+        WindowWidth := 766
+    try WindowHeight := Integer(IniRead(ConfigPath, "General", "WindowHeight", "576"))
     catch
-        WindowHeight := 620
-    WindowWidth := Max(620, Min(WindowWidth, 3000))
+        WindowHeight := 576
+    ; Restore a useful, toolbar-driven width instead of reopening at a
+    ; previously maximized desktop width. The window remains freely resizable.
+    WindowWidth := Max(760, Min(WindowWidth, 980))
     WindowHeight := Max(380, Min(WindowHeight, 2000))
 
     configuredView := StrLower(Trim(IniRead(ConfigPath, "General", "ViewMode", "Thumbnail")))
     ViewMode := configuredView = "list" ? "List" : "Thumbnail"
-    ShowRecentSidebar := IniRead(ConfigPath, "General", "ShowRecentSidebar", "1") = "1"
+    ShowRecentSidebar := IniRead(ConfigPath, "General", "ShowRecentSidebar", "0") = "1"
     try RecentFileCount := Integer(IniRead(ConfigPath, "General", "RecentFileCount", "12"))
     catch
         RecentFileCount := 12
@@ -552,67 +856,52 @@ LoadSettings(*) {
     else
         SortMode := SORT_MODIFIED_DESC
 
-    ; 读取文件夹列表
-    FolderSettings := []
-    for entry in ReadIniSection("Folders") {
-        if entry.Value != ""
-            FolderSettings.Push({Name: entry.Key, Path: NormalizePath(entry.Value)})
+    ; 工作区管理来源和固定项。其他共享设置已经在上方读取一次；
+    ; 每个来源仍只继承共享默认值，不增加工作区级默认层。
+    Workspaces := LoadWorkspaceDefinitions()
+    ActiveWorkspaceId := ReadActiveWorkspaceId(Workspaces)
+    activeWorkspace := 0
+    for workspace in Workspaces {
+        FolderSettings := workspace.SourceRefs
+        workspaceResult := ValidateConfig()
+        workspace.Sources := workspaceResult.Settings
+        workspace.Errors := workspaceResult.Errors
+        workspace.Valid := workspaceResult.Valid
+        if StrLower(workspace.Id) = StrLower(ActiveWorkspaceId)
+            activeWorkspace := workspace
     }
-    try MigrateOpenFileModeConfig(FolderSettings)
-    catch as err
-        settingErrors.Push("无法迁移文件打开方式配置：" err.Message)
+    if !IsObject(activeWorkspace)
+        throw Error("找不到当前工作区。")
+    ActiveWorkspaceName := activeWorkspace.Name
+    FolderSettings := activeWorkspace.SourceRefs
+    PinnedPaths := activeWorkspace.PinnedPaths
+    result := {
+        Valid: activeWorkspace.Valid,
+        Settings: activeWorkspace.Sources,
+        Errors: activeWorkspace.Errors
+    }
 
-    ; 验证并解析配置，得到每个文件夹的最终设置
+    ; 验证并解析当前工作区，错误回退不得跨工作区串用来源。
     ConfigErrorsShown := false
-    result := ValidateConfig()
     if result.Valid {
         LastValidFolderSettings := result.Settings
+        LastValidWorkspaceId := ActiveWorkspaceId
         ConfigErrors := settingErrors
     } else {
         ConfigErrors := settingErrors.Clone()
         for errorMessage in result.Errors
             ConfigErrors.Push(errorMessage)
-        ; 有错误时，如果上次有效设置存在则继续使用，否则使用 result.Settings（含默认值）
-        if LastValidFolderSettings.Length {
+        if LastValidFolderSettings.Length
+            && StrLower(LastValidWorkspaceId) = StrLower(ActiveWorkspaceId) {
             ; 保留 LastValidFolderSettings
         } else {
-            ; 使用安全默认值
-            LastValidFolderSettings := []
-            for f in FolderSettings {
-                LastValidFolderSettings.Push({
-                    Name: f.Name,
-                    Path: f.Path,
-                    Mode: MODE_FILES,
-                    IncludeSubfolders: IncludeSubfolders,
-                    DisplayScope: IncludeSubfolders ? SCOPE_RECURSIVE_FILES : SCOPE_FILES_ONLY,
-                    FolderTimeMode: FOLDER_TIME_MODIFIED,
-                    MaxFilesPerFolder: MaxFilesPerFolder,
-                    SortMode: SortMode,
-                    Filter: {Mode: "All", Extensions: []},
-                    StripOrderPrefix: 0,
-                    HideExtensions: 0,
-                    SourceId: ResolveFolderSourceId(f.Name, f.Path),
-                    OpenFileMode: "Inherit",
-                    NoiseFilterMode: NOISE_FILTER_INHERIT,
-                    NoiseFilter: ResolveNoiseFilterForSource(
-                        NOISE_FILTER_INHERIT, []),
-                    SourceCustomPatternTexts: [],
-                    ExcludedPaths: [],
-                    AllowedExcludedPaths: []
-                })
-            }
+            LastValidFolderSettings := result.Settings
+            LastValidWorkspaceId := ActiveWorkspaceId
         }
     }
 
-    PinnedPaths := []
-    for entry in ReadIniSection("PinnedFiles") {
-        path := NormalizePath(entry.Value)
-        if path != "" && !ArrayContainsPath(PinnedPaths, path)
-            PinnedPaths.Push(path)
-    }
-
     CacheDir := ResolveCacheDirectory(CachePathSetting)
-    CacheFilePath := CacheDir "\scan-cache-v3.ini"
+    CacheFilePath := CacheDir "\scan-cache-v4.ini"
     CacheWritable := EnsureCacheDirectory(CacheDir)
     newFingerprint := ComputeConfigFingerprint(LastValidFolderSettings)
     if CurrentConfigFingerprint != newFingerprint {
@@ -635,6 +924,72 @@ LoadSettings(*) {
     TransferFavorites := LoadTransferFavorites(settingErrors)
     TransferFavoriteLabels := LoadTransferFavoriteLabels(TransferFavorites)
     RecentTargets := LoadPathListSection("RecentTargets", 3)
+    SyncWorkspaceControls()
+}
+
+LoadWorkspaceDefinitions() {
+    global ConfigPath
+    result := []
+    ids := ParseStableIdOrder(IniRead(
+        ConfigPath, "Workspaces", "Order", ""))
+    for id in ids {
+        section := "Workspace:" id
+        name := Trim(IniRead(ConfigPath, section, "Name", ""))
+        refs := []
+        for sourceId in ParseStableIdOrder(IniRead(
+            ConfigPath, section, "SourceOrder", "")) {
+            sourceSection := "Source:" sourceId
+            sourceName := Trim(IniRead(
+                ConfigPath, sourceSection, "Name", ""))
+            sourcePath := NormalizePath(IniRead(
+                ConfigPath, sourceSection, "Path", ""))
+            if sourceName != "" && sourcePath != ""
+                refs.Push({Name: sourceName, Path: sourcePath,
+                    SourceId: sourceId, WorkspaceId: id})
+        }
+        pinnedPaths := LoadWorkspacePinnedPaths(id)
+        result.Push({Id: id, Name: name, SourceRefs: refs,
+            PinnedPaths: pinnedPaths,
+            Sources: [], Errors: [], Valid: true})
+    }
+    if !result.Length
+        throw Error("配置中至少需要一个工作区。")
+    return result
+}
+
+LoadWorkspacePinnedPaths(workspaceId) {
+    global ConfigPath
+    result := []
+    section := "WorkspacePinned:" workspaceId
+    for entry in ReadIniSection(section) {
+        if !RegExMatch(entry.Key, "i)^File\d+$")
+            continue
+        path := NormalizePath(entry.Value)
+        if path != "" && !ArrayContainsPath(result, path)
+            result.Push(path)
+    }
+    return result
+}
+
+ReadActiveWorkspaceId(workspaces) {
+    global ConfigPath
+    active := Trim(IniRead(ConfigPath, "Workspaces", "Active", ""))
+    for workspace in workspaces {
+        if StrLower(workspace.Id) = StrLower(active)
+            return workspace.Id
+    }
+    return workspaces[1].Id
+}
+
+FindWorkspace(workspaceId, workspaceList := 0) {
+    global Workspaces
+    if !IsObject(workspaceList)
+        workspaceList := Workspaces
+    for index, workspace in workspaceList {
+        if StrLower(workspace.Id) = StrLower(workspaceId)
+            return {Index: index, Value: workspace}
+    }
+    return 0
 }
 
 ; ──── 配置验证与筛选函数 ────
@@ -696,7 +1051,13 @@ ParseSourceIdOrder(raw) {
 }
 
 ResolveFolderSourceId(name, path) {
-    global ConfigPath
+    global ConfigPath, FolderSettings
+    for source in FolderSettings {
+        if HasProp(source, "SourceId")
+            && StrLower(source.Name) = StrLower(name)
+            && PathsEqual(source.Path, path)
+            return source.SourceId
+    }
     folderSection := "Folder:" name
     sourceId := Trim(IniRead(ConfigPath, folderSection, "SourceId", ""))
     if IsSafeSourceId(sourceId)
@@ -727,12 +1088,12 @@ ResolveFolderSourceId(name, path) {
 
 ReadFolderOpenFileMode(name, sourceId) {
     global ConfigPath, SOURCE_OPEN_MODE_INHERIT
-    raw := IniRead(ConfigPath, "Folder:" name, "OpenFileMode", "")
+    raw := IsSafeSourceId(sourceId)
+        ? IniRead(ConfigPath, "Source:" sourceId, "OpenFileMode", "")
+        : ""
     if Trim(raw) = ""
-        raw := IsSafeSourceId(sourceId)
-            ? IniRead(ConfigPath, "Source:" sourceId, "OpenFileMode",
-                SOURCE_OPEN_MODE_INHERIT)
-            : SOURCE_OPEN_MODE_INHERIT
+        raw := IniRead(ConfigPath, "Folder:" name, "OpenFileMode",
+            SOURCE_OPEN_MODE_INHERIT)
     return ParseSourceOpenFileMode(raw)
 }
 
@@ -855,9 +1216,10 @@ ValidateConfig() {
     resolved := []
     sourceIdsSeen := Map()
     for f in FolderSettings {
-        sectionName := "Folder:" f.Name
-        sourceId := MakeUniqueSourceId(
-            ResolveFolderSourceId(f.Name, f.Path), sourceIdsSeen)
+        sourceId := HasProp(f, "SourceId") ? f.SourceId
+            : ResolveFolderSourceId(f.Name, f.Path)
+        sourceId := MakeUniqueSourceId(sourceId, sourceIdsSeen)
+        sectionName := "Source:" sourceId
         folderOpenFileMode := ReadFolderOpenFileMode(f.Name, sourceId)
 
         ; 读取该文件夹的独立配置节
@@ -1093,36 +1455,13 @@ ValidateConfig() {
         })
     }
 
-    ; ── 检查 [Folder:xxx] 节是否对应存在的文件夹 ──
-    knownNames := Map()
-    activeSourceIds := Map()
-    for f in FolderSettings
-        knownNames[f.Name] := true
-    for folder in resolved
-        activeSourceIds[StrLower(folder.SourceId)] := true
-    try {
-        Loop Read, ConfigPath {
-            if RegExMatch(A_LoopReadLine, "i)^\[Folder:(.+)\]$", &m) {
-                folderName := m[1]
-                if !knownNames.Has(folderName) {
-                    legacySourceId := Trim(IniRead(ConfigPath,
-                        "Folder:" folderName, "SourceId", ""))
-                    if IsSafeSourceId(legacySourceId)
-                        && activeSourceIds.Has(StrLower(legacySourceId))
-                        continue
-                    errors.Push("配置节 [Folder:" folderName "] 引用了不存在的文件夹名称，[Folders] 中未定义。")
-                }
-            }
-        }
-    }
-
     if errors.Length {
         ConfigErrors := errors
         return {Valid: false, Errors: errors, Settings: resolved}
     }
 
     ; 验证通过，返回设置
-    return {Valid: true, Settings: resolved}
+    return {Valid: true, Errors: errors, Settings: resolved}
 }
 
 MakeUniqueSourceId(sourceId, seen) {
@@ -2196,29 +2535,312 @@ IsSameOrDescendantPath(candidate, ancestor) {
         || SubStr(candidateKey, 1, StrLen(ancestorKey) + 1) = ancestorKey "\"
 }
 
+AddUiButton(guiObj, options, text) {
+    global UI_SINGLE_LINE_HEIGHT
+    return guiObj.AddButton(
+        options " h" UI_SINGLE_LINE_HEIGHT " -Wrap", text)
+}
+
+AddUiEdit(guiObj, options, text := "") {
+    global UI_SINGLE_LINE_HEIGHT
+    isMultiLine := RegExMatch(options, "i)(^|\s)Multi(\s|$)")
+    if !RegExMatch(options, "i)(^|\s)(h\d+|r\d+)(\s|$)")
+        options .= " h" UI_SINGLE_LINE_HEIGHT
+    if !isMultiLine {
+        ; EM_SETRECT is intentionally limited by Windows to multiline Edit
+        ; controls. ES_WANTRETURN stays off, so Enter still activates the
+        ; dialog's default button; ES_AUTOHSCROLL preserves single-line input.
+        options .= " Multi -WantReturn +0x80"
+    }
+    control := guiObj.AddEdit(options, text)
+    if !isMultiLine
+        CenterUiEditText(control)
+    return control
+}
+
+AddUiDropDownList(guiObj, options, items) {
+    global UI_DROPDOWN_FIELD_HEIGHT, UI_DROPDOWN_Y_OFFSET_PX
+        , UiDropDownTextItems
+    ; CBS_OWNERDRAWFIXED | CBS_HASSTRINGS lets WM_DRAWITEM center only the text.
+    ; Windows continues to own the combo frame, arrow, popup and input behavior.
+    control := guiObj.AddDropDownList(options " +0x210", items)
+    UiDropDownTextItems[control.Hwnd] := items.Clone()
+    EnsureUiDropDownOwnerMessages(guiObj, control)
+    ; CB_SETITEMHEIGHT(-1) adjusts only the native selection field. Unlike the
+    ; H option it does not collapse the popup list to one row. The native frame
+    ; adds roughly four logical pixels around this field. Windows vertically
+    ; centers the text inside the resulting selection field.
+    fieldHeight := Round(UI_DROPDOWN_FIELD_HEIGHT * A_ScreenDPI / 96)
+    DllCall("user32\SendMessageW", "ptr", control.Hwnd,
+        "uint", 0x0153, "ptr", -1, "ptr", fieldHeight, "ptr")
+    DllCall("user32\SendMessageW", "ptr", control.Hwnd,
+        "uint", 0x0153, "ptr", 0, "ptr", fieldHeight, "ptr")
+    if UI_DROPDOWN_Y_OFFSET_PX
+        OffsetGuiControlYPhysical(control, UI_DROPDOWN_Y_OFFSET_PX)
+    return control
+}
+
+ReplaceUiDropDownItems(control, items) {
+    global UiDropDownTextItems
+    control.Delete()
+    UiDropDownTextItems[control.Hwnd] := items.Clone()
+    control.Add(items)
+}
+
+EnsureUiDropDownOwnerMessages(guiObj, control) {
+    global UiDropDownParentSubclassCallback, UiDropDownSubclassedParents
+    parentHwnd := DllCall("user32\GetParent", "ptr", control.Hwnd, "ptr")
+    if !parentHwnd || parentHwnd = guiObj.Hwnd
+        return
+    if UiDropDownSubclassedParents.Has(parentHwnd)
+        return
+    if !UiDropDownParentSubclassCallback
+        UiDropDownParentSubclassCallback := CallbackCreate(
+            UiDropDownParentSubclass, "", 6)
+    if DllCall("comctl32\SetWindowSubclass",
+        "ptr", parentHwnd,
+        "ptr", UiDropDownParentSubclassCallback,
+        "uptr", 0x50445044,
+        "uptr", 0,
+        "int")
+        UiDropDownSubclassedParents[parentHwnd] := true
+}
+
+UiDropDownParentSubclass(parentHwnd, msg, wParam, lParam, subclassId, refData) {
+    global UiDropDownParentSubclassCallback, UiDropDownSubclassedParents
+    try {
+        if msg = 0x002B { ; WM_DRAWITEM
+            result := DrawUiDropDownItem(wParam, lParam, msg, parentHwnd)
+            if result != ""
+                return result
+        } else if msg = 0x002C { ; WM_MEASUREITEM
+            result := MeasureUiDropDownItem(wParam, lParam, msg, parentHwnd)
+            if result != ""
+                return result
+        } else if msg = 0x0082 { ; WM_NCDESTROY
+            DllCall("comctl32\RemoveWindowSubclass",
+                "ptr", parentHwnd,
+                "ptr", UiDropDownParentSubclassCallback,
+                "uptr", subclassId,
+                "int")
+            if UiDropDownSubclassedParents.Has(parentHwnd)
+                UiDropDownSubclassedParents.Delete(parentHwnd)
+        }
+    }
+    return DllCall("comctl32\DefSubclassProc",
+        "ptr", parentHwnd,
+        "uint", msg,
+        "ptr", wParam,
+        "ptr", lParam,
+        "ptr")
+}
+
+CenterUiEditText(control) {
+    global UI_EDIT_TEXT_Y_OFFSET_PX
+    clientRect := Buffer(16, 0)
+    if !DllCall("user32\GetClientRect", "ptr", control.Hwnd,
+        "ptr", clientRect.Ptr, "int")
+        return
+    clientHeight := NumGet(clientRect, 12, "int")
+    if clientHeight <= 0
+        return
+
+    textHeight := 0
+    hdc := DllCall("user32\GetDC", "ptr", control.Hwnd, "ptr")
+    if hdc {
+        hFont := DllCall("user32\SendMessageW", "ptr", control.Hwnd,
+            "uint", 0x0031, "ptr", 0, "ptr", 0, "ptr") ; WM_GETFONT
+        oldFont := hFont
+            ? DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", hFont, "ptr")
+            : 0
+        metrics := Buffer(64, 0)
+        if DllCall("gdi32\GetTextMetricsW", "ptr", hdc,
+            "ptr", metrics.Ptr, "int")
+            textHeight := NumGet(metrics, 0, "int")
+                + NumGet(metrics, 16, "int")
+        if oldFont
+            DllCall("gdi32\SelectObject", "ptr", hdc,
+                "ptr", oldFont, "ptr")
+        DllCall("user32\ReleaseDC", "ptr", control.Hwnd, "ptr", hdc)
+    }
+    if textHeight <= 0
+        textHeight := Max(1, Round(12 * A_ScreenDPI / 96))
+
+    formatRect := Buffer(16, 0)
+    DllCall("user32\SendMessageW", "ptr", control.Hwnd,
+        "uint", 0x00B2, "ptr", 0, "ptr", formatRect.Ptr, "ptr") ; EM_GETRECT
+    top := Max(0, Floor((clientHeight - textHeight) / 2)
+        + UI_EDIT_TEXT_Y_OFFSET_PX)
+    bottom := Min(clientHeight, top + textHeight)
+    if bottom <= top
+        bottom := Min(clientHeight, top + 1)
+    NumPut("int", top, formatRect, 4)
+    NumPut("int", bottom, formatRect, 12)
+    DllCall("user32\SendMessageW", "ptr", control.Hwnd,
+        "uint", 0x00B3, "ptr", 0, "ptr", formatRect.Ptr, "ptr") ; EM_SETRECT
+}
+
+DrawUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
+    global UI_DROPDOWN_TEXT_Y_OFFSET_PX, UiDropDownTextItems
+    if !lParam || NumGet(lParam, 0, "uint") != 3 ; ODT_COMBOBOX
+        return
+
+    itemId := NumGet(lParam, 8, "uint")
+    itemState := NumGet(lParam, 16, "uint")
+    handleOffset := A_PtrSize = 8 ? 24 : 20
+    comboHwnd := NumGet(lParam, handleOffset, "ptr")
+    hdc := NumGet(lParam, handleOffset + A_PtrSize, "ptr")
+    rectOffset := handleOffset + A_PtrSize * 2
+    if !comboHwnd || !hdc
+        return
+
+    textItemId := itemId
+    if textItemId = 0xFFFFFFFF
+        textItemId := DllCall("user32\SendMessageW", "ptr", comboHwnd,
+            "uint", 0x0147, "ptr", 0, "ptr", 0, "int") ; CB_GETCURSEL
+    itemText := ""
+    if textItemId >= 0 {
+        length := DllCall("user32\SendMessageW", "ptr", comboHwnd,
+            "uint", 0x0149, "ptr", textItemId, "ptr", 0,
+            "int") ; CB_GETLBTEXTLEN
+        if length >= 0 {
+            textBuffer := Buffer((length + 1) * 2, 0)
+            copied := DllCall("user32\SendMessageW", "ptr", comboHwnd,
+                "uint", 0x0148, "ptr", textItemId,
+                "ptr", textBuffer.Ptr, "int") ; CB_GETLBTEXT
+            if copied >= 0
+                itemText := StrGet(textBuffer.Ptr, copied, "UTF-16")
+        }
+    }
+    if itemText = "" && textItemId >= 0
+        && UiDropDownTextItems.Has(comboHwnd)
+        && textItemId < UiDropDownTextItems[comboHwnd].Length
+        itemText := UiDropDownTextItems[comboHwnd][textItemId + 1]
+    if itemText = "" && itemId = 0xFFFFFFFF {
+        windowTextLength := DllCall("user32\GetWindowTextLengthW",
+            "ptr", comboHwnd, "int")
+        if windowTextLength > 0 {
+            windowTextBuffer := Buffer((windowTextLength + 1) * 2, 0)
+            copied := DllCall("user32\GetWindowTextW", "ptr", comboHwnd,
+                "ptr", windowTextBuffer.Ptr, "int", windowTextLength + 1,
+                "int")
+            if copied > 0
+                itemText := StrGet(windowTextBuffer.Ptr, copied, "UTF-16")
+        }
+    }
+
+    drawRect := Buffer(16, 0)
+    Loop 4
+        NumPut("int", NumGet(lParam, rectOffset + (A_Index - 1) * 4, "int"),
+            drawRect, (A_Index - 1) * 4)
+    isSelectionField := !!(itemState & 0x1000) ; ODS_COMBOBOXEDIT
+    isSelected := !!(itemState & 0x0001) && !isSelectionField
+    isDisabled := !!(itemState & 0x0004)
+
+    backgroundDrawn := false
+    if isSelectionField {
+        theme := DllCall("uxtheme\OpenThemeData", "ptr", comboHwnd,
+            "wstr", "COMBOBOX", "ptr")
+        if theme {
+            backgroundDrawn := DllCall("uxtheme\DrawThemeBackground",
+                "ptr", theme, "ptr", hdc, "int", 2, "int", 0,
+                "ptr", drawRect.Ptr, "ptr", 0, "int") = 0 ; CP_BACKGROUND
+            DllCall("uxtheme\CloseThemeData", "ptr", theme)
+        }
+    }
+    if !backgroundDrawn {
+        colorIndex := isSelected ? 13 : 5 ; COLOR_HIGHLIGHT / COLOR_WINDOW
+        brush := DllCall("user32\GetSysColorBrush", "int", colorIndex, "ptr")
+        DllCall("user32\FillRect", "ptr", hdc,
+            "ptr", drawRect.Ptr, "ptr", brush)
+    }
+
+    textRect := Buffer(16, 0)
+    Loop 4
+        NumPut("int", NumGet(drawRect, (A_Index - 1) * 4, "int"),
+            textRect, (A_Index - 1) * 4)
+    NumPut("int", NumGet(textRect, 0, "int")
+        + Max(2, Round(4 * A_ScreenDPI / 96)), textRect, 0)
+    NumPut("int", NumGet(textRect, 4, "int")
+        + UI_DROPDOWN_TEXT_Y_OFFSET_PX, textRect, 4)
+    NumPut("int", NumGet(textRect, 12, "int")
+        + UI_DROPDOWN_TEXT_Y_OFFSET_PX, textRect, 12)
+
+    textColorIndex := isDisabled ? 17
+        : (isSelected ? 14 : 8) ; GRAYTEXT / HIGHLIGHTTEXT / WINDOWTEXT
+    oldTextColor := DllCall("gdi32\SetTextColor", "ptr", hdc,
+        "uint", DllCall("user32\GetSysColor", "int", textColorIndex, "uint"),
+        "uint")
+    oldBkMode := DllCall("gdi32\SetBkMode", "ptr", hdc,
+        "int", 1, "int") ; TRANSPARENT
+    hFont := DllCall("user32\SendMessageW", "ptr", comboHwnd,
+        "uint", 0x0031, "ptr", 0, "ptr", 0, "ptr") ; WM_GETFONT
+    oldFont := hFont
+        ? DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", hFont, "ptr")
+        : 0
+    DllCall("user32\DrawTextW", "ptr", hdc, "wstr", itemText, "int", -1,
+        "ptr", textRect.Ptr,
+        "uint", 0x0004 | 0x0020 | 0x0800 | 0x8000, "int")
+    if oldFont
+        DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", oldFont, "ptr")
+    DllCall("gdi32\SetBkMode", "ptr", hdc, "int", oldBkMode)
+    DllCall("gdi32\SetTextColor", "ptr", hdc, "uint", oldTextColor)
+    if itemState & 0x0010 ; ODS_FOCUS
+        DllCall("user32\DrawFocusRect", "ptr", hdc, "ptr", drawRect.Ptr)
+    return 1
+}
+
+MeasureUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
+    global UI_DROPDOWN_FIELD_HEIGHT
+    if !lParam || NumGet(lParam, 0, "uint") != 3 ; ODT_COMBOBOX
+        return
+    NumPut("uint", Round(UI_DROPDOWN_FIELD_HEIGHT * A_ScreenDPI / 96),
+        lParam, 16)
+    return 1
+}
+
+OffsetGuiControlYPhysical(control, offsetPx) {
+    rect := Buffer(16, 0)
+    DllCall("user32\GetWindowRect", "ptr", control.Hwnd, "ptr", rect)
+    parentHwnd := DllCall("user32\GetParent", "ptr", control.Hwnd, "ptr")
+    point := Buffer(8, 0)
+    NumPut("int", NumGet(rect, 0, "int"), point, 0)
+    NumPut("int", NumGet(rect, 4, "int"), point, 4)
+    DllCall("user32\ScreenToClient", "ptr", parentHwnd, "ptr", point)
+    DllCall("user32\SetWindowPos", "ptr", control.Hwnd, "ptr", 0,
+        "int", NumGet(point, 0, "int"),
+        "int", NumGet(point, 4, "int") + offsetPx,
+        "int", 0, "int", 0,
+        "uint", 0x0001 | 0x0004 | 0x0010)
+}
+
 BuildPanel() {
     global Panel, FileView, RecentLabel, RecentView
     global ViewButton, RecentButton, WindowModeButton, PinnedDropButton, StatusText
     global TransferStatusText
-    global APP_VERSION
+    global APP_VERSION, WorkspaceSelector
 
-    Panel := Gui("+Resize +MinSize620x380", "PopDrop v" APP_VERSION)
+    Panel := Gui("+Resize +MinSize760x380", "PopDrop v" APP_VERSION)
     Panel.MarginX := 12
     Panel.MarginY := 10
     Panel.SetFont("s9", "Microsoft YaHei UI")
 
-    Panel.AddButton("xm ym w60 h30", "🔄 刷新").OnEvent("Click", RefreshPanel)
-    PinnedDropButton := Panel.AddButton("x+6 yp w76 h30", "＋ 固定项")
+    workspaceLabel := Panel.AddText("xm ym+6 w52 h22 +0x200", "工作区：")
+    WorkspaceSelector := AddUiDropDownList(Panel, "x+2 yp-5 w110", [])
+    OffsetGuiControlYPhysical(workspaceLabel, -4)
+    WorkspaceSelector.OnEvent("Change", MainWorkspaceChanged)
+    AddUiButton(Panel, "x+6 yp w52", "刷新").OnEvent("Click", RefreshPanel)
+    PinnedDropButton := AddUiButton(Panel, "x+4 yp w70", "＋固定项")
     PinnedDropButton.OnEvent("Click", AddPinnedFiles)
-    Panel.AddButton("x+6 yp w76 h30", "－ 固定项").OnEvent("Click", RemovePinnedFile)
-    ViewButton := Panel.AddButton("x+6 yp w80 h30", "视图")
+    AddUiButton(Panel, "x+4 yp w70", "－固定项").OnEvent("Click", RemovePinnedFile)
+    ViewButton := AddUiButton(Panel, "x+4 yp w82", "视图")
     ViewButton.OnEvent("Click", ToggleViewMode)
-    RecentButton := Panel.AddButton("x+6 yp w76 h30", "近期栏")
+    RecentButton := AddUiButton(Panel, "x+4 yp w74", "近期栏")
     RecentButton.OnEvent("Click", ToggleRecentSidebar)
-    Panel.AddButton("x+6 yp w60 h30", "⚙️ 配置").OnEvent("Click", OpenConfig)
-    WindowModeButton := Panel.AddButton("x+6 yp w76 h30", "置顶：关")
+    AddUiButton(Panel, "x+4 yp w52", "设置").OnEvent("Click", OpenConfig)
+    WindowModeButton := AddUiButton(Panel, "x+4 yp w72", "置顶：关")
     WindowModeButton.OnEvent("Click", ToggleWindowMode)
-    Panel.AddButton("x+6 yp w60 h30", "❌ 关闭").OnEvent("Click", HidePanel)
+    AddUiButton(Panel, "x+4 yp w48", "关闭").OnEvent("Click", HidePanel)
 
     ; Multi-select is the native ListView default. In icon view this enables
     ; Ctrl-click, Shift range selection and marquee selection on blank space.
@@ -2251,6 +2873,71 @@ BuildPanel() {
     ; OLE IDropTarget is registered after the panel is built. Do not also
     ; enable WM_DROPFILES: one physical drop must have exactly one owner.
     UpdateViewButtons()
+    SyncWorkspaceControls()
+}
+
+SyncWorkspaceControls() {
+    global WorkspaceSelector, WorkspaceSelectorIds
+    global Workspaces, ActiveWorkspaceId, SettingsController
+    if IsObject(WorkspaceSelector) {
+        WorkspaceSelectorIds := []
+        names := []
+        selected := 1
+        for index, workspace in Workspaces {
+            names.Push(workspace.Name)
+            WorkspaceSelectorIds.Push(workspace.Id)
+            if StrLower(workspace.Id) = StrLower(ActiveWorkspaceId)
+                selected := index
+        }
+        ReplaceUiDropDownItems(WorkspaceSelector, names)
+        if names.Length
+            WorkspaceSelector.Choose(selected)
+    }
+    if IsObject(SettingsController)
+        try RefreshSettingsWorkspaceControls(SettingsController)
+}
+
+MainWorkspaceChanged(control, *) {
+    global WorkspaceSelectorIds, ActiveWorkspaceId
+    index := control.Value
+    if index < 1 || index > WorkspaceSelectorIds.Length
+        return
+    targetId := WorkspaceSelectorIds[index]
+    if StrLower(targetId) = StrLower(ActiveWorkspaceId)
+        return
+    if !RequestActivateWorkspace(targetId, "main")
+        SyncWorkspaceControls()
+}
+
+RequestActivateWorkspace(workspaceId, origin := "main") {
+    global SettingsController
+    if IsObject(SettingsController)
+        return RequestSettingsWorkspaceSwitch(
+            SettingsController, workspaceId, origin)
+    return ActivateWorkspace(workspaceId)
+}
+
+ActivateWorkspace(workspaceId) {
+    global ActiveWorkspaceId, PanelVisible, StatusKind
+    found := FindWorkspace(workspaceId)
+    if !IsObject(found)
+        return false
+    if StrLower(workspaceId) = StrLower(ActiveWorkspaceId) {
+        SyncWorkspaceControls()
+        return true
+    }
+    try AtomicConfigSetValue("Workspaces", "Active", workspaceId, 3)
+    catch as err {
+        ShowPanelMsgBox("无法切换工作区：`n" err.Message,
+            "工作区切换失败", "Iconx")
+        return false
+    }
+    LoadSettings()
+    StatusKind := "default"
+    PopulatePanel()
+    PopulateRecentSidebar()
+    StartBackgroundScan()
+    return true
 }
 
 ApplyWindowMode() {
@@ -2406,7 +3093,7 @@ BuildTrayMenu() {
     A_TrayMenu.Add()
     A_TrayMenu.Add("添加打开软件…", AddConfiguredOpenApp)
     A_TrayMenu.Add("PopDrop 设置…", OpenConfig)
-    A_TrayMenu.Add("传输中心…", OpenTransferCenter)
+    A_TrayMenu.Add("下载任务…", OpenTransferCenter)
     A_TrayMenu.Add("高级编辑 config.ini", OpenConfigFile)
     A_TrayMenu.Add("退出", RequestExitPopDrop)
     A_TrayMenu.Default := "显示/隐藏面板 (" ActiveHotkey ")"
@@ -2944,9 +3631,10 @@ PopulatePanel() {
         groupId += 1
     }
 
-    if !PinnedPaths.Length && !FolderSettings.Length {
-        InsertListGroup(groupId, "提示")
-        AddPlaceholderTile("请先打开 config.ini 配置文件夹", groupId)
+    if !folderSettings.Length {
+        InsertListGroup(groupId, "当前工作区")
+        AddPlaceholderTile("当前工作区还没有文件来源。", groupId)
+        AddPlaceholderTile("前往“设置 → 当前工作区”添加文件来源。", groupId)
     }
 
     ApplyViewMode()
@@ -3493,8 +4181,9 @@ RunScanWorkerMode() {
         request := ReadWorkerRequest(requestPath)
         diagnostics := {Count: 0, Items: [], Seen: Map()}
         pinnedSet := BuildPathSet(request.PinnedPaths)
-        result := {Version: 3, Generation: request.Generation,
-            Fingerprint: request.Fingerprint, Folders: [], Recent: [],
+        result := {Version: 4, Generation: request.Generation,
+            Fingerprint: request.Fingerprint,
+            WorkspaceId: request.WorkspaceId, Folders: [], Recent: [],
             HiddenCount: 0, HiddenItems: []}
         for folder in request.Folders {
             state := DirExist(folder.Path) ? "OK" : "Unavailable"
@@ -3530,10 +4219,11 @@ ReadWorkerRequest(path) {
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     version := Integer(IniRead(path, "Meta", "Version", "0"))
-    if version != 4
+    if version != 5
         throw Error("unsupported request version")
     request := {Generation: IniRead(path, "Meta", "Generation", ""),
-        Fingerprint: IniRead(path, "Meta", "Fingerprint", ""), Folders: [],
+        Fingerprint: IniRead(path, "Meta", "Fingerprint", ""),
+        WorkspaceId: IniRead(path, "Meta", "WorkspaceId", ""), Folders: [],
         RecentFileCount: Integer(IniRead(path, "Meta", "RecentFileCount", "12")),
         GlobalExcludedNames: [], PinnedPaths: []}
     globalNameCount := Integer(
@@ -3651,9 +4341,10 @@ WriteScanResultAtomic(result, readyPath, includeDiagnostics := true) {
     tempPath := readyPath ".writing"
     try FileDelete(tempPath)
     try FileDelete(readyPath)
-    IniWrite("3", tempPath, "Meta", "Version")
+    IniWrite("4", tempPath, "Meta", "Version")
     IniWrite(result.Generation, tempPath, "Meta", "Generation")
     IniWrite(result.Fingerprint, tempPath, "Meta", "Fingerprint")
+    IniWrite(result.WorkspaceId, tempPath, "Meta", "WorkspaceId")
     IniWrite(A_Now, tempPath, "Meta", "CompletedAt")
     IniWrite(result.Folders.Length, tempPath, "Meta", "FolderCount")
     IniWrite(result.Recent.Length, tempPath, "Meta", "RecentCount")
@@ -3713,7 +4404,8 @@ EnsureCacheDirectory(path) {
 
 ComputeConfigFingerprint(settings) {
     global RecentFileCount, GlobalExcludedFolderNames, GlobalNoiseFilter, PinnedPaths
-    raw := "v4|recent=" RecentFileCount
+    global ActiveWorkspaceId
+    raw := "v5|workspace=" ActiveWorkspaceId "|recent=" RecentFileCount
         . "|excludedNames=" JoinArray(GlobalExcludedFolderNames, ",")
         . "|noiseEnabled=" (GlobalNoiseFilter.Enabled ? 1 : 0)
         . "|hidden=" (GlobalNoiseFilter.HideHidden ? 1 : 0)
@@ -3750,9 +4442,11 @@ HashString(text) {
 
 LoadDiskScanCache() {
     global CacheFilePath, CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
+    global ActiveWorkspaceId
     if !FileExist(CacheFilePath)
         return false
-    result := ReadScanResult(CacheFilePath, "", CurrentConfigFingerprint)
+    result := ReadScanResult(CacheFilePath, "", CurrentConfigFingerprint,
+        ActiveWorkspaceId)
     if !IsObject(result)
         return false
     CurrentScanResult := result
@@ -3760,18 +4454,24 @@ LoadDiskScanCache() {
     return true
 }
 
-ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
+ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "",
+    expectedWorkspaceId := "") {
     try {
         version := Integer(IniRead(path, "Meta", "Version", "0"))
-        if version != 3
+        if version != 4
             return 0
         generation := IniRead(path, "Meta", "Generation", "")
         fingerprint := IniRead(path, "Meta", "Fingerprint", "")
+        workspaceId := IniRead(path, "Meta", "WorkspaceId", "")
         if expectedGeneration != "" && generation != expectedGeneration
             return 0
         if expectedFingerprint != "" && fingerprint != expectedFingerprint
             return 0
-        result := {Version: version, Generation: generation, Fingerprint: fingerprint,
+        if expectedWorkspaceId != ""
+            && StrLower(workspaceId) != StrLower(expectedWorkspaceId)
+            return 0
+        result := {Version: version, Generation: generation,
+            Fingerprint: fingerprint, WorkspaceId: workspaceId,
             Folders: [], Recent: [], HiddenCount: Integer(
                 IniRead(path, "Meta", "HiddenCount", "0")), HiddenItems: []}
         folderCount := Integer(IniRead(path, "Meta", "FolderCount", "0"))
@@ -3832,11 +4532,12 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "") {
 
 WriteScanRequest(path, generation) {
     global LastValidFolderSettings, CurrentConfigFingerprint, RecentFileCount
-    global GlobalExcludedFolderNames, PinnedPaths
+    global GlobalExcludedFolderNames, PinnedPaths, ActiveWorkspaceId
     try FileDelete(path)
-    IniWrite("4", path, "Meta", "Version")
+    IniWrite("5", path, "Meta", "Version")
     IniWrite(generation, path, "Meta", "Generation")
     IniWrite(CurrentConfigFingerprint, path, "Meta", "Fingerprint")
+    IniWrite(ActiveWorkspaceId, path, "Meta", "WorkspaceId")
     IniWrite(LastValidFolderSettings.Length, path, "Meta", "FolderCount")
     IniWrite(RecentFileCount, path, "Meta", "RecentFileCount")
     IniWrite(GlobalExcludedFolderNames.Length, path,
@@ -3952,13 +4653,14 @@ PollWorkerResult() {
     global PendingRefresh, CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
     global PendingFileOperationRefresh
     global CacheFilePath, CacheWritable, CacheWriteWarningShown
-    global Panel, PanelVisible, StatusKind
+    global Panel, PanelVisible, StatusKind, ActiveWorkspaceId
     if !WorkerRunning {
         SetTimer(PollWorkerResult, 0)
         return
     }
     if FileExist(WorkerReadyPath) {
-        result := ReadScanResult(WorkerReadyPath, WorkerGeneration, CurrentConfigFingerprint)
+        result := ReadScanResult(WorkerReadyPath, WorkerGeneration,
+            CurrentConfigFingerprint, ActiveWorkspaceId)
         if IsObject(result) {
             changed := !ScanResultsEqual(CurrentScanResult, result)
             CurrentScanResult := result
@@ -4497,7 +5199,7 @@ AddSelectionToPinned(paths, *) {
         PopulatePanel()
         SetUserStatus("已添加到固定项：" additions.Length " 项")
     } catch as err {
-        PinnedPaths := original
+        RestoreActivePinnedPaths(original)
         ShowPanelMsgBox("无法保存固定项：`n" err.Message,
             "添加固定项失败", "Iconx")
     }
@@ -4521,7 +5223,7 @@ RemoveSelectionFromPinned(paths, *) {
         PopulatePanel()
         SetUserStatus("已从固定项移除：" removed " 项")
     } catch as err {
-        PinnedPaths := original
+        RestoreActivePinnedPaths(original)
         ShowPanelMsgBox("无法保存固定项：`n" err.Message,
             "移除固定项失败", "Iconx")
     }
@@ -4602,7 +5304,7 @@ PinDroppedItems(fileArray) {
         PrependPinnedPaths(newPaths)
         try SavePinnedFiles()
         catch as err {
-            PinnedPaths := originalPinnedPaths
+            RestoreActivePinnedPaths(originalPinnedPaths)
             try SavePinnedFiles()
             ShowPanelMsgBox(
                 "无法保存拖入的固定项：`n" err.Message,
@@ -4694,16 +5396,32 @@ PrependPinnedPaths(paths) {
 }
 
 SavePinnedFiles() {
+    SyncActiveWorkspacePinnedState()
     AtomicConfigEdit(WritePinnedFilesConfig)
 }
 
 WritePinnedFilesConfig(tempPath) {
-    global PinnedPaths, CONFIG_VERSION
+    global PinnedPaths, ActiveWorkspaceId, CONFIG_VERSION
     doc := OpenPopDropConfig(tempPath)
-    doc.ReplaceSection("PinnedFiles",
-        ConfigEntriesFromValues(PinnedPaths, "File"), 2)
+    WritePinnedPathsToDocument(doc,
+        "WorkspacePinned:" ActiveWorkspaceId, PinnedPaths, 3)
+    doc.SetValue("Workspaces", "PinnedScopeVersion", "1", 3)
     doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
     doc.Save()
+}
+
+SyncActiveWorkspacePinnedState() {
+    global Workspaces, ActiveWorkspaceId, PinnedPaths
+    found := FindWorkspace(ActiveWorkspaceId, Workspaces)
+    if !IsObject(found)
+        throw Error("保存固定项时找不到当前工作区。")
+    found.Value.PinnedPaths := PinnedPaths
+}
+
+RestoreActivePinnedPaths(paths) {
+    global PinnedPaths
+    PinnedPaths := paths
+    SyncActiveWorkspacePinnedState()
 }
 
 ArrayContainsPath(paths, target) {
@@ -4799,9 +5517,9 @@ OpenConfigLegacy(*) {
     sourceDouble.OnEvent("Click", SetSourceOpenModeFromDialog.Bind(
         sourceState, OPEN_MODE_DOUBLE))
 
-    saveButton := settingsGui.AddButton("xm y+20 w90 Default", "保存")
-    cancelButton := settingsGui.AddButton("x+8 yp w90", "取消")
-    advancedButton := settingsGui.AddButton("x+8 yp w150",
+    saveButton := AddUiButton(settingsGui, "xm y+20 w90 Default", "保存")
+    cancelButton := AddUiButton(settingsGui, "x+8 yp w90", "取消")
+    advancedButton := AddUiButton(settingsGui, "x+8 yp w150",
         "高级编辑 config.ini")
     saveButton.OnEvent("Click", SaveOpenFileSettings.Bind(
         settingsGui, globalDouble, globalSingle, sourceState))
@@ -5939,7 +6657,7 @@ ReorderPinnedPath(sourcePath, targetPath, placeAfter) {
 
     try SavePinnedFiles()
     catch as err {
-        PinnedPaths := originalPaths
+        RestoreActivePinnedPaths(originalPaths)
         try SavePinnedFiles()
         ShowPanelMsgBox(
             "无法保存固定项顺序：`n" err.Message,
@@ -6183,28 +6901,45 @@ PerformRecycleDelete(paths) {
 }
 
 RemoveDeletedPinnedPaths(deletedPaths) {
-    global PinnedPaths
+    global Workspaces, ActiveWorkspaceId, PinnedPaths
     if !deletedPaths.Length
         return
-    original := PinnedPaths.Clone()
-    remaining := []
-    for pinnedPath in PinnedPaths {
-        deleted := false
-        for deletedPath in deletedPaths {
-            if IsSameOrDescendantPath(pinnedPath, deletedPath) {
-                deleted := true
-                break
+    snapshots := []
+    changed := false
+    for workspace in Workspaces {
+        snapshots.Push({
+            Workspace: workspace,
+            Paths: workspace.PinnedPaths.Clone()
+        })
+        remaining := []
+        for pinnedPath in workspace.PinnedPaths {
+            deleted := false
+            for deletedPath in deletedPaths {
+                if IsSameOrDescendantPath(pinnedPath, deletedPath) {
+                    deleted := true
+                    break
+                }
             }
+            if !deleted
+                remaining.Push(pinnedPath)
         }
-        if !deleted
-            remaining.Push(pinnedPath)
+        if !PathArraysEqual(workspace.PinnedPaths, remaining) {
+            workspace.PinnedPaths := remaining
+            changed := true
+        }
     }
-    if PathArraysEqual(original, remaining)
+    if !changed
         return
-    PinnedPaths := remaining
-    try SavePinnedFiles()
+    active := FindWorkspace(ActiveWorkspaceId, Workspaces)
+    if IsObject(active)
+        PinnedPaths := active.Value.PinnedPaths
+    try SaveAllWorkspacePinnedFiles()
     catch as err {
-        PinnedPaths := original
+        for snapshot in snapshots
+            snapshot.Workspace.PinnedPaths := snapshot.Paths
+        active := FindWorkspace(ActiveWorkspaceId, Workspaces)
+        if IsObject(active)
+            PinnedPaths := active.Value.PinnedPaths
         throw err
     }
 }
@@ -6587,17 +7322,61 @@ WriteTransferTargetsConfig(tempPath) {
 }
 
 UpdatePinnedPathsAfterMove(mappings) {
-    global PinnedPaths
+    global Workspaces, ActiveWorkspaceId, PinnedPaths
+    snapshots := []
     changed := false
-    for index, pinnedPath in PinnedPaths {
-        key := PathKey(pinnedPath)
-        if mappings.Has(key) {
-            PinnedPaths[index] := mappings[key].NewPath
-            changed := true
+    for workspace in Workspaces {
+        snapshots.Push({
+            Workspace: workspace,
+            Paths: workspace.PinnedPaths.Clone()
+        })
+        for index, pinnedPath in workspace.PinnedPaths {
+            key := PathKey(pinnedPath)
+            if mappings.Has(key) {
+                workspace.PinnedPaths[index] := mappings[key].NewPath
+                changed := true
+            }
         }
     }
-    if changed
-        SavePinnedFiles()
+    if !changed
+        return
+    active := FindWorkspace(ActiveWorkspaceId, Workspaces)
+    if IsObject(active)
+        PinnedPaths := active.Value.PinnedPaths
+    try SaveAllWorkspacePinnedFiles()
+    catch as err {
+        for snapshot in snapshots
+            snapshot.Workspace.PinnedPaths := snapshot.Paths
+        active := FindWorkspace(ActiveWorkspaceId, Workspaces)
+        if IsObject(active)
+            PinnedPaths := active.Value.PinnedPaths
+        throw err
+    }
+}
+
+SaveAllWorkspacePinnedFiles() {
+    SyncActiveWorkspacePinnedState()
+    AtomicConfigEdit(WriteAllWorkspacePinnedFilesConfig)
+}
+
+WriteAllWorkspacePinnedFilesConfig(tempPath) {
+    global Workspaces, CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    for workspace in Workspaces
+        WritePinnedPathsToDocument(doc,
+            "WorkspacePinned:" workspace.Id, workspace.PinnedPaths, 3)
+    doc.SetValue("Workspaces", "PinnedScopeVersion", "1", 3)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
+}
+
+IsPathPinnedInAnyWorkspace(path) {
+    global Workspaces
+    for workspace in Workspaces {
+        if FindPathIndex(workspace.PinnedPaths, path)
+            return true
+    }
+    return false
 }
 
 CaptureViewState(operationPaths) {
@@ -6799,7 +7578,7 @@ FileOpSinkResumeTimer(this) {
 }
 
 RecordFileOperationResult(this, originalItem, hr, createdItem) {
-    global FileOperationSinks, PinnedPaths
+    global FileOperationSinks
     if !FileOperationSinks.Has(this)
         return
     state := FileOperationSinks[this].State
@@ -6821,7 +7600,7 @@ RecordFileOperationResult(this, originalItem, hr, createdItem) {
             if newPath != ""
                 state.Mappings[PathKey(originalPath)] := {
                     OldPath: originalPath, NewPath: newPath}
-            else if FindPathIndex(PinnedPaths, originalPath) {
+            else if IsPathPinnedInAnyWorkspace(originalPath) {
                 state.PinnedMappingFailures.Push(originalPath)
                 state.Details.Push(originalPath
                     "：Shell 未返回实际新路径，固定项未自动更新")
@@ -8223,6 +9002,7 @@ RunSelfTests() {
     try {
         RunConfigDocumentSelfTests()
         RunNoiseFilterSelfTests()
+        RunWorkspaceSelfTests()
         AssertSelfTest(ParseGlobalOpenFileMode("") = OPEN_MODE_DOUBLE,
             "缺失全局打开方式回退为双击")
         AssertSelfTest(ParseGlobalOpenFileMode("broken") = OPEN_MODE_DOUBLE,
@@ -8442,6 +9222,21 @@ RunSelfTests() {
     }
 }
 
+RunWorkspaceSelfTests() {
+    ids := ParseStableIdOrder(
+        "workspace-a, workspace-b,WORKSPACE-A,broken id")
+    AssertSelfTest(ids.Length = 2
+        && ids[1] = "workspace-a" && ids[2] = "workspace-b",
+        "工作区 ID 顺序去重并拒绝不安全值")
+    AssertSelfTest(IsSafeWorkspaceName("设计项目")
+        && !IsSafeWorkspaceName("")
+        && !IsSafeWorkspaceName("错误,名称"),
+        "工作区名称安全校验")
+    AssertSelfTest(IsSafeStableId("workspace-123")
+        && !IsSafeStableId("workspace:123"),
+        "稳定工作区 ID 格式")
+}
+
 RunNoiseFilterSelfTests() {
     global GlobalNoiseFilter
     global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
@@ -8596,9 +9391,9 @@ RunConfigDocumentSelfTests() {
     try {
         doc := OpenPopDropConfig(testPath)
         AssertSelfTest(doc.Dirty, "错位配置节应触发布局修复")
-        doc.ReplaceSection("PinnedFiles", [
-            {Key: "File001", Value: "C:\Temp\$1=a.txt"},
-            {Key: "File002", Value: "D:\中文\文件.txt"}
+        WritePinnedPathsToDocument(doc, "PinnedFiles", [
+            "C:\Temp\$1=a.txt",
+            "D:\中文\文件.txt"
         ], 2)
         doc.SetValue("NoiseFilter", "Enabled", "1", 1)
         doc.SetValue("NoiseFilter", "UnknownNoiseOption", "保留", 1)
@@ -8607,6 +9402,23 @@ RunConfigDocumentSelfTests() {
             {Key: "PatternCount", Value: "1"},
             {Key: "Pattern001", Value: "*.lock-marker"}
         ], 6)
+        doc.ReplaceKnownKeys("Workspaces", [
+            {Key: "Order", Value: "workspace-test"},
+            {Key: "Active", Value: "workspace-test"},
+            {Key: "PinnedScopeVersion", Value: "1"}
+        ], ["Order", "Active", "PinnedScopeVersion"], 3)
+        doc.ReplaceKnownKeys("Workspace:workspace-test", [
+            {Key: "Name", Value: "测试工作区"},
+            {Key: "SourceOrder", Value: "source-test"}
+        ], ["Name", "SourceOrder"], 3)
+        WritePinnedPathsToDocument(doc,
+            "WorkspacePinned:workspace-test",
+            ["C:\Temp\固定.txt"], 3)
+        doc.ReplaceKnownKeys("Source:source-test", [
+            {Key: "WorkspaceId", Value: "workspace-test"},
+            {Key: "Name", Value: "测试来源"},
+            {Key: "Path", Value: "C:\Temp"}
+        ], ["WorkspaceId", "Name", "Path"], 3)
         doc.Save()
 
         raw := FileRead(testPath, "RAW")
@@ -8635,6 +9447,20 @@ RunConfigDocumentSelfTests() {
         sourceIgnore := InStr(text, "[SourceIgnore:test]")
         AssertSelfTest(area6 < sourceIgnore,
             "来源附加规则配置节位于扫描规则区域")
+        workspaces := InStr(text, "[Workspaces]")
+        workspace := InStr(text, "[Workspace:workspace-test]")
+        workspacePinned := InStr(text,
+            "[WorkspacePinned:workspace-test]")
+        source := InStr(text, "[Source:source-test]")
+        sources := InStr(text, "[Sources]")
+        AssertSelfTest(area3 < workspaces && workspaces < workspace
+            && workspace < workspacePinned
+            && workspacePinned < sources && sources < source,
+            "工作区、固定项和来源稳定 ID 节位于第三区并按固定顺序排列")
+        AssertSelfTest(InStr(text, "PinnedScopeVersion=1")
+            && InStr(text, "File001=C:\Temp\固定.txt",
+                false, workspacePinned),
+            "工作区固定项和迁移标记写入")
         AssertSelfTest(InStr(text, "UnknownNoiseOption=保留"),
             "噪音过滤节未知配置项保留")
         AssertSelfTest(InStr(text, "; HideHidden：是否排除具有 Hidden 属性的文件。")

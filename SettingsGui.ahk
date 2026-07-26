@@ -7,7 +7,7 @@ OpenConfig(*) {
 }
 
 OpenSettingsGui() {
-    global Panel, SettingsDialog
+    global Panel, SettingsDialog, SettingsController
 
     CancelFilePointerGesture()
     if IsObject(SettingsDialog) {
@@ -39,10 +39,26 @@ OpenSettingsGui() {
         Child: 0,
         ClosingAfterSave: false
     }
+    SettingsController := controller
     SettingsDialog := guiObj
 
-    tabs := guiObj.AddTab3("xm ym w852 h636",
-        ["常规", "文件来源", "文件操作", "过滤与显示"])
+    navigation := guiObj.AddTreeView("xm ym w156 h636 +0x20")
+    sharedRoot := navigation.Add("共享设置", 0, "Expand")
+    navGeneral := navigation.Add("通用", sharedRoot)
+    navOperations := navigation.Add("打开与文件操作", sharedRoot)
+    navDisplay := navigation.Add("显示与过滤", sharedRoot)
+    workspaceRoot := navigation.Add("工作区设置", 0, "Expand")
+    navWorkspace := navigation.Add("当前工作区", workspaceRoot)
+    controller.Navigation := navigation
+    controller.NavPages := Map(
+        navGeneral, 1, navWorkspace, 2, navOperations, 3, navDisplay, 4)
+    controller.NavItems := Map(
+        1, navGeneral, 2, navWorkspace, 3, navOperations, 4, navDisplay)
+    ; Tab3 remains the native page host, but its duplicate tab strip is placed
+    ; above the client area. The TreeView is the only visible page navigation.
+    tabs := guiObj.AddTab3("x184 y-26 w852 h674 -Tabstop",
+        ["共享设置 · 通用", "当前工作区",
+         "共享设置 · 打开与文件操作", "共享设置 · 显示与过滤"])
     controller.Tab := tabs
     BuildGeneralSettingsPage(controller, tabs)
     BuildSourcesSettingsPage(controller, tabs)
@@ -50,18 +66,26 @@ OpenSettingsGui() {
     BuildDisplaySettingsPage(controller, tabs)
     tabs.UseTab()
 
+    ; Tab3's hidden header otherwise leaves its white page background touching
+    ; the title bar. This native, non-focusable spacer restores the same top
+    ; margin as the navigation TreeView and keeps the exposed area gray.
+    guiObj.AddProgress(
+        "x184 y0 w852 h12 -Smooth -Theme BackgroundF0F0F0 cF0F0F0", 100)
+
     ; Footer controls must use an absolute Y below the Tab3 rectangle.
     ; A relative y+ value would be based on the last control created on the
     ; active tab page, placing the footer underneath Tab3 where it is visible
     ; but cannot receive mouse input.
-    advanced := guiObj.AddButton("xm y660 w112 h30", "高级设置…")
+    advanced := AddUiButton(guiObj, "x184 y660 w112", "高级设置…")
     guiObj.AddText("x+8 yp+7 w400 c666666",
         "直接编辑 config.ini，适合高级用户。")
-    cancel := guiObj.AddButton("x690 yp-7 w78 h30", "取消")
-    save := guiObj.AddButton("x+8 yp w78 h30 Default", "保存")
+    cancel := AddUiButton(guiObj, "x860 yp-7 w78", "取消")
+    save := AddUiButton(guiObj, "x+8 yp w78 Default", "保存")
     advanced.OnEvent("Click", AdvancedSettingsClicked.Bind(controller))
     cancel.OnEvent("Click", RequestCloseSettings.Bind(controller))
     save.OnEvent("Click", SaveSettingsDraft.Bind(controller))
+    navigation.OnEvent(
+        "ItemSelect", SettingsNavigationSelected.Bind(controller))
     tabs.OnEvent("Change", SettingsTabChanged.Bind(controller))
     guiObj.OnEvent("Close", RequestCloseSettings.Bind(controller))
     guiObj.OnEvent("Escape", RequestCloseSettings.Bind(controller))
@@ -72,7 +96,15 @@ OpenSettingsGui() {
     RefreshExcludedNameList(controller)
     LoadGeneralControls(controller)
     LoadDisplayControls(controller)
-    guiObj.Show("w880 h704")
+    navigation.Modify(navGeneral, "Select Vis")
+    guiObj.Show("w1050 h704")
+}
+
+SettingsNavigationSelected(c, tree, item) {
+    if !c.NavPages.Has(item)
+        return
+    CommitCurrentSourceControlsToDraft(c)
+    c.Tab.Choose(c.NavPages[item])
 }
 
 LoadSettingsIntoDraft() {
@@ -80,13 +112,26 @@ LoadSettingsIntoDraft() {
     global ShowRecentSidebar, RecentFileCount, MaxFilesPerFolder, SortMode
     global LastValidFolderSettings, OpenApps, TransferFavorites, RecentTargets
     global TransferFavoriteLabels, GlobalExcludedFolderNames
-    global GlobalNoiseFilter
+    global GlobalNoiseFilter, Workspaces, ActiveWorkspaceId
     global TransferUrlFallbackEnabled, TransferAllowHttp
     global TransferMaxConcurrent, TransferShowNotifications
 
-    sources := []
-    for source in LastValidFolderSettings
-        sources.Push(CloneSettingsSource(source))
+    workspaceDrafts := []
+    activeSources := []
+    for workspace in Workspaces {
+        sources := []
+        for source in workspace.Sources
+            sources.Push(CloneSettingsSource(source))
+        workspaceDraft := {
+            Id: workspace.Id,
+            Name: workspace.Name,
+            Sources: sources,
+            PinnedPaths: workspace.PinnedPaths.Clone()
+        }
+        workspaceDrafts.Push(workspaceDraft)
+        if StrLower(workspace.Id) = StrLower(ActiveWorkspaceId)
+            activeSources := sources
+    }
     apps := []
     for app in OpenApps
         apps.Push(CloneSettingsApplication(app))
@@ -127,12 +172,24 @@ LoadSettingsIntoDraft() {
                 HideIncompleteDownloads: GlobalNoiseFilter.HideIncompleteDownloads,
                 CustomPatternTexts: GlobalNoiseFilter.CustomPatternTexts.Clone()}
         },
-        Sources: sources,
+        Workspaces: workspaceDrafts,
+        CurrentWorkspaceId: ActiveWorkspaceId,
+        Sources: activeSources,
         Applications: apps,
         CommonDestinations: destinations,
         RecentDestinations: RecentTargets.Clone(),
         GlobalExcludedNames: GlobalExcludedFolderNames.Clone()
     }
+}
+
+FindDraftWorkspace(c, workspaceId := "") {
+    if workspaceId = ""
+        workspaceId := c.Draft.CurrentWorkspaceId
+    for index, workspace in c.Draft.Workspaces {
+        if StrLower(workspace.Id) = StrLower(workspaceId)
+            return {Index: index, Value: workspace}
+    }
+    return 0
 }
 
 ReadGlobalDisplayScopeForDraft() {
@@ -270,36 +327,36 @@ CloneSettingsApplication(app) {
 BuildGeneralSettingsPage(c, tabs) {
     tabs.UseTab(1)
     g := c.Gui
-    g.AddGroupBox("x30 y55 w818 h142", "打开文件")
-    c.GlobalDouble := g.AddRadio("x50 y84 Group", "双击（默认）")
-    c.GlobalSingle := g.AddRadio("x180 yp", "单击")
-    g.AddText("x50 y120 w770 h70 c555555",
+    g.AddGroupBox("x200 y29 w818 h142", "打开文件 · 应用于所有工作区")
+    c.GlobalDouble := g.AddRadio("x220 y58 Group", "双击（默认）")
+    c.GlobalSingle := g.AddRadio("x350 yp", "单击")
+    g.AddText("x220 y94 w770 h70 c555555",
         "单击会立即打开文件。按住 Ctrl 或 Shift 可以多选，拖拽不受影响；"
         . "文件夹仍然需要双击打开。"
-        . "`n可在「文件来源」页中对每个文件夹单独配置单击或双击打开方式。")
+        . "`n可在「当前工作区」页中为每个来源单独配置打开方式。")
 
-    g.AddGroupBox("x30 y211 w818 h112", "快捷键")
-    g.AddText("x50 y246 w150", "呼出/隐藏 PopDrop：")
-    c.Hotkey := g.AddHotkey("x205 yp-4 w220")
-    g.AddText("x445 yp+4 w360 c666666",
+    g.AddGroupBox("x200 y185 w818 h112", "快捷键 · 应用于所有工作区")
+    g.AddText("x220 y220 w150", "呼出/隐藏 PopDrop：")
+    c.Hotkey := g.AddHotkey("x375 yp-4 w220 h26")
+    g.AddText("x615 yp+4 w360 c666666",
         "保存时会先验证新快捷键是否可注册。")
 
-    g.AddGroupBox("x30 y337 w818 h156", "窗口")
-    g.AddText("x50 y372 w150", "窗口显示方式：")
-    c.WindowMode := g.AddDropDownList("x205 yp-4 w260 Choose1",
+    g.AddGroupBox("x200 y311 w818 h156", "窗口 · 应用于所有工作区")
+    g.AddText("x220 y346 w150", "窗口显示方式：")
+    c.WindowMode := AddUiDropDownList(g, "x375 yp-4 w260 Choose1",
         ["始终置顶", "临时置顶（失去焦点后隐藏）", "普通窗口"])
-    c.EscapeHide := g.AddCheckBox("x50 y420",
+    c.EscapeHide := g.AddCheckBox("x220 y394",
         "按 Esc 隐藏 PopDrop")
 
-    g.AddGroupBox("x30 y507 w818 h116", "下载")
-    c.EnableUrlFallback := g.AddCheckBox("x50 y536",
+    g.AddGroupBox("x200 y481 w818 h116", "下载 · 应用于所有工作区")
+    c.EnableUrlFallback := g.AddCheckBox("x220 y510",
         "允许公开 HTTPS 文件 URL 作为最后兜底")
-    c.AllowHttp := g.AddCheckBox("x410 yp",
+    c.AllowHttp := g.AddCheckBox("x580 yp",
         "允许不加密 HTTP（不推荐）")
-    g.AddText("x50 y576 w118", "后台最大并发：")
-    c.TransferMax := g.AddEdit("x170 yp-4 w62 Number")
-    g.AddText("x240 yp+4 w100 c666666", "（1–6）")
-    c.TransferNotify := g.AddCheckBox("x410 yp",
+    g.AddText("x220 y550 w118", "后台最大并发：")
+    c.TransferMax := AddUiEdit(g, "x340 yp-4 w62 Number")
+    g.AddText("x410 yp+4 w100 c666666", "（1–6）")
+    c.TransferNotify := g.AddCheckBox("x580 yp",
         "面板隐藏时显示批次完成通知")
 
     c.GlobalDouble.OnEvent("Click", GeneralControlChanged.Bind(c))
@@ -316,57 +373,66 @@ BuildGeneralSettingsPage(c, tabs) {
 BuildSourcesSettingsPage(c, tabs) {
     tabs.UseTab(2)
     g := c.Gui
+    g.AddGroupBox("x200 y29 w818 h66", "当前工作区")
+    g.AddText("x220 y54 w86", "当前工作区：")
+    c.WorkspaceDropDown := AddUiDropDownList(g, "x310 yp-4 w110", [])
+    c.WorkspaceManage := AddUiButton(g, "x+10 yp w130", "管理工作区…")
+    c.WorkspaceScopeHint := g.AddText("x580 yp+4 w405 c555555", "")
     c.SourceList := g.AddListView(
-        "x30 y55 w818 h174 Report -Multi NoSortHdr",
+        "x200 y106 w818 h110 Report -Multi NoSortHdr",
         ["来源", "路径", "状态"])
     c.SourceList.ModifyCol(1, 155)
     c.SourceList.ModifyCol(2, 510)
     c.SourceList.ModifyCol(3, 125)
-    c.SourceAdd := g.AddButton("x30 y239 w88", "添加来源")
-    c.SourceRemove := g.AddButton("x+7 yp w72", "移除")
-    c.SourceUp := g.AddButton("x+7 yp w72", "上移")
-    c.SourceDown := g.AddButton("x+7 yp w72", "下移")
+    c.SourceAdd := AddUiButton(g, "x200 y226 w88", "添加来源")
+    c.SourceRemove := AddUiButton(g, "x+7 yp w72", "移除")
+    c.SourceUp := AddUiButton(g, "x+7 yp w72", "上移")
+    c.SourceDown := AddUiButton(g, "x+7 yp w72", "下移")
 
-    g.AddGroupBox("x30 y280 w818 h354", "来源设置")
-    g.AddText("x50 y315 w70", "名称：")
-    c.SourceName := g.AddEdit("x122 yp-4 w300")
-    g.AddText("x450 yp+4 w90", "文件夹类型：")
-    c.SourceType := g.AddDropDownList("x540 yp-4 w275",
+    g.AddGroupBox("x200 y264 w818 h362", "来源设置")
+    g.AddText("x220 y299 w70", "名称：")
+    c.SourceName := AddUiEdit(g, "x292 yp-4 w300")
+    g.AddText("x620 yp+4 w90", "文件夹类型：")
+    c.SourceType := AddUiDropDownList(g, "x710 yp-4 w275",
         ["普通文件夹（Files）", "启动器文件夹（Launcher）"])
-    g.AddText("x50 y353 w70", "文件夹：")
-    c.SourcePath := g.AddEdit("x122 yp-4 w532")
-    c.SourceBrowse := g.AddButton("x+7 yp w70", "浏览…")
-    c.SourceOpen := g.AddButton("x+7 yp w62", "打开")
-    g.AddText("x50 y391 w100", "显示内容：")
-    c.SourceScope := g.AddDropDownList("x154 yp-4 w420",
+    g.AddText("x220 y337 w70", "文件夹：")
+    c.SourcePath := AddUiEdit(g, "x292 yp-4 w532")
+    c.SourceBrowse := AddUiButton(g, "x+7 yp w70", "浏览…")
+    c.SourceOpen := AddUiButton(g, "x+7 yp w62", "打开")
+    g.AddText("x220 y375 w100", "显示内容：")
+    c.SourceScope := AddUiDropDownList(g, "x324 yp-4 w420",
         ["仅当前文件夹中的文件",
          "当前文件夹中的文件和子文件夹",
          "包含所有子文件夹中的文件，并平铺显示"])
-    g.AddText("x50 y429 w100", "打开文件：")
-    c.SourceOpenMode := g.AddDropDownList("x154 yp-4 w420",
-        ["跟随全局设置（当前：双击）", "单击", "双击"])
-    g.AddText("x50 y467 w100", "文件夹排序：")
-    c.SourceFolderTime := g.AddDropDownList("x154 yp-4 w250",
+    g.AddText("x220 y413 w100", "打开文件：")
+    c.SourceOpenMode := AddUiDropDownList(g, "x324 yp-4 w420",
+        ["使用共享默认值（当前：双击）", "单击", "双击"])
+    g.AddText("x220 y451 w100", "文件夹排序：")
+    c.SourceFolderTime := AddUiDropDownList(g, "x324 yp-4 w250",
         ["文件夹修改时间", "文件夹内最新内容时间"])
-    c.SourceFolderTimeHint := g.AddText("x420 yp+4 w330 c666666",
+    c.SourceFolderTimeHint := g.AddText("x590 yp+4 w330 c666666",
         "仅在直接显示子文件夹时生效")
-    g.AddText("x50 y505 w100", "显示数量：")
-    c.SourceMax := g.AddEdit("x154 yp-4 w90 Number")
-    g.AddText("x250 yp+4 w190 c666666", "0 表示显示全部")
-    g.AddText("x460 yp+4 w70", "排序：")
-    c.SourceSort := g.AddDropDownList("x530 yp-4 w220",
+    g.AddText("x220 y489 w100", "显示数量：")
+    c.SourceMax := AddUiEdit(g, "x324 yp-4 w90 Number")
+    g.AddText("x420 yp+4 w190 c666666", "0 表示显示全部")
+    g.AddText("x630 yp+4 w70", "排序：")
+    c.SourceSort := AddUiDropDownList(g, "x700 yp-4 w220",
         ["修改时间（最新在前）", "名称（升序）"])
-    g.AddText("x50 y543 w100", "排除噪音文件：")
-    c.SourceNoiseMode := g.AddDropDownList("x154 yp-4 w250",
-        ["跟随全局设置", "启用", "禁用"])
-    c.SourceNoiseRules := g.AddButton("x420 yp w132", "附加忽略规则…")
-    c.SourceNoiseRuleCount := g.AddText("x565 yp+4 w180 c666666", "0 条附加规则")
-    c.ExcludedCount := g.AddText("x50 y581 w190", "排除子文件夹：0 个")
-    c.ManageExcluded := g.AddButton("x240 yp-5 w82", "管理…")
-    c.AllowedCount := g.AddText("x390 yp+5 w220", "允许覆盖全局排除：0 个")
-    c.ManageAllowed := g.AddButton("x618 yp-5 w82", "管理…")
-    c.SourceStatus := g.AddText("x50 y612 w760 h18 c666666", "")
+    g.AddText("x220 y527 w100", "排除噪音文件：")
+    c.SourceNoiseMode := AddUiDropDownList(g, "x324 yp-4 w250",
+        ["使用共享默认值", "启用", "禁用"])
+    c.SourceNoiseRules := AddUiButton(g, "x590 yp w132", "附加忽略规则…")
+    c.SourceNoiseRuleCount := g.AddText("x735 yp+4 w180 c666666", "0 条附加规则")
+    c.ExcludedCount := g.AddText("x220 y565 w190", "排除子文件夹：0 个")
+    c.ManageExcluded := AddUiButton(g, "x410 yp-5 w82", "管理…")
+    c.AllowedCount := g.AddText("x560 yp+5 w220", "允许覆盖共享排除：0 个")
+    c.ManageAllowed := AddUiButton(g, "x788 yp-5 w82", "管理…")
+    c.SourceStatus := g.AddText("x220 y600 w760 h18 c666666", "")
 
+    c.WorkspaceDropDown.OnEvent(
+        "Change", SettingsWorkspaceChanged.Bind(c))
+    c.WorkspaceManage.OnEvent(
+        "Click", OpenWorkspaceManager.Bind(c))
     c.SourceList.OnEvent("ItemSelect", SourceSelected.Bind(c))
     c.SourceAdd.OnEvent("Click", AddSourceToDraft.Bind(c))
     c.SourceRemove.OnEvent("Click", RemoveSourceFromDraft.Bind(c))
@@ -384,38 +450,335 @@ BuildSourcesSettingsPage(c, tabs) {
         c.SourceOpenMode, c.SourceFolderTime, c.SourceMax, c.SourceSort,
         c.SourceNoiseMode]
         ctrl.OnEvent("Change", SourceControlChanged.Bind(c))
+    RefreshSettingsWorkspaceControls(c)
+}
+
+RefreshSettingsWorkspaceControls(c) {
+    if !HasProp(c, "WorkspaceDropDown")
+        return
+    c.WorkspaceIds := []
+    names := []
+    selected := 1
+    for index, workspace in c.Draft.Workspaces {
+        names.Push(workspace.Name)
+        c.WorkspaceIds.Push(workspace.Id)
+        if StrLower(workspace.Id)
+            = StrLower(c.Draft.CurrentWorkspaceId)
+            selected := index
+    }
+    c.Loading := true
+    try {
+        ReplaceUiDropDownItems(c.WorkspaceDropDown, names)
+        if names.Length
+            c.WorkspaceDropDown.Choose(selected)
+        found := FindDraftWorkspace(c)
+        if IsObject(found) {
+            c.Draft.Sources := found.Value.Sources
+            c.WorkspaceScopeHint.Text := "以下修改只影响“"
+                . found.Value.Name "”。"
+        }
+    } finally c.Loading := false
+    c.SelectedSourceId := ""
+    RefreshSourceList(c)
+}
+
+SettingsWorkspaceChanged(c, control, *) {
+    if c.Loading
+        return
+    index := control.Value
+    if index < 1 || index > c.WorkspaceIds.Length
+        return
+    targetId := c.WorkspaceIds[index]
+    if !RequestSettingsWorkspaceSwitch(c, targetId, "settings")
+        RefreshSettingsWorkspaceControls(c)
+}
+
+RequestSettingsWorkspaceSwitch(c, workspaceId, origin := "settings") {
+    if StrLower(workspaceId) = StrLower(c.Draft.CurrentWorkspaceId)
+        return true
+    if SettingsDraftHasChanges(c) {
+        answer := SettingsMessage(c,
+            "设置尚未保存。`n`n"
+            . "“是”：保存并切换`n"
+            . "“否”：放弃修改并切换`n"
+            . "“取消”：留在当前工作区",
+            "切换工作区", "YesNoCancel Icon!")
+        if answer = "Cancel"
+            return false
+        if answer = "Yes" {
+            if !SaveSettingsDraftCore(c, false)
+                return false
+        } else {
+            ReloadSettingsDraft(c)
+        }
+    }
+    if !ActivateWorkspace(workspaceId)
+        return false
+    ReloadSettingsDraft(c)
+    return true
+}
+
+ReloadSettingsDraft(c) {
+    c.Draft := LoadSettingsIntoDraft()
+    c.OriginalSignature := SettingsDraftSignature(c.Draft)
+    c.SelectedSourceId := ""
+    c.SelectedAppId := ""
+    c.SelectedTargetId := ""
+    LoadGeneralControls(c)
+    LoadDisplayControls(c)
+    RefreshSettingsWorkspaceControls(c)
+    RefreshApplicationList(c)
+    RefreshDestinationList(c)
+    RefreshExcludedNameList(c)
+}
+
+OpenWorkspaceManager(c, *) {
+    if IsObject(c.Child)
+        return
+    if SettingsDraftHasChanges(c) {
+        answer := SettingsMessage(c,
+            "设置尚未保存。`n`n"
+            . "“是”：保存后管理工作区`n"
+            . "“否”：放弃修改后管理工作区`n"
+            . "“取消”：返回设置",
+            "管理工作区", "YesNoCancel Icon!")
+        if answer = "Cancel"
+            return
+        if answer = "Yes" {
+            if !SaveSettingsDraftCore(c, false)
+                return
+        } else {
+            ReloadSettingsDraft(c)
+        }
+    }
+    child := Gui("+Owner" c.Gui.Hwnd " -MaximizeBox -MinimizeBox",
+        "管理工作区")
+    c.Child := child
+    child.SetFont("s9", "Microsoft YaHei UI")
+    child.MarginX := 14
+    child.MarginY := 12
+    child.AddText("xm ym w570",
+        "工作区只保存文件来源及来源专属设置；其他设置应用于所有工作区。")
+    list := child.AddListView("xm y+10 w570 h250 Report -Multi NoSortHdr",
+        ["工作区", "来源数量", "状态"])
+    list.ModifyCol(1, 300)
+    list.ModifyCol(2, 100)
+    list.ModifyCol(3, 130)
+    add := AddUiButton(child, "xm y+10 w92", "新建工作区")
+    copy := AddUiButton(child, "x+7 yp w112", "复制当前工作区")
+    rename := AddUiButton(child, "x+7 yp w72", "重命名")
+    remove := AddUiButton(child, "x+7 yp w72", "删除")
+    close := AddUiButton(child, "x500 yp w70 Default", "关闭")
+    refresh := (*) => RefreshWorkspaceManagerList(c, list)
+    add.OnEvent("Click", CreateWorkspaceFromManager.Bind(c, list))
+    copy.OnEvent("Click", CopyWorkspaceFromManager.Bind(c, list))
+    rename.OnEvent("Click", RenameWorkspaceFromManager.Bind(c, list))
+    remove.OnEvent("Click", DeleteWorkspaceFromManager.Bind(c, list))
+    close.OnEvent("Click", CloseSettingsChild.Bind(c, child))
+    child.OnEvent("Close", CloseSettingsChild.Bind(c, child))
+    child.OnEvent("Escape", CloseSettingsChild.Bind(c, child))
+    refresh()
+    c.Gui.Opt("+Disabled")
+    child.Show("w598 h346")
+}
+
+RefreshWorkspaceManagerList(c, list) {
+    list.Delete()
+    selected := 0
+    for index, workspace in c.Draft.Workspaces {
+        current := StrLower(workspace.Id)
+            = StrLower(c.Draft.CurrentWorkspaceId)
+        row := list.Add("", workspace.Name, workspace.Sources.Length,
+            current ? "当前工作区" : "")
+        if current
+            selected := row
+    }
+    if selected
+        list.Modify(selected, "Select Focus Vis")
+}
+
+ValidateWorkspaceNameForDraft(c, name, ignoredId := "") {
+    name := Trim(name)
+    if !IsSafeWorkspaceName(name)
+        return "名称不能为空、不能超过 80 个字符，也不能包含 [ ] = , 或换行。"
+    for workspace in c.Draft.Workspaces {
+        if workspace.Id != ignoredId
+            && StrLower(workspace.Name) = StrLower(name)
+            return "工作区名称已存在（名称不区分大小写）。"
+    }
+    return ""
+}
+
+PromptWorkspaceName(c, title, initial := "", ignoredId := "") {
+    if IsObject(c.Child)
+        c.Child.Opt("+OwnDialogs")
+    else
+        c.Gui.Opt("+OwnDialogs")
+    result := InputBox("请输入工作区名称：", title,
+        "w430 h140", initial)
+    if result.Result != "OK"
+        return ""
+    name := Trim(result.Value)
+    errorText := ValidateWorkspaceNameForDraft(c, name, ignoredId)
+    if errorText != "" {
+        SettingsMessage(c, errorText, "工作区名称无效", "Icon!")
+        return ""
+    }
+    return name
+}
+
+CreateWorkspaceFromManager(c, list, *) {
+    name := PromptWorkspaceName(c, "新建工作区")
+    if name = ""
+        return
+    answer := SettingsMessage(c,
+        "如何创建“" name "”？`n`n"
+        . "“是”：复制当前工作区（推荐）`n"
+        . "“否”：创建空白工作区`n"
+        . "“取消”：不创建",
+        "新建工作区", "YesNoCancel Icon!")
+    if answer = "Cancel"
+        return
+    current := FindDraftWorkspace(c)
+    sources := []
+    pinnedPaths := []
+    if answer = "Yes" && IsObject(current) {
+        for source in current.Value.Sources {
+            clone := CloneSettingsSource(source)
+            clone.SourceId := NewStableId("source")
+            clone.OriginalName := clone.Name
+            sources.Push(clone)
+        }
+        pinnedPaths := current.Value.PinnedPaths.Clone()
+    }
+    workspace := {Id: NewStableId("workspace"),
+        Name: name, Sources: sources, PinnedPaths: pinnedPaths}
+    c.Draft.Workspaces.Push(workspace)
+    c.Draft.CurrentWorkspaceId := workspace.Id
+    c.Draft.Sources := workspace.Sources
+    if SaveSettingsDraftCore(c, false) {
+        ReloadSettingsDraft(c)
+        RefreshWorkspaceManagerList(c, list)
+    }
+}
+
+CopyWorkspaceFromManager(c, list, *) {
+    current := FindDraftWorkspace(c)
+    if !IsObject(current)
+        return
+    baseName := current.Value.Name " 副本"
+    suffix := 2
+    name := baseName
+    while ValidateWorkspaceNameForDraft(c, name) != ""
+        name := baseName " " suffix++
+    sources := []
+    for source in current.Value.Sources {
+        clone := CloneSettingsSource(source)
+        clone.SourceId := NewStableId("source")
+        clone.OriginalName := clone.Name
+        sources.Push(clone)
+    }
+    pinnedPaths := current.Value.PinnedPaths.Clone()
+    workspace := {Id: NewStableId("workspace"),
+        Name: name, Sources: sources, PinnedPaths: pinnedPaths}
+    c.Draft.Workspaces.Push(workspace)
+    c.Draft.CurrentWorkspaceId := workspace.Id
+    c.Draft.Sources := workspace.Sources
+    if SaveSettingsDraftCore(c, false) {
+        ReloadSettingsDraft(c)
+        RefreshWorkspaceManagerList(c, list)
+    }
+}
+
+RenameWorkspaceFromManager(c, list, *) {
+    row := list.GetNext(0, "F")
+    if !row
+        row := list.GetNext()
+    if !row || row > c.Draft.Workspaces.Length
+        return
+    target := c.Draft.Workspaces[row]
+    name := PromptWorkspaceName(c, "重命名工作区",
+        target.Name, target.Id)
+    if name = ""
+        return
+    target.Name := name
+    if SaveSettingsDraftCore(c, false) {
+        ReloadSettingsDraft(c)
+        RefreshWorkspaceManagerList(c, list)
+    }
+}
+
+DeleteWorkspaceFromManager(c, list, *) {
+    if c.Draft.Workspaces.Length <= 1 {
+        SettingsMessage(c, "至少需要保留一个工作区，不能删除最后一个工作区。",
+            "无法删除", "Icon!")
+        return
+    }
+    row := list.GetNext(0, "F")
+    if !row
+        row := list.GetNext()
+    if !row || row > c.Draft.Workspaces.Length
+        return
+    target := c.Draft.Workspaces[row]
+    current := StrLower(target.Id)
+        = StrLower(c.Draft.CurrentWorkspaceId)
+    nextWorkspace := 0
+    if current {
+        nextWorkspace := row = 1
+            ? c.Draft.Workspaces[2] : c.Draft.Workspaces[1]
+        message := "要删除当前工作区“" target.Name "”吗？`n`n"
+            . "删除后将切换到“" nextWorkspace.Name "”。"
+    } else {
+        message := "要删除工作区“" target.Name "”吗？"
+    }
+    message .= "`n`n这不会删除任何真实文件或共享设置；"
+        . "只会移除该工作区的来源和固定项记录。"
+    if SettingsMessage(c, message, "删除工作区",
+        "YesNo Icon!") != "Yes"
+        return
+    c.Draft.Workspaces.RemoveAt(row)
+    if current {
+        c.Draft.CurrentWorkspaceId := nextWorkspace.Id
+        c.Draft.Sources := nextWorkspace.Sources
+    }
+    if SaveSettingsDraftCore(c, false) {
+        ReloadSettingsDraft(c)
+        RefreshWorkspaceManagerList(c, list)
+    }
 }
 
 BuildOperationsSettingsPage(c, tabs) {
     tabs.UseTab(3)
     g := c.Gui
-    g.AddGroupBox("x30 y55 w818 h270", "打开文件的软件")
-    c.AppList := g.AddListView("x50 y82 w778 h174 Report -Multi NoSortHdr",
+    g.AddGroupBox("x200 y29 w818 h270",
+        "打开文件的软件 · 应用于所有工作区")
+    c.AppList := g.AddListView("x220 y56 w778 h174 Report -Multi NoSortHdr",
         ["名称", "程序", "适用文件", "状态"])
     c.AppList.ModifyCol(1, 135)
     c.AppList.ModifyCol(2, 400)
     c.AppList.ModifyCol(3, 135)
     c.AppList.ModifyCol(4, 100)
-    c.AppAdd := g.AddButton("x50 y266 w88", "添加软件")
-    c.AppEdit := g.AddButton("x+7 yp w72", "编辑")
-    c.AppRemove := g.AddButton("x+7 yp w72", "移除")
-    c.AppUp := g.AddButton("x+7 yp w72", "上移")
-    c.AppDown := g.AddButton("x+7 yp w72", "下移")
+    c.AppAdd := AddUiButton(g, "x220 y240 w88", "添加软件")
+    c.AppEdit := AddUiButton(g, "x+7 yp w72", "编辑")
+    c.AppRemove := AddUiButton(g, "x+7 yp w72", "移除")
+    c.AppUp := AddUiButton(g, "x+7 yp w72", "上移")
+    c.AppDown := AddUiButton(g, "x+7 yp w72", "下移")
 
-    g.AddGroupBox("x30 y338 w818 h272", "复制和移动的常用位置")
-    c.TargetList := g.AddListView("x50 y365 w778 h153 Report -Multi NoSortHdr",
+    g.AddGroupBox("x200 y312 w818 h272",
+        "复制和移动的常用位置 · 应用于所有工作区")
+    c.TargetList := g.AddListView("x220 y339 w778 h153 Report -Multi NoSortHdr",
         ["名称", "路径", "状态"])
     c.TargetList.ModifyCol(1, 165)
     c.TargetList.ModifyCol(2, 505)
     c.TargetList.ModifyCol(3, 105)
-    c.TargetAdd := g.AddButton("x50 y528 w88", "添加位置")
-    c.TargetEdit := g.AddButton("x+7 yp w72", "编辑")
-    c.TargetRemove := g.AddButton("x+7 yp w72", "移除")
-    c.TargetUp := g.AddButton("x+7 yp w72", "上移")
-    c.TargetDown := g.AddButton("x+7 yp w72", "下移")
-    c.RecentTargetCount := g.AddText("x555 yp+7 w145",
+    c.TargetAdd := AddUiButton(g, "x220 y502 w88", "添加位置")
+    c.TargetEdit := AddUiButton(g, "x+7 yp w72", "编辑")
+    c.TargetRemove := AddUiButton(g, "x+7 yp w72", "移除")
+    c.TargetUp := AddUiButton(g, "x+7 yp w72", "上移")
+    c.TargetDown := AddUiButton(g, "x+7 yp w72", "下移")
+    c.RecentTargetCount := g.AddText("x725 yp+7 w145",
         "最近目标：0 个")
-    c.ClearRecentTargets := g.AddButton("x705 yp w98", "清空记录")
+    c.ClearRecentTargets := AddUiButton(g, "x875 yp w98", "清空记录")
 
     c.AppList.OnEvent("ItemSelect", ApplicationSelected.Bind(c))
     c.AppAdd.OnEvent("Click", OpenApplicationEditor.Bind(c, 0))
@@ -435,35 +798,36 @@ BuildOperationsSettingsPage(c, tabs) {
 BuildDisplaySettingsPage(c, tabs) {
     tabs.UseTab(4)
     g := c.Gui
-    g.AddGroupBox("x30 y55 w818 h330", "全局排除的文件夹名称")
+    g.AddGroupBox("x200 y29 w818 h330", "共享排除的文件夹名称")
     c.ExcludedNameList := g.AddListView(
-        "x50 y82 w410 h238 Report -Multi NoSortHdr", ["文件夹名称"])
+        "x220 y56 w410 h238 Report -Multi NoSortHdr", ["文件夹名称"])
     c.ExcludedNameList.ModifyCol(1, 385)
-    c.ExcludedNameAdd := g.AddButton("x480 y82 w88", "添加")
-    c.ExcludedNameRemove := g.AddButton("xp y+8 w88", "移除")
-    c.ExcludedNameRestore := g.AddButton("xp y+8 w112", "恢复推荐值")
-    g.AddText("x480 y214 w325 h88 c555555",
+    c.ExcludedNameAdd := AddUiButton(g, "x650 y56 w88", "添加")
+    c.ExcludedNameRemove := AddUiButton(g, "xp y+8 w88", "移除")
+    c.ExcludedNameRestore := AddUiButton(g, "xp y+8 w112", "恢复推荐值")
+    g.AddText("x650 y188 w325 h88 c555555",
         "匹配的文件夹及其内容不会显示。明确添加为监控来源的文件夹"
         . "不受此规则影响。只支持精确文件夹名称，不使用通配符。")
 
-    g.AddGroupBox("x30 y398 w818 h206", "显示")
-    g.AddText("x50 y433 w150", "每个来源最多显示：")
-    c.GlobalMax := g.AddEdit("x210 yp-4 w82 Number")
-    g.AddText("x300 yp+4 w150 c666666", "个项目（1–100）")
-    g.AddText("x50 y471 w150", "文件排序：")
-    c.GlobalSort := g.AddDropDownList("x210 yp-4 w245",
+    g.AddGroupBox("x200 y372 w818 h206",
+        "显示 · 应用于所有工作区")
+    g.AddText("x220 y407 w150", "每个来源最多显示：")
+    c.GlobalMax := AddUiEdit(g, "x380 yp-4 w82 Number")
+    g.AddText("x470 yp+4 w150 c666666", "个项目（1–100）")
+    g.AddText("x220 y445 w150", "文件排序：")
+    c.GlobalSort := AddUiDropDownList(g, "x380 yp-4 w245",
         ["修改时间（最新在前）", "名称（升序）"])
-    c.ShowRecent := g.AddCheckBox("x50 y513", "显示最近文件区域")
-    g.AddText("x250 yp+3 w86", "显示数量：")
-    c.RecentCount := g.AddEdit("x338 yp-4 w82 Number")
-    g.AddText("x430 yp+4 w120 c666666", "（1–100）")
-    c.NoiseFilterEnabled := g.AddCheckBox("x50 y552",
+    c.ShowRecent := g.AddCheckBox("x220 y487", "显示最近文件区域")
+    g.AddText("x420 yp+3 w86", "显示数量：")
+    c.RecentCount := AddUiEdit(g, "x508 yp-4 w82 Number")
+    g.AddText("x600 yp+4 w120 c666666", "（1–100）")
+    c.NoiseFilterEnabled := g.AddCheckBox("x220 y526",
         "隐藏常见临时、锁定及系统文件（推荐）")
-    c.ManageNoiseRules := g.AddButton("x650 yp-5 w138", "管理忽略规则…")
-    g.AddText("x70 y579 w555 c666666",
+    c.ManageNoiseRules := AddUiButton(g, "x820 yp-5 w138", "管理忽略规则…")
+    g.AddText("x240 y553 w555 c666666",
         "自动隐藏 Office 锁定文件、系统目录信息等通常不需要显示的文件。")
-    c.HiddenNoiseCount := g.AddText("x630 y582 w130 c666666 Right", "本次共隐藏 0 个")
-    c.ViewHiddenNoise := g.AddButton("x770 y575 w55", "查看…")
+    c.HiddenNoiseCount := g.AddText("x800 y556 w130 c666666 Right", "本次共隐藏 0 个")
+    c.ViewHiddenNoise := AddUiButton(g, "x940 y549 w55", "查看…")
 
     c.ExcludedNameAdd.OnEvent("Click", AddExcludedName.Bind(c))
     c.ExcludedNameRemove.OnEvent("Click", RemoveExcludedName.Bind(c))
@@ -651,7 +1015,7 @@ LoadSelectedSourceToControls(c) {
             : s.NoiseFilterMode = NOISE_FILTER_DISABLED ? 3 : 1)
         c.SourceNoiseRuleCount.Text := s.SourceCustomPatternTexts.Length " 条附加规则"
         c.ExcludedCount.Text := "排除子文件夹：" s.ExcludedPaths.Length " 个"
-        c.AllowedCount.Text := "允许覆盖全局排除："
+        c.AllowedCount.Text := "允许覆盖共享排除："
             . s.AllowedExcludedPaths.Length " 个"
         UpdateSourceControlState(c)
     } finally c.Loading := false
@@ -668,7 +1032,7 @@ SetSourceControlsEnabled(c, enabled) {
         c.SourcePath.Value := ""
         c.SourceStatus.Text := "请选择一个来源。"
         c.ExcludedCount.Text := "排除子文件夹：0 个"
-        c.AllowedCount.Text := "允许覆盖全局排除：0 个"
+        c.AllowedCount.Text := "允许覆盖共享排除：0 个"
         c.SourceNoiseRuleCount.Text := "0 条附加规则"
     }
 }
@@ -678,8 +1042,8 @@ RefreshInheritedOpenModeLabels(c) {
     label := c.Draft.General.OpenFileMode = OPEN_MODE_SINGLE ? "单击" : "双击"
     try {
         selected := c.SourceOpenMode.Value
-        c.SourceOpenMode.Delete()
-        c.SourceOpenMode.Add(["跟随全局设置（当前：" label "）", "单击", "双击"])
+        ReplaceUiDropDownItems(c.SourceOpenMode,
+            ["使用共享默认值（当前：" label "）", "单击", "双击"])
         c.SourceOpenMode.Choose(selected ? selected : 1)
     }
 }
@@ -816,8 +1180,7 @@ AddSourceToDraft(c, *) {
     name := GetFileName(path)
     if name = ""
         name := path
-    id := MakeUniqueDraftSourceId(c.Draft.Sources,
-        "source-" HashString(StrLower(name) "|" PathKey(path)))
+    id := NewStableId("source")
     c.Draft.Sources.Push({
         Name: name, OriginalName: name, Path: path, Mode: MODE_FILES,
         IncludeSubfolders:
@@ -934,7 +1297,7 @@ OpenSourcePathManager(c, field, *) {
     source := found.Value
     localPaths := source.%field%.Clone()
     title := field = "ExcludedPaths"
-        ? "排除的子文件夹" : "允许覆盖全局排除"
+        ? "排除的子文件夹" : "允许覆盖共享排除"
     child := Gui("+Owner" c.Gui.Hwnd " -MaximizeBox -MinimizeBox", title)
     c.Child := child
     child.SetFont("s9", "Microsoft YaHei UI")
@@ -942,17 +1305,17 @@ OpenSourcePathManager(c, field, *) {
     child.MarginY := 12
     description := field = "ExcludedPaths"
         ? "这些子文件夹及其内容不会显示。"
-        : "即使名称命中全局排除，这些路径仍允许扫描。"
+        : "即使名称命中共享排除，这些路径仍允许扫描。"
     child.AddText("xm ym w500", description)
     list := child.AddListView("xm y+10 w500 h240 Report -Multi NoSortHdr",
         ["路径", "状态"])
     list.ModifyCol(1, 385)
     list.ModifyCol(2, 90)
     refresh := (*) => RefreshManagedPathList(list, localPaths)
-    add := child.AddButton("xm y+10 w78", "添加…")
-    remove := child.AddButton("x+7 yp w72", "移除")
-    ok := child.AddButton("x344 yp w72 Default", "确定")
-    cancel := child.AddButton("x+8 yp w72", "取消")
+    add := AddUiButton(child, "xm y+10 w78", "添加…")
+    remove := AddUiButton(child, "x+7 yp w72", "移除")
+    ok := AddUiButton(child, "x344 yp w72 Default", "确定")
+    cancel := AddUiButton(child, "x+8 yp w72", "取消")
     add.OnEvent("Click", AddManagedSourcePath.Bind(
         c, source, localPaths, list))
     remove.OnEvent("Click", RemoveManagedSourcePath.Bind(localPaths, list))
@@ -1037,12 +1400,12 @@ OpenNoiseFilterManager(c, *) {
     child.AddGroupBox("xm y166 w600 h310", "自定义忽略规则")
     child.AddText("x34 y194 w548 c555555",
         "每行一条，只匹配文件名；* 匹配任意数量字符，? 匹配一个字符，不区分大小写。")
-    patterns := child.AddEdit("x34 y230 w548 h205 Multi VScroll -Wrap")
+    patterns := AddUiEdit(child, "x34 y230 w548 h205 Multi VScroll -Wrap")
     patterns.Value := JoinArray(n.CustomPatternTexts, "`r`n")
     child.AddText("x34 y445 w548 c666666",
         "空行会忽略，重复规则只保留一条。规则不会删除或修改文件。")
-    ok := child.AddButton("x438 y494 w78 Default", "确定")
-    cancel := child.AddButton("x+8 yp w78", "取消")
+    ok := AddUiButton(child, "x438 y494 w78 Default", "确定")
+    cancel := AddUiButton(child, "x+8 yp w78", "取消")
     ok.OnEvent("Click", AcceptNoiseFilterManager.Bind(c, hideHidden,
         hideSystem, hideTemporary, hideDownloads, patterns, child))
     cancel.OnEvent("Click", CloseSettingsChild.Bind(c, child))
@@ -1087,12 +1450,12 @@ OpenSourceIgnoreRules(c, *) {
         "”，匹配的文件名将不会在 PopDrop 中显示。"
         . "`n每行一条：* 表示任意多个字符，? 表示任意一个字符；匹配不区分大小写。"
         . "`n例如：*.myapp-lock 会隐藏 report.myapp-lock。")
-    patterns := child.AddEdit("xm y+10 w548 h230 Multi VScroll -Wrap")
+    patterns := AddUiEdit(child, "xm y+10 w548 h230 Multi VScroll -Wrap")
     patterns.Value := JoinArray(source.SourceCustomPatternTexts, "`r`n")
     child.AddText("xm y+8 w548 c666666",
-        "来源选择“禁用”时，内置、全局和这些附加规则均不应用。")
-    ok := child.AddButton("x402 y386 w78 Default", "确定")
-    cancel := child.AddButton("x+8 yp w78", "取消")
+        "来源选择“禁用”时，内置、共享和这些附加规则均不应用。")
+    ok := AddUiButton(child, "x402 y386 w78 Default", "确定")
+    cancel := AddUiButton(child, "x+8 yp w78", "取消")
     ok.OnEvent("Click", AcceptSourceIgnoreRules.Bind(c, source.SourceId, patterns, child))
     cancel.OnEvent("Click", CloseSettingsChild.Bind(c, child))
     child.OnEvent("Close", CloseSettingsChild.Bind(c, child))
@@ -1141,7 +1504,7 @@ OpenHiddenNoiseItems(c, *) {
     list.ModifyCol(4, 330)
     for item in CurrentScanResult.HiddenItems
         list.Add("", item.Name, item.Source, NoiseFilterReasonLabel(item.Reason), item.Path)
-    close := child.AddButton("x756 y414 w78 Default", "关闭")
+    close := AddUiButton(child, "x756 y414 w78 Default", "关闭")
     close.OnEvent("Click", CloseSettingsChild.Bind(c, child))
     child.OnEvent("Close", CloseSettingsChild.Bind(c, child))
     child.OnEvent("Escape", CloseSettingsChild.Bind(c, child))
@@ -1205,13 +1568,13 @@ OpenApplicationEditor(c, existing, *) {
     child.MarginX := 14
     child.MarginY := 12
     child.AddText("xm ym+4 w70", "名称：")
-    name := child.AddEdit("x90 yp-4 w390", app.Name)
+    name := AddUiEdit(child, "x90 yp-4 w390", app.Name)
     child.AddText("xm y+18 w70", "程序：")
-    path := child.AddEdit("x90 yp-4 w310", app.Path)
-    browse := child.AddButton("x+8 yp w72", "浏览…")
+    path := AddUiEdit(child, "x90 yp-4 w310", app.Path)
+    browse := AddUiButton(child, "x+8 yp w72", "浏览…")
     allFiles := child.AddRadio("xm y+22 Group", "所有文件")
     specified := child.AddRadio("xm y+12", "指定扩展名：")
-    extensions := child.AddEdit("x120 yp-4 w360",
+    extensions := AddUiEdit(child, "x120 yp-4 w360",
         JoinArray(app.Extensions, ", "))
     hint := child.AddText("x120 y+2 w360 cGray", "多个扩展名用 , 分割")
     allFiles.Value := app.Extensions.Length = 0
@@ -1220,8 +1583,8 @@ OpenApplicationEditor(c, existing, *) {
     allFiles.OnEvent("Click", (*) => extensions.Enabled := false)
     specified.OnEvent("Click", (*) => extensions.Enabled := true)
     browse.OnEvent("Click", BrowseExecutableForEditor.Bind(path, name))
-    ok := child.AddButton("x320 y+24 w72 Default", "确定")
-    cancel := child.AddButton("x+8 yp w72", "取消")
+    ok := AddUiButton(child, "x320 y+24 w72 Default", "确定")
+    cancel := AddUiButton(child, "x+8 yp w72", "取消")
     ok.OnEvent("Click", AcceptApplicationEditor.Bind(
         c, app, isEdit, name, path, specified, extensions, child))
     cancel.OnEvent("Click", CloseSettingsChild.Bind(c, child))
@@ -1380,13 +1743,13 @@ OpenDestinationEditor(c, existing, *) {
     child.MarginX := 14
     child.MarginY := 12
     child.AddText("xm ym+4 w70", "名称：")
-    name := child.AddEdit("x90 yp-4 w390", target.Name)
+    name := AddUiEdit(child, "x90 yp-4 w390", target.Name)
     child.AddText("xm y+18 w70", "文件夹：")
-    path := child.AddEdit("x90 yp-4 w310", target.Path)
-    browse := child.AddButton("x+8 yp w72", "浏览…")
+    path := AddUiEdit(child, "x90 yp-4 w310", target.Path)
+    browse := AddUiButton(child, "x+8 yp w72", "浏览…")
     browse.OnEvent("Click", BrowseFolderForEditor.Bind(path, name))
-    ok := child.AddButton("x320 y+24 w72 Default", "确定")
-    cancel := child.AddButton("x+8 yp w72", "取消")
+    ok := AddUiButton(child, "x320 y+24 w72 Default", "确定")
+    cancel := AddUiButton(child, "x+8 yp w72", "取消")
     ok.OnEvent("Click", AcceptDestinationEditor.Bind(
         c, target, isEdit, name, path, child))
     cancel.OnEvent("Click", CloseSettingsChild.Bind(c, child))
@@ -1482,10 +1845,10 @@ AddExcludedName(c, *) {
     child.SetFont("s9", "Microsoft YaHei UI")
     child.MarginX := 16
     child.MarginY := 14
-    child.AddText("xm ym w390", "请输入要全局排除的文件夹名称：")
-    nameEdit := child.AddEdit("xm y+10 w390")
-    ok := child.AddButton("x238 y+16 w74 Default", "确定")
-    cancel := child.AddButton("x+8 yp w74", "取消")
+    child.AddText("xm ym w390", "请输入要共享排除的文件夹名称：")
+    nameEdit := AddUiEdit(child, "xm y+10 w390")
+    ok := AddUiButton(child, "x238 y+16 w74 Default", "确定")
+    cancel := AddUiButton(child, "x+8 yp w74", "取消")
     ok.OnEvent("Click",
         AcceptExcludedName.Bind(c, nameEdit, child))
     cancel.OnEvent("Click", CloseSettingsChild.Bind(c, child))
@@ -1525,7 +1888,7 @@ RemoveExcludedName(c, *) {
 
 RestoreExcludedNames(c, *) {
     if SettingsMessage(c,
-        "要把全局排除名称恢复为推荐值吗？此操作只修改草稿。",
+        "要把共享排除名称恢复为推荐值吗？此操作只修改草稿。",
         "恢复推荐值", "YesNo Icon!") != "Yes"
         return
     c.Draft.GlobalExcludedNames := [
@@ -1535,6 +1898,10 @@ RestoreExcludedNames(c, *) {
 
 SettingsTabChanged(c, *) {
     CommitCurrentSourceControlsToDraft(c)
+    try {
+        if c.NavItems.Has(c.Tab.Value)
+            c.Navigation.Modify(c.NavItems[c.Tab.Value], "Select Vis")
+    }
 }
 
 SettingsDraftSignature(draft) {
@@ -1552,14 +1919,23 @@ SettingsDraftSignature(draft) {
         n.HideSystem ? "1" : "0", n.HideTemporary ? "1" : "0",
         n.HideIncompleteDownloads ? "1" : "0",
         JoinArray(n.CustomPatternTexts, Chr(30)))
-    for s in draft.Sources {
-        parts.Push("S", s.SourceId, s.Name, PathKey(s.Path), s.Mode,
-            s.DisplayScope, s.FolderTimeMode, s.MaxFilesPerFolder "",
-            s.SortMode, s.Filter.Mode, JoinArray(s.Filter.Extensions, ","),
-            s.StripOrderPrefix "", s.HideExtensions "", s.OpenFileMode,
-            s.NoiseFilterMode, JoinArray(s.SourceCustomPatternTexts, Chr(30)),
-            JoinNormalizedPaths(s.ExcludedPaths),
-            JoinNormalizedPaths(s.AllowedExcludedPaths))
+    parts.Push("CW", draft.CurrentWorkspaceId)
+    for workspace in draft.Workspaces {
+        parts.Push("W", workspace.Id, workspace.Name)
+        parts.Push("P", workspace.Id,
+            JoinNormalizedPaths(workspace.PinnedPaths))
+        for s in workspace.Sources {
+            parts.Push("S", workspace.Id, s.SourceId, s.Name,
+                PathKey(s.Path), s.Mode, s.DisplayScope,
+                s.FolderTimeMode, s.MaxFilesPerFolder "",
+                s.SortMode, s.Filter.Mode,
+                JoinArray(s.Filter.Extensions, ","),
+                s.StripOrderPrefix "", s.HideExtensions "",
+                s.OpenFileMode, s.NoiseFilterMode,
+                JoinArray(s.SourceCustomPatternTexts, Chr(30)),
+                JoinNormalizedPaths(s.ExcludedPaths),
+                JoinNormalizedPaths(s.AllowedExcludedPaths))
+        }
     }
     for app in draft.Applications
         parts.Push("A", app.Id, app.Name, PathKey(app.Path),
@@ -1602,9 +1978,10 @@ RequestCloseSettings(c, *) {
 }
 
 DestroySettingsGui(c) {
-    global SettingsDialog
+    global SettingsDialog, SettingsController
     CancelFilePointerGesture()
     SettingsDialog := 0
+    SettingsController := 0
     try c.Gui.Destroy()
     EndAutoHidePause()
 }
@@ -1621,7 +1998,7 @@ ValidateSettingsDraft(c) {
     d := c.Draft
     if d.General.OpenFileMode != OPEN_MODE_DOUBLE
         && d.General.OpenFileMode != OPEN_MODE_SINGLE
-        errors.Push("全局打开文件方式无效。")
+        errors.Push("共享默认打开文件方式无效。")
     if Trim(d.General.Hotkey) = ""
         errors.Push("呼出/隐藏快捷键不能为空。")
     if !IsIntegerText(d.General.MaxFilesPerFolder, 1, 100)
@@ -1631,9 +2008,41 @@ ValidateSettingsDraft(c) {
     if !IsIntegerText(d.General.TransferMaxConcurrent, 1, 6)
         errors.Push("外部传输最大并发数必须是 1–6 的整数。")
 
-    names := Map()
-    paths := Map()
-    for s in d.Sources {
+    if !d.Workspaces.Length
+        errors.Push("至少需要保留一个工作区。")
+    workspaceNames := Map()
+    workspaceIds := Map()
+    allSourceIds := Map()
+    activeFound := false
+    for workspace in d.Workspaces {
+        if !IsSafeStableId(workspace.Id)
+            errors.Push("工作区 ID 无效：" workspace.Id)
+        if workspaceIds.Has(StrLower(workspace.Id))
+            errors.Push("工作区 ID 重复：" workspace.Id)
+        else
+            workspaceIds[StrLower(workspace.Id)] := true
+        if !IsSafeWorkspaceName(workspace.Name)
+            errors.Push("工作区名称无效：“" workspace.Name "”。")
+        if workspaceNames.Has(StrLower(workspace.Name))
+            errors.Push("工作区名称重复：“" workspace.Name "”。")
+        else
+            workspaceNames[StrLower(workspace.Name)] := true
+        if StrLower(workspace.Id) = StrLower(d.CurrentWorkspaceId)
+            activeFound := true
+        names := Map()
+        paths := Map()
+        sourceIds := Map()
+        for s in workspace.Sources {
+        if !IsSafeSourceId(s.SourceId)
+            errors.Push("工作区“" workspace.Name "”包含无效来源 ID。")
+        if sourceIds.Has(StrLower(s.SourceId))
+            errors.Push("工作区“" workspace.Name "”来源 ID 重复：" s.SourceId)
+        else
+            sourceIds[StrLower(s.SourceId)] := true
+        if allSourceIds.Has(StrLower(s.SourceId))
+            errors.Push("不同工作区不能共用来源身份：" s.SourceId)
+        else
+            allSourceIds[StrLower(s.SourceId)] := true
         if Trim(s.Name) = ""
             errors.Push("存在名称为空的监控来源。")
         if RegExMatch(s.Name, "[\[\]=`r`n]")
@@ -1684,12 +2093,12 @@ ValidateSettingsDraft(c) {
             "来源“" s.Name "”")
         for item in sourcePatterns.Errors
             errors.Push(item)
-    }
-    Loop d.Sources.Length {
-        left := d.Sources[A_Index]
+        }
+        Loop workspace.Sources.Length {
+        left := workspace.Sources[A_Index]
         index := A_Index + 1
-        while index <= d.Sources.Length {
-            right := d.Sources[index]
+        while index <= workspace.Sources.Length {
+            right := workspace.Sources[index]
             if IsSameOrDescendantPath(left.Path, right.Path)
                 || IsSameOrDescendantPath(right.Path, left.Path)
                 warnings.Push("来源“" left.Name "”与“" right.Name
@@ -1697,6 +2106,9 @@ ValidateSettingsDraft(c) {
             index += 1
         }
     }
+    }
+    if !activeFound
+        errors.Push("当前工作区不在工作区列表中。")
 
     appPaths := Map()
     for app in d.Applications {
@@ -1729,15 +2141,15 @@ ValidateSettingsDraft(c) {
     excluded := Map()
     for name in d.GlobalExcludedNames {
         if Trim(name) = "" || InStr(name, "\") || InStr(name, "/")
-            errors.Push("全局排除项必须是单个文件夹名称：“" name "”。")
+            errors.Push("共享排除项必须是单个文件夹名称：“" name "”。")
         key := StrLower(Trim(name))
         if excluded.Has(key)
-            errors.Push("全局排除名称重复：“" name "”。")
+            errors.Push("共享排除名称重复：“" name "”。")
         else
             excluded[key] := true
     }
     globalPatterns := CompileIgnorePatterns(d.General.NoiseFilter.CustomPatternTexts,
-        "全局自定义忽略规则")
+        "共享自定义忽略规则")
     for item in globalPatterns.Errors
         errors.Push(item)
     return {Errors: errors, Warnings: warnings}
@@ -1762,6 +2174,10 @@ ValueInArray(value, values) {
 }
 
 SaveSettingsDraft(c, *) {
+    return SaveSettingsDraftCore(c, true)
+}
+
+SaveSettingsDraftCore(c, closeAfter) {
     global ConfigPath, ConfiguredHotkey, ActiveHotkey
     global SettingsDialog
 
@@ -1787,11 +2203,15 @@ SaveSettingsDraft(c, *) {
     }
     dangerous := HasDangerousIgnorePattern(c.Draft.General.NoiseFilter.CustomPatternTexts)
     if !dangerous {
-        for source in c.Draft.Sources {
-            if HasDangerousIgnorePattern(source.SourceCustomPatternTexts) {
-                dangerous := true
-                break
+        for workspace in c.Draft.Workspaces {
+            for source in workspace.Sources {
+                if HasDangerousIgnorePattern(source.SourceCustomPatternTexts) {
+                    dangerous := true
+                    break
+                }
             }
+            if dangerous
+                break
         }
     }
     if dangerous && SettingsMessage(c,
@@ -1822,8 +2242,10 @@ SaveSettingsDraft(c, *) {
         StartBackgroundScan()
         SetUserStatus("设置已保存")
         c.OriginalSignature := SettingsDraftSignature(c.Draft)
-        c.ClosingAfterSave := true
-        DestroySettingsGui(c)
+        if closeAfter {
+            c.ClosingAfterSave := true
+            DestroySettingsGui(c)
+        }
         return true
     } catch as err {
         if wroteConfig {
@@ -1920,81 +2342,92 @@ WriteSettingsDraft(draft, tempPath) {
     }
     doc.ReplaceKnownKeys("NoiseFilter", noiseEntries, noiseKnownKeys, 1)
 
-    oldFolders := doc.GetEntries("Folders")
-    oldNames := []
-    for entry in oldFolders
-        oldNames.Push(entry.Key)
-    folderEntries := []
-    for source in draft.Sources
-        folderEntries.Push({Key: source.Name, Value: source.Path})
-    doc.ReplaceSection("Folders", folderEntries, 2)
-
-    sourceIds := []
-    activeIds := Map()
-    for source in draft.Sources {
-        section := "Folder:" source.Name
-        if HasProp(source, "OriginalName")
-            && source.OriginalName != source.Name {
-            doc.SetValues(section,
-                doc.GetEntries("Folder:" source.OriginalName), 2)
-        }
-        doc.SetValue(section, "Mode", source.Mode, 2)
-        doc.SetValue(section, "MaxFilesPerFolder",
-            source.MaxFilesPerFolder, 2)
-        doc.SetValue(section, "IncludeSubfolders",
-            source.DisplayScope = "RecursiveFiles" ? "1" : "0", 2)
-        doc.SetValue(section, "DisplayScope", source.DisplayScope, 2)
-        doc.SetValue(section, "FolderTimeMode", source.FolderTimeMode, 2)
-        doc.SetValue(section, "SortMode", source.SortMode, 2)
-        doc.SetValue(section, "FilterMode", source.Filter.Mode, 2)
-        doc.SetValue(section, "FileExtensions",
-            JoinArray(source.Filter.Extensions, ","), 2)
-        doc.SetValue(section, "StripOrderPrefix",
-            source.StripOrderPrefix ? "1" : "0", 2)
-        doc.SetValue(section, "HideExtensions",
-            source.HideExtensions ? "1" : "0", 2)
-        doc.SetValue(section, "SourceId", source.SourceId, 2)
-        doc.SetValue(section, "OpenFileMode",
-            ParseSourceOpenFileMode(source.OpenFileMode), 2)
-        doc.SetValue(section, "NoiseFilterMode",
-            ParseNoiseFilterMode(source.NoiseFilterMode), 2)
-        sourceSection := "Source:" source.SourceId
-        doc.SetValue(sourceSection, "Name", source.Name, 3)
-        doc.SetValue(sourceSection, "Path", source.Path, 3)
-        doc.SetValue(sourceSection, "OpenFileMode",
-            ParseSourceOpenFileMode(source.OpenFileMode), 3)
-        doc.SetValue(sourceSection, "NoiseFilterMode",
-            ParseNoiseFilterMode(source.NoiseFilterMode), 3)
-        WriteIgnorePatternSection(doc, "SourceIgnore:" source.SourceId,
-            source.SourceCustomPatternTexts)
-        WriteSourcePathSection(doc,
-            "SourceExclude:" source.SourceId, source.Path, source.ExcludedPaths)
-        WriteSourcePathSection(doc,
-            "SourceAllow:" source.SourceId, source.Path,
-            source.AllowedExcludedPaths)
-        sourceIds.Push(source.SourceId)
-        activeIds[StrLower(source.SourceId)] := true
-    }
-    for oldName in oldNames {
-        keep := false
-        for source in draft.Sources {
-            if source.Name = oldName {
-                keep := true
-                break
-            }
-        }
-        if !keep {
-            oldId := doc.GetValue("Folder:" oldName, "SourceId", "")
-            doc.DeleteSection("Folder:" oldName)
-            if oldId != "" && !activeIds.Has(StrLower(oldId)) {
-                doc.DeleteSection("Source:" oldId)
-                doc.DeleteSection("SourceExclude:" oldId)
-                doc.DeleteSection("SourceAllow:" oldId)
-                doc.DeleteSection("SourceIgnore:" oldId)
-            }
+    oldWorkspaceIds := ParseStableIdOrder(
+        doc.GetValue("Workspaces", "Order", ""))
+    oldSourceIds := []
+    for workspaceId in oldWorkspaceIds {
+        for sourceId in ParseStableIdOrder(doc.GetValue(
+            "Workspace:" workspaceId, "SourceOrder", "")) {
+            if !ArrayContainsTextInsensitive(oldSourceIds, sourceId)
+                oldSourceIds.Push(sourceId)
         }
     }
-    doc.SetValue("Sources", "Order", JoinArray(sourceIds, ","), 3)
+    workspaceIds := []
+    activeSourceIds := Map()
+    for workspace in draft.Workspaces {
+        workspaceIds.Push(workspace.Id)
+        sourceIds := []
+        for source in workspace.Sources {
+            sourceIds.Push(source.SourceId)
+            activeSourceIds[StrLower(source.SourceId)] := true
+            sourceSection := "Source:" source.SourceId
+            sourceEntries := [
+                {Key: "WorkspaceId", Value: workspace.Id},
+                {Key: "Name", Value: source.Name},
+                {Key: "Path", Value: source.Path},
+                {Key: "Mode", Value: source.Mode},
+                {Key: "MaxFilesPerFolder",
+                    Value: source.MaxFilesPerFolder},
+                {Key: "IncludeSubfolders",
+                    Value: source.DisplayScope = "RecursiveFiles" ? "1" : "0"},
+                {Key: "DisplayScope", Value: source.DisplayScope},
+                {Key: "FolderTimeMode", Value: source.FolderTimeMode},
+                {Key: "SortMode", Value: source.SortMode},
+                {Key: "FilterMode", Value: source.Filter.Mode},
+                {Key: "FileExtensions",
+                    Value: JoinArray(source.Filter.Extensions, ",")},
+                {Key: "StripOrderPrefix",
+                    Value: source.StripOrderPrefix ? "1" : "0"},
+                {Key: "HideExtensions",
+                    Value: source.HideExtensions ? "1" : "0"},
+                {Key: "OpenFileMode",
+                    Value: ParseSourceOpenFileMode(source.OpenFileMode)},
+                {Key: "NoiseFilterMode",
+                    Value: ParseNoiseFilterMode(source.NoiseFilterMode)}
+            ]
+            sourceKnown := ["WorkspaceId", "Name", "Path", "Mode",
+                "MaxFilesPerFolder", "IncludeSubfolders", "DisplayScope",
+                "FolderTimeMode", "SortMode", "FilterMode",
+                "FileExtensions", "StripOrderPrefix", "HideExtensions",
+                "OpenFileMode", "NoiseFilterMode"]
+            doc.ReplaceKnownKeys(sourceSection, sourceEntries,
+                sourceKnown, 3)
+            WriteIgnorePatternSection(doc,
+                "SourceIgnore:" source.SourceId,
+                source.SourceCustomPatternTexts)
+            WriteSourcePathSection(doc,
+                "SourceExclude:" source.SourceId,
+                source.Path, source.ExcludedPaths)
+            WriteSourcePathSection(doc,
+                "SourceAllow:" source.SourceId,
+                source.Path, source.AllowedExcludedPaths)
+        }
+        doc.ReplaceKnownKeys("Workspace:" workspace.Id, [
+            {Key: "Name", Value: workspace.Name},
+            {Key: "SourceOrder", Value: JoinArray(sourceIds, ",")}
+        ], ["Name", "SourceOrder"], 3)
+        WritePinnedPathsToDocument(doc,
+            "WorkspacePinned:" workspace.Id, workspace.PinnedPaths, 3)
+    }
+    doc.ReplaceKnownKeys("Workspaces", [
+        {Key: "Order", Value: JoinArray(workspaceIds, ",")},
+        {Key: "Active", Value: draft.CurrentWorkspaceId},
+        {Key: "PinnedScopeVersion", Value: "1"}
+    ], ["Order", "Active", "PinnedScopeVersion"], 3)
+    for workspaceId in oldWorkspaceIds {
+        if !ArrayContainsTextInsensitive(workspaceIds, workspaceId) {
+            doc.DeleteSection("Workspace:" workspaceId)
+            doc.DeleteSection("WorkspacePinned:" workspaceId)
+        }
+    }
+    for sourceId in oldSourceIds {
+        if !activeSourceIds.Has(StrLower(sourceId)) {
+            doc.DeleteSection("Source:" sourceId)
+            doc.DeleteSection("SourceExclude:" sourceId)
+            doc.DeleteSection("SourceAllow:" sourceId)
+            doc.DeleteSection("SourceIgnore:" sourceId)
+        }
+    }
 
     appIds := []
     activeAppIds := Map()
@@ -2100,6 +2533,7 @@ AdvancedSettingsClicked(c, *) {
 }
 
 SettingsMessage(c, text, title := "PopDrop 设置", options := "") {
-    opts := Trim(options " Owner" c.Gui.Hwnd)
+    ownerHwnd := IsObject(c.Child) ? c.Child.Hwnd : c.Gui.Hwnd
+    opts := Trim(options " Owner" ownerHwnd)
     return MsgBox(text, title, opts)
 }
