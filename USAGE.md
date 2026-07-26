@@ -31,6 +31,7 @@ Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之�
 ConfigVersion=14
 Hotkey=F2
 OpenFileMode=DoubleClick
+DefaultContextMenu=PopDrop
 MaxFilesPerFolder=8
 DisplayScope=FilesOnly
 FolderTimeMode=DirectoryModified
@@ -97,6 +98,7 @@ Path=%USERPROFILE%\Downloads
 | `ThumbnailPolicy` | `Full`（默认）允许现场生成缩略图，可能造成短暂停顿；`Fast` 只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标。 |
 | `WindowMode` | 窗口显示模式：`temporary`（默认，置顶，切换到其他窗口后自动隐藏）、`always_on_top`（始终置顶）、`normal`（普通窗口，不置顶）。 |
 | `OpenFileMode` | 普通文件的鼠标激活方式：`DoubleClick`（默认）或 `SingleClick`。缺失、空值或未知值都回退为双击。 |
+| `DefaultContextMenu` | 默认右键菜单：`PopDrop`（默认、推荐）或 `System`。缺失、空值或未知值都安全回退为 PopDrop 快捷菜单。 |
 | `EscapeHidesPanel` | 按 Esc 时隐藏面板：`1`=隐藏（默认）| `0`=不隐藏。 |
 | `SortMode` | 排序模式：`ModifiedDesc`（修改时间从新到旧，默认）、`NameAsc`（文件名自然升序）。支持文件夹级覆盖。 |
 | 快捷键语法 | AutoHotkey v2 格式：`^`=Ctrl，`!`=Alt，`+`=Shift，`#`=Win。例如 `^!Space`=Ctrl+Alt+Space。 |
@@ -758,15 +760,34 @@ ShowCompletionNotifications=1
 - 多选后点击「－ 固定项」，会批量将所有选中项目移出固定项，不会删除源文件。
 - 多选后拖拽任意一个已选文件，所有选中文件一起发送——支持跨文件夹、跨磁盘。
 - 某些以管理员权限运行的软件，不会接受普通权限程序的拖放。这是 Windows 的安全机制。如果遇到这种情况，让 PopDrop 和目标软件使用相同权限级别即可。
-- 普通右击使用 PopDrop 精简菜单；需要第三方扩展或其他系统命令时，按住 `Shift` 右击或按 `Shift + F10`。
+- 右键打开默认菜单；按住 Shift 右键或按 `Shift + F10` 打开另一个菜单。
 - 网络盘、离线盘、权限受限的目录会显示为不可用；恢复连接后点「刷新」即可回来。
 
 ## v0.7 文件操作与打开方式
 
 ### 精简右键菜单和快捷键
 
-普通右击打开 PopDrop 精简菜单。右击当前多选中的项目会保留整个选择；右击未选中项目
-会先改为单选。`Shift + 右击` 和 `Shift + F10` 直接打开完整 Windows Shell 菜单。
+在“PopDrop 设置 → 共享设置 → 通用 → 右键菜单”中，可以把“PopDrop 快捷菜单
+（推荐）”或“Windows 系统菜单”设为默认。右键和键盘菜单键打开默认菜单；按住 Shift
+右键或按 `Shift + F10` 打开另一个菜单。设置保存后立即生效，所有工作区、主文件区、
+固定项和最近文件区共用同一选择。
+
+手工配置对应：
+
+```ini
+[General]
+DefaultContextMenu=PopDrop
+```
+
+允许值为 `PopDrop` 和 `System`。旧配置缺少该项、配置为空或值未知时都回退为
+`PopDrop`，因此普通右键行为与旧版本一致；未知非空值会显示配置警告。
+
+右击当前多选中的项目会保留整个选择；右击未选中项目会先改为单选。PopDrop 快捷菜单
+始终作用于全部有效选择。同一父文件夹的多选会整体交给 Windows 系统菜单；跨父文件夹
+多选时，系统菜单只作用于当前右击或聚焦项目，并在状态栏提示这一限制。
+
+当 PopDrop 快捷菜单是默认菜单时，菜单底部显示“更多系统操作… Shift + F10”；
+当 Windows 系统菜单是默认菜单时，备用 PopDrop 菜单不再显示这个重复入口。
 
 | 操作 | 快捷键 |
 |---|---|
@@ -775,7 +796,8 @@ ShowCompletionNotifications=1
 | 在文件资源管理器中显示 | `Ctrl + Enter` |
 | 复制文件对象到剪贴板 | `Ctrl + C` |
 | 复制完整路径文本 | `Ctrl + Shift + C` |
-| 更多系统操作 | `Shift + F10` |
+| 打开另一个右键菜单 | 按住 `Shift` 右键或 `Shift + F10` |
+| 打开默认右键菜单 | 右键或键盘菜单键 |
 
 多选定位只支持同一父目录；跨父目录时菜单项禁用，避免一次打开大量资源管理器窗口。
 复制文件使用 `CF_HDROP`，可以直接粘贴到资源管理器或支持文件粘贴的软件；复制路径则

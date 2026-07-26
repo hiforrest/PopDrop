@@ -109,6 +109,7 @@ SettingsNavigationSelected(c, tree, item) {
 
 LoadSettingsIntoDraft() {
     global GlobalOpenFileMode, ConfiguredHotkey, WindowMode, EscapeHidesPanel
+    global DefaultContextMenu
     global ShowRecentSidebar, RecentFileCount, MaxFilesPerFolder, SortMode
     global LastValidFolderSettings, OpenApps, TransferFavorites, RecentTargets
     global TransferFavoriteLabels, GlobalExcludedFolderNames
@@ -151,6 +152,7 @@ LoadSettingsIntoDraft() {
     return {
         General: {
             OpenFileMode: ParseGlobalOpenFileMode(GlobalOpenFileMode),
+            DefaultContextMenu: ParseDefaultContextMenu(DefaultContextMenu),
             Hotkey: ConfiguredHotkey,
             WindowMode: WindowMode,
             EscapeHidesPanel: EscapeHidesPanel,
@@ -327,33 +329,41 @@ CloneSettingsApplication(app) {
 BuildGeneralSettingsPage(c, tabs) {
     tabs.UseTab(1)
     g := c.Gui
-    g.AddGroupBox("x200 y29 w818 h142", "打开文件 · 应用于所有工作区")
+    g.AddGroupBox("x200 y29 w818 h126", "打开文件 · 应用于所有工作区")
     c.GlobalDouble := g.AddRadio("x220 y58 Group", "双击（默认）")
     c.GlobalSingle := g.AddRadio("x350 yp", "单击")
-    g.AddText("x220 y94 w770 h70 c555555",
+    g.AddText("x220 y94 w770 h48 c555555",
         "单击会立即打开文件。按住 Ctrl 或 Shift 可以多选，拖拽不受影响；"
         . "文件夹仍然需要双击打开。"
         . "`n可在「当前工作区」页中为每个来源单独配置打开方式。")
 
-    g.AddGroupBox("x200 y185 w818 h112", "快捷键 · 应用于所有工作区")
-    g.AddText("x220 y220 w150", "呼出/隐藏 PopDrop：")
+    g.AddGroupBox("x200 y165 w818 h82", "快捷键 · 应用于所有工作区")
+    g.AddText("x220 y196 w150", "呼出/隐藏 PopDrop：")
     c.Hotkey := g.AddHotkey("x375 yp-4 w220 h26")
     g.AddText("x615 yp+4 w360 c666666",
         "保存时会先验证新快捷键是否可注册。")
 
-    g.AddGroupBox("x200 y311 w818 h156", "窗口 · 应用于所有工作区")
-    g.AddText("x220 y346 w150", "窗口显示方式：")
+    g.AddGroupBox("x200 y257 w818 h104", "窗口 · 应用于所有工作区")
+    g.AddText("x220 y288 w150", "窗口显示方式：")
     c.WindowMode := AddUiDropDownList(g, "x375 yp-4 w260 Choose1",
         ["始终置顶", "临时置顶（失去焦点后隐藏）", "普通窗口"])
-    c.EscapeHide := g.AddCheckBox("x220 y394",
+    c.EscapeHide := g.AddCheckBox("x220 y326",
         "按 Esc 隐藏 PopDrop")
 
-    g.AddGroupBox("x200 y481 w818 h116", "下载 · 应用于所有工作区")
-    c.EnableUrlFallback := g.AddCheckBox("x220 y510",
+    g.AddGroupBox("x200 y371 w818 h126", "右键菜单 · 应用于所有工作区")
+    c.ContextMenuPopDrop := g.AddRadio(
+        "x220 y400 Group", "PopDrop 快捷菜单（推荐）")
+    c.ContextMenuSystem := g.AddRadio(
+        "x500 yp", "Windows 系统菜单")
+    c.ContextMenuDescription := g.AddText(
+        "x220 y434 w770 h48 c555555", "")
+
+    g.AddGroupBox("x200 y507 w818 h126", "下载 · 应用于所有工作区")
+    c.EnableUrlFallback := g.AddCheckBox("x220 y536",
         "允许公开 HTTPS 文件 URL 作为最后兜底")
     c.AllowHttp := g.AddCheckBox("x580 yp",
         "允许不加密 HTTP（不推荐）")
-    g.AddText("x220 y550 w118", "后台最大并发：")
+    g.AddText("x220 y576 w118", "后台最大并发：")
     c.TransferMax := AddUiEdit(g, "x340 yp-4 w62 Number")
     g.AddText("x410 yp+4 w100 c666666", "（1–6）")
     c.TransferNotify := g.AddCheckBox("x580 yp",
@@ -364,6 +374,8 @@ BuildGeneralSettingsPage(c, tabs) {
     c.Hotkey.OnEvent("Change", GeneralControlChanged.Bind(c))
     c.WindowMode.OnEvent("Change", GeneralControlChanged.Bind(c))
     c.EscapeHide.OnEvent("Click", GeneralControlChanged.Bind(c))
+    c.ContextMenuPopDrop.OnEvent("Click", GeneralControlChanged.Bind(c))
+    c.ContextMenuSystem.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.EnableUrlFallback.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.AllowHttp.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.TransferMax.OnEvent("Change", GeneralControlChanged.Bind(c))
@@ -843,6 +855,7 @@ BuildDisplaySettingsPage(c, tabs) {
 
 LoadGeneralControls(c) {
     global OPEN_MODE_SINGLE
+    global CONTEXT_MENU_SYSTEM
     c.Loading := true
     try {
         d := c.Draft.General
@@ -851,6 +864,11 @@ LoadGeneralControls(c) {
         c.Hotkey.Value := d.Hotkey
         c.WindowMode.Choose(WindowModeToIndex(d.WindowMode))
         c.EscapeHide.Value := d.EscapeHidesPanel
+        c.ContextMenuPopDrop.Value :=
+            d.DefaultContextMenu != CONTEXT_MENU_SYSTEM
+        c.ContextMenuSystem.Value :=
+            d.DefaultContextMenu = CONTEXT_MENU_SYSTEM
+        UpdateContextMenuDescription(c)
         c.EnableUrlFallback.Value := d.EnablePublicUrlFallback
         c.AllowHttp.Value := d.AllowHttp
         c.TransferMax.Value := d.TransferMaxConcurrent
@@ -861,6 +879,7 @@ LoadGeneralControls(c) {
 GeneralControlChanged(c, *) {
     global OPEN_MODE_SINGLE, OPEN_MODE_DOUBLE
     global WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
+    global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
     if c.Loading
         return
     d := c.Draft.General
@@ -869,11 +888,29 @@ GeneralControlChanged(c, *) {
     d.WindowMode := [WINDOW_MODE_ALWAYS_ON_TOP,
         WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL][Max(1, c.WindowMode.Value)]
     d.EscapeHidesPanel := !!c.EscapeHide.Value
+    d.DefaultContextMenu := c.ContextMenuSystem.Value
+        ? CONTEXT_MENU_SYSTEM : CONTEXT_MENU_POPDROP
+    UpdateContextMenuDescription(c)
     d.EnablePublicUrlFallback := !!c.EnableUrlFallback.Value
     d.AllowHttp := !!c.AllowHttp.Value
     d.TransferMaxConcurrent := Trim(c.TransferMax.Value)
     d.ShowCompletionNotifications := !!c.TransferNotify.Value
     RefreshInheritedOpenModeLabels(c)
+}
+
+UpdateContextMenuDescription(c) {
+    global CONTEXT_MENU_SYSTEM
+    mode := c.ContextMenuSystem.Value
+        ? CONTEXT_MENU_SYSTEM : c.Draft.General.DefaultContextMenu
+    if mode = CONTEXT_MENU_SYSTEM {
+        c.ContextMenuDescription.Text :=
+            "右键打开 Windows 系统菜单；按住 Shift 右键或按 Shift + F10 "
+            . "打开 PopDrop 快捷菜单。"
+    } else {
+        c.ContextMenuDescription.Text :=
+            "右键打开 PopDrop 快捷菜单；按住 Shift 右键或按 Shift + F10 "
+            . "打开 Windows 系统菜单。"
+    }
 }
 
 WindowModeToIndex(mode) {
@@ -1907,7 +1944,7 @@ SettingsTabChanged(c, *) {
 SettingsDraftSignature(draft) {
     parts := []
     g := draft.General
-    parts.Push(g.OpenFileMode, g.Hotkey, g.WindowMode,
+    parts.Push(g.OpenFileMode, g.DefaultContextMenu, g.Hotkey, g.WindowMode,
         g.EscapeHidesPanel ? "1" : "0",
         g.ShowRecentSidebar ? "1" : "0",
         g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode,
@@ -1993,12 +2030,16 @@ ValidateSettingsDraft(c) {
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     global SORT_MODIFIED_DESC, SORT_NAME_ASC
     global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
+    global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
     errors := []
     warnings := []
     d := c.Draft
     if d.General.OpenFileMode != OPEN_MODE_DOUBLE
         && d.General.OpenFileMode != OPEN_MODE_SINGLE
         errors.Push("共享默认打开文件方式无效。")
+    if d.General.DefaultContextMenu != CONTEXT_MENU_POPDROP
+        && d.General.DefaultContextMenu != CONTEXT_MENU_SYSTEM
+        errors.Push("默认右键菜单设置无效。")
     if Trim(d.General.Hotkey) = ""
         errors.Push("呼出/隐藏快捷键不能为空。")
     if !IsIntegerText(d.General.MaxFilesPerFolder, 1, 100)
@@ -2303,6 +2344,8 @@ WriteSettingsDraft(draft, tempPath) {
     g := draft.General
     doc.SetValue("General", "OpenFileMode",
         ParseGlobalOpenFileMode(g.OpenFileMode), 1)
+    doc.SetValue("General", "DefaultContextMenu",
+        ParseDefaultContextMenu(g.DefaultContextMenu), 1)
     doc.SetValue("General", "Hotkey", g.Hotkey, 1)
     doc.SetValue("General", "WindowMode", g.WindowMode, 1)
     doc.SetValue("General", "EscapeHidesPanel",

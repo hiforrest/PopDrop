@@ -35,6 +35,10 @@ global OPEN_MODE_DOUBLE := "DoubleClick"
 global OPEN_MODE_SINGLE := "SingleClick"
 global SOURCE_OPEN_MODE_INHERIT := "Inherit"
 
+; ──── 默认右键菜单 ────
+global CONTEXT_MENU_POPDROP := "PopDrop"
+global CONTEXT_MENU_SYSTEM := "System"
+
 ; ──── 临时、锁定及系统文件过滤 ────
 global NOISE_FILTER_INHERIT := "Inherit"
 global NOISE_FILTER_ENABLED := "Enabled"
@@ -206,6 +210,10 @@ global LastOpenAppUndoState := 0
 global CurrentStatusAction := 0
 global OpenAppsConfigNeedsMigration := false
 global GlobalOpenFileMode := OPEN_MODE_DOUBLE
+global DefaultContextMenu := CONTEXT_MENU_POPDROP
+global PendingContextMenuMouseShift := Map()
+global PendingContextMenuKeyboardAlternate := Map()
+global ContextMenuDispatchActive := false
 global SettingsDialog := 0
 global EscapeHidesPanel := true
 
@@ -252,6 +260,8 @@ OnMessage(0x0201, FileViewLeftButtonDown) ; WM_LBUTTONDOWN
 OnMessage(0x0200, FileViewMouseMove)      ; WM_MOUSEMOVE
 OnMessage(0x0202, FileViewLeftButtonUp)   ; WM_LBUTTONUP
 OnMessage(0x0204, FileViewRightButtonDown) ; WM_RBUTTONDOWN
+OnMessage(0x0100, FileViewContextMenuKeyDown) ; WM_KEYDOWN
+OnMessage(0x0104, FileViewContextMenuKeyDown) ; WM_SYSKEYDOWN
 OnMessage(0x020A, FileViewCancelInteraction) ; WM_MOUSEWHEEL
 OnMessage(0x020E, FileViewCancelInteraction) ; WM_MOUSEHWHEEL
 OnMessage(0x0114, FileViewCancelInteraction) ; WM_HSCROLL
@@ -326,6 +336,8 @@ EnsureConfig() {
     "Hotkey=F2`n"
     "; DoubleClick（默认）| SingleClick`n"
     "OpenFileMode=DoubleClick`n"
+    "; PopDrop（默认）| System；按住 Shift 打开另一个菜单`n"
+    "DefaultContextMenu=PopDrop`n"
     "EscapeHidesPanel=1`n"
     "MaxFilesPerFolder=8`n"
     "; FilesOnly | FilesAndFolders | RecursiveFiles`n"
@@ -766,6 +778,7 @@ LoadSettings(*) {
     global LastOpenProgramDir, LastTransferTargetDir
     global OpenAppsConfigNeedsMigration
     global GlobalOpenFileMode, OPEN_MODE_DOUBLE
+    global DefaultContextMenu, CONTEXT_MENU_POPDROP
     global GlobalNoiseFilter, NOISE_FILTER_INHERIT
 
     settingErrors := []
@@ -777,6 +790,14 @@ LoadSettings(*) {
     ; 缺失、空值和未知值都必须保持旧版的双击行为。
     GlobalOpenFileMode := ParseGlobalOpenFileMode(
         IniRead(ConfigPath, "General", "OpenFileMode", OPEN_MODE_DOUBLE))
+    rawContextMenu := Trim(IniRead(
+        ConfigPath, "General", "DefaultContextMenu", ""))
+    DefaultContextMenu := ParseDefaultContextMenu(rawContextMenu)
+    if rawContextMenu != ""
+        && !IsRecognizedDefaultContextMenu(rawContextMenu) {
+        settingErrors.Push("[General] 中 DefaultContextMenu 值无效："
+            rawContextMenu "。已使用 PopDrop 快捷菜单。允许的值：PopDrop, System。")
+    }
     EscapeHidesPanel := IniRead(
         ConfigPath, "General", "EscapeHidesPanel", "1") = "1"
     GlobalExcludedFolderNames := LoadGlobalExcludedFolderNames()
@@ -1009,6 +1030,31 @@ IsRecognizedGlobalOpenFileMode(raw) {
     value := StrLower(Trim(raw))
     return value = StrLower(OPEN_MODE_DOUBLE)
         || value = StrLower(OPEN_MODE_SINGLE)
+}
+
+ParseDefaultContextMenu(raw) {
+    global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
+    value := StrLower(Trim(raw))
+    if value = StrLower(CONTEXT_MENU_SYSTEM)
+        return CONTEXT_MENU_SYSTEM
+    if value = StrLower(CONTEXT_MENU_POPDROP)
+        return CONTEXT_MENU_POPDROP
+    return CONTEXT_MENU_POPDROP
+}
+
+IsRecognizedDefaultContextMenu(raw) {
+    global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
+    value := StrLower(Trim(raw))
+    return value = StrLower(CONTEXT_MENU_POPDROP)
+        || value = StrLower(CONTEXT_MENU_SYSTEM)
+}
+
+ResolveContextMenuKind(defaultMenu, alternate) {
+    global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
+    useSystem := ParseDefaultContextMenu(defaultMenu) = CONTEXT_MENU_SYSTEM
+    if alternate
+        useSystem := !useSystem
+    return useSystem ? CONTEXT_MENU_SYSTEM : CONTEXT_MENU_POPDROP
 }
 
 ParseSourceOpenFileMode(raw) {
@@ -4881,7 +4927,9 @@ InstallPanelHotkeys() {
     HotIf(IsPanelFileViewActive)
     Hotkey("Enter", PanelOpenSelection)
     Hotkey("Delete", PanelDeleteSelection)
-    Hotkey("+F10", PanelShowSystemMenu)
+    ; Do not register Shift+F10 separately. The native ListView ContextMenu
+    ; event handles both Shift+F10 and AppsKey, preventing one gesture from
+    ; opening a hotkey menu and then a second native-control menu.
     Hotkey("^Enter", PanelRevealSelection)
     Hotkey("^c", PanelCopyFileObjects)
     Hotkey("^+c", PanelCopyPaths)
@@ -4926,14 +4974,6 @@ PanelDeleteSelection(*) {
     context := GetActiveSelectionContext()
     if context.Paths.Length
         DeletePathsToRecycleBin(context.Paths)
-}
-
-PanelShowSystemMenu(*) {
-    global Panel
-    context := GetActiveSelectionContext()
-    if context.Paths.Length
-        ShowShellContextMenu(GetShellMenuPaths(context.Paths, context.Clicked),
-            Panel.Hwnd, -1, -1)
 }
 
 PanelRevealSelection(*) {
@@ -5107,6 +5147,11 @@ RecentItemSelect(list, row, selected) {
 RecentContextMenu(list, row, isRightClick, x, y) {
     global RecentItemPaths
     CancelFilePointerGesture()
+    if !row && !isRightClick {
+        row := list.GetNext(0, "F")
+        if !row
+            row := list.GetNext(0)
+    }
     if !row || !RecentItemPaths.Has(row)
         return
     if !IsListRowSelected(list.Hwnd, row) {
@@ -5118,10 +5163,9 @@ RecentContextMenu(list, row, isRightClick, x, y) {
         ShowPanelMsgBox("文件不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
         return
     }
-    if GetKeyState("Shift", "P")
-        ShowShellContextMenu([path], list.Gui.Hwnd, x, y)
-    else
-        ShowPopDropContextMenu([path], path, list.Gui.Hwnd, x, y)
+    alternate := ContextMenuGestureIsAlternate(list.Hwnd, isRightClick)
+    ShowConfiguredContextMenu(
+        [path], path, list.Gui.Hwnd, x, y, alternate)
 }
 
 FileViewItemSelect(list, row, selected) {
@@ -5693,6 +5737,11 @@ FileViewNotify(wParam, lParam, msg, hwnd) {
 FileViewContextMenu(list, row, isRightClick, x, y) {
     global ItemPaths
     CancelFilePointerGesture()
+    if !row && !isRightClick {
+        row := list.GetNext(0, "F")
+        if !row
+            row := list.GetNext(0)
+    }
     if !row || !ItemPaths.Has(row)
         return
     if !IsListRowSelected(list.Hwnd, row) {
@@ -5710,10 +5759,9 @@ FileViewContextMenu(list, row, isRightClick, x, y) {
     paths := GetSelectedExistingPaths()
     if !paths.Length
         paths := [path]
-    if GetKeyState("Shift", "P")
-        ShowShellContextMenu(GetShellMenuPaths(paths, path), list.Gui.Hwnd, x, y)
-    else
-        ShowPopDropContextMenu(paths, path, list.Gui.Hwnd, x, y)
+    alternate := ContextMenuGestureIsAlternate(list.Hwnd, isRightClick)
+    ShowConfiguredContextMenu(
+        paths, path, list.Gui.Hwnd, x, y, alternate)
 }
 
 IsListRowSelected(hwnd, row) {
@@ -5744,8 +5792,55 @@ GetShellMenuPaths(paths, clickedPath) {
     return paths.Clone()
 }
 
+ContextMenuGestureIsAlternate(hwnd, isRightClick) {
+    global PendingContextMenuMouseShift, PendingContextMenuKeyboardAlternate
+    if !isRightClick {
+        alternate := PendingContextMenuKeyboardAlternate.Has(hwnd)
+            ? PendingContextMenuKeyboardAlternate[hwnd] : false
+        if PendingContextMenuKeyboardAlternate.Has(hwnd)
+            PendingContextMenuKeyboardAlternate.Delete(hwnd)
+        return alternate
+    }
+    alternate := PendingContextMenuMouseShift.Has(hwnd)
+        ? PendingContextMenuMouseShift[hwnd]
+        : GetKeyState("Shift", "P")
+    if PendingContextMenuMouseShift.Has(hwnd)
+        PendingContextMenuMouseShift.Delete(hwnd)
+    return alternate
+}
+
+ShowConfiguredContextMenu(
+    paths, clickedPath, ownerHwnd, x, y, alternate := false
+) {
+    global DefaultContextMenu, CONTEXT_MENU_SYSTEM
+    global ContextMenuDispatchActive
+    if ContextMenuDispatchActive
+        return
+    ContextMenuDispatchActive := true
+    try {
+        kind := ResolveContextMenuKind(DefaultContextMenu, alternate)
+        if kind = CONTEXT_MENU_SYSTEM
+            ShowSystemContextMenuForSelection(
+                paths, clickedPath, ownerHwnd, x, y)
+        else
+            ShowPopDropContextMenu(
+                paths, clickedPath, ownerHwnd, x, y)
+    } finally {
+        ContextMenuDispatchActive := false
+    }
+}
+
+ShowSystemContextMenuForSelection(
+    paths, clickedPath, ownerHwnd, x, y
+) {
+    shellPaths := GetShellMenuPaths(paths, clickedPath)
+    if paths.Length > 1 && shellPaths.Length = 1
+        SetUserStatus("所选项目来自不同位置；系统菜单仅作用于当前项目。")
+    ShowShellContextMenu(shellPaths, ownerHwnd, x, y)
+}
+
 ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
-    global PinnedPaths
+    global PinnedPaths, DefaultContextMenu, CONTEXT_MENU_POPDROP
 
     contextMenu := Menu()
     openText := "打开`tEnter"
@@ -5817,10 +5912,12 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
     contextMenu.Add(deleteText,
         DeletePathsToRecycleBin.Bind(paths.Clone()))
 
-    contextMenu.Add()
-    systemText := "更多系统操作…`tShift+F10"
-    contextMenu.Add(systemText, ShowSystemMenuForSelection.Bind(
-        paths.Clone(), clickedPath, ownerHwnd, x, y))
+    if ParseDefaultContextMenu(DefaultContextMenu) = CONTEXT_MENU_POPDROP {
+        contextMenu.Add()
+        systemText := "更多系统操作…`tShift+F10"
+        contextMenu.Add(systemText, ShowSystemMenuForSelection.Bind(
+            paths.Clone(), clickedPath, ownerHwnd, x, y))
+    }
 
     point := MenuScreenPoint(ownerHwnd, x, y)
     BeginAutoHidePause()
@@ -5854,7 +5951,8 @@ MenuScreenPoint(ownerHwnd, x, y) {
 }
 
 ShowSystemMenuForSelection(paths, clickedPath, ownerHwnd, x, y, *) {
-    ShowShellContextMenu(GetShellMenuPaths(paths, clickedPath), ownerHwnd, x, y)
+    ShowSystemContextMenuForSelection(
+        paths, clickedPath, ownerHwnd, x, y)
 }
 
 BuildTransferTargetMenu(operation, paths) {
@@ -6472,8 +6570,33 @@ IsTrackedFileViewHwnd(hwnd) {
 }
 
 FileViewRightButtonDown(wParam, lParam, msg, hwnd) {
-    if IsTrackedFileViewHwnd(hwnd)
+    global PendingContextMenuMouseShift, PendingContextMenuKeyboardAlternate
+    if IsTrackedFileViewHwnd(hwnd) {
         CancelFilePointerGesture()
+        if PendingContextMenuKeyboardAlternate.Has(hwnd)
+            PendingContextMenuKeyboardAlternate.Delete(hwnd)
+        ; ContextMenu is raised after the button message. Capture Shift now so
+        ; a quick key release cannot turn Shift+right-click into a default-menu
+        ; invocation.
+        PendingContextMenuMouseShift[hwnd] := GetKeyState("Shift", "P")
+    }
+}
+
+FileViewContextMenuKeyDown(wParam, lParam, msg, hwnd) {
+    global PendingContextMenuKeyboardAlternate, PendingContextMenuMouseShift
+    if !IsTrackedFileViewHwnd(hwnd)
+        return
+    static VK_F10 := 0x79
+    static VK_APPS := 0x5D
+    if PendingContextMenuMouseShift.Has(hwnd)
+        PendingContextMenuMouseShift.Delete(hwnd)
+    if wParam = VK_APPS {
+        ; AppsKey always opens the configured default, even if Shift happens
+        ; to be held for an unrelated selection gesture.
+        PendingContextMenuKeyboardAlternate[hwnd] := false
+    } else if wParam = VK_F10 && GetKeyState("Shift", "P") {
+        PendingContextMenuKeyboardAlternate[hwnd] := true
+    }
 }
 
 FileViewCancelInteraction(wParam, lParam, msg, hwnd) {
@@ -8996,6 +9119,7 @@ RunSelfTests() {
     global NO_EXTENSION_TOKEN
     global MODE_FILES, MODE_LAUNCHER, SCOPE_FILES_ONLY, SORT_NAME_ASC
     global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
+    global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
     global DROP_ADAPTER_HDROP, DROP_ADAPTER_VIRTUAL, DROP_ADAPTER_PNG
     global DROP_ADAPTER_URL, DROP_ADAPTER_UNSUPPORTED
     global APP_VERSION
@@ -9014,6 +9138,24 @@ RunSelfTests() {
         AssertSelfTest(ParseSourceOpenFileMode("unknown")
             = SOURCE_OPEN_MODE_INHERIT,
             "损坏来源打开方式继承全局")
+        AssertSelfTest(ParseDefaultContextMenu("") = CONTEXT_MENU_POPDROP,
+            "缺失默认右键菜单回退为 PopDrop")
+        AssertSelfTest(ParseDefaultContextMenu("unknown") = CONTEXT_MENU_POPDROP,
+            "损坏默认右键菜单回退为 PopDrop")
+        AssertSelfTest(ParseDefaultContextMenu("system") = CONTEXT_MENU_SYSTEM,
+            "默认右键菜单大小写不敏感")
+        AssertSelfTest(ResolveContextMenuKind(
+            CONTEXT_MENU_POPDROP, false) = CONTEXT_MENU_POPDROP,
+            "PopDrop 默认普通操作")
+        AssertSelfTest(ResolveContextMenuKind(
+            CONTEXT_MENU_POPDROP, true) = CONTEXT_MENU_SYSTEM,
+            "PopDrop 默认 Shift 反转")
+        AssertSelfTest(ResolveContextMenuKind(
+            CONTEXT_MENU_SYSTEM, false) = CONTEXT_MENU_SYSTEM,
+            "系统菜单默认普通操作")
+        AssertSelfTest(ResolveContextMenuKind(
+            CONTEXT_MENU_SYSTEM, true) = CONTEXT_MENU_POPDROP,
+            "系统菜单默认 Shift 反转")
         extensions := NormalizeOpenAppExtensions("PDF, .pdf, txt, <none>, none")
         AssertSelfTest(extensions.Length = 3, "扩展名去重")
         AssertSelfTest(extensions[1] = ".pdf", "扩展名小写及点号")

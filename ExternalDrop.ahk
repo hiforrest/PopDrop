@@ -394,7 +394,7 @@ CreateExternalTransfer(dataObject, adapter, target) {
         RetryPath: retryPath,
         Pid: pid, Status: "Preparing", Items: [], Created: A_Now,
         Completed: false, RefreshQueued: false, LastUpdate: A_TickCount,
-        AttentionSeen: false
+        AttentionSeen: false, PresentedItems: Map()
     }
     TransferBatches[batchId] := batch
     try WaitForTransferHandshake(batch, 1200)
@@ -588,6 +588,12 @@ PollTransferJobs() {
         current := TransferBatchUiSignature(batch)
         if previous != current
             changed := true
+        ; A finalized file is usable before the batch finishes its bounded
+        ; image-quality reconciliation. Refresh as soon as each new final path
+        ; appears, while keeping the terminal refresh below for any later
+        ; replacement or duplicate cleanup performed by the helper.
+        if TransferBatchHasNewPresentableItems(batch)
+            TransferRefreshSources[PathKey(batch.TargetPath)] := batch
         if batch.Completed && !batch.RefreshQueued {
             batch.RefreshQueued := true
             completedNow.Push(batch)
@@ -605,6 +611,23 @@ PollTransferJobs() {
         TrimTransferHistory(80)
     if changed
         UpdateTransferUi()
+}
+
+TransferBatchHasNewPresentableItems(batch) {
+    if !HasProp(batch, "PresentedItems")
+        batch.PresentedItems := Map()
+    found := false
+    for item in batch.Items {
+        if item.FinalPath = ""
+            || !ValueInArray(item.Status, ["Completed", "NeedsAttention"])
+            continue
+        key := item.Id != "" ? item.Id : PathKey(item.FinalPath)
+        if batch.PresentedItems.Has(key)
+            continue
+        batch.PresentedItems[key] := item.FinalPath
+        found := true
+    }
+    return found
 }
 
 TransferBatchUiSignature(batch) {
@@ -1196,7 +1219,8 @@ RetryUrlTransfer(previous) {
         CancelPath: cancelPath, ReadyPath: readyPath, MarshalPath: "",
         RetryPath: retryPath, Pid: pid, Status: "Preparing", Items: [],
         Created: A_Now, Completed: false, RefreshQueued: false,
-        LastUpdate: A_TickCount, AttentionSeen: false
+        LastUpdate: A_TickCount, AttentionSeen: false,
+        PresentedItems: Map()
     }
     TransferBatches[batchId] := batch
     try WaitForTransferHandshake(batch, 1200)
