@@ -3,7 +3,11 @@
 `PopDropTransfer.exe` 是 PopDrop 外部内容投放的最小后台组件。它只负责：
 
 - 解封送 `IDataObject`；
-- 读取 `CF_HDROP` 临时路径、`FILEDESCRIPTORW/FILECONTENTS`、
+- 对所有外部异步 HDROP 执行唯一一次 `GetData(CF_HDROP)`，并读取来源路径；
+- 若 HDROP 来源已经位于目标目录，等待来源写入完成后认领原文件，不再同目录复制；
+- 在 `IDataObjectAsyncCapability::EndOperation()` 后短暂观察所有适配器保存的本批
+  图片，收敛来源程序延迟生成的同名缩略图或原图；
+- 读取 `FILEDESCRIPTORW/FILECONTENTS`、
   PNG/DIB 和明确 URL；
 - 分块写入隐藏的 `.popdrop-part`；
 - 原子落盘、安全自动改名、网络来源标记；
@@ -27,7 +31,8 @@ powershell -ExecutionPolicy Bypass -File .\native\build.ps1
 
 AHK 源码运行时根据自身位数选择对应文件。发布编译版时，将对应架构 helper 复制到
 `PopDrop.exe` 同目录。helper 协议版本写在请求和状态文件中；不兼容版本会失败而不会
-猜测字段。
+猜测字段。源码模式优先加载 `native\bin\<架构>`，编译版优先加载程序同目录组件；
+握手还会校验 `HelperVersion`，防止根目录残留旧 EXE 掩盖最新构建。
 
 ## 故障隔离
 

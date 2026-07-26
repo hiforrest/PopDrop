@@ -15,7 +15,7 @@
 ; ──── 排序模式常量 ────
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
-global APP_VERSION := "0.8.0"
+global APP_VERSION := "0.8.8"
 global CONFIG_VERSION := "12"
 
 ; ──── 文件夹模式常量 ────
@@ -135,7 +135,7 @@ global PinnedDropDiscoveryActive := false
 global ConfigErrors := []
 global LastValidFolderSettings := []
 global ConfigErrorsShown := false
-global ThumbnailPolicy := "Fast"
+global ThumbnailPolicy := "Full"
 global CachePathSetting := ""
 global CacheDir := ""
 global CacheFilePath := ""
@@ -316,7 +316,7 @@ EnsureConfig() {
     "ShowRecentSidebar=1`n"
     "RecentFileCount=12`n"
     "CachePath=`n"
-    "ThumbnailPolicy=Fast`n"
+    "ThumbnailPolicy=Full`n"
     "; 窗口模式：always_on_top（默认）| temporary（失焦自动隐藏）| normal（普通窗口）`n"
     "WindowMode=temporary`n"
     "; ModifiedDesc（默认，从新到旧）| NameAsc（文件名自然升序）`n"
@@ -534,7 +534,8 @@ LoadSettings(*) {
         RecentFileCount := 12
     RecentFileCount := Max(1, Min(RecentFileCount, 100))
 
-    ThumbnailPolicy := StrLower(Trim(IniRead(ConfigPath, "General", "ThumbnailPolicy", "Fast"))) = "full"
+    ThumbnailPolicy := StrLower(Trim(IniRead(
+        ConfigPath, "General", "ThumbnailPolicy", "Full"))) = "full"
         ? "Full" : "Fast"
     CachePathSetting := Trim(IniRead(ConfigPath, "General", "CachePath", ""))
     LastOpenProgramDir := NormalizePath(
@@ -2239,11 +2240,11 @@ BuildPanel() {
     RecentView.OnEvent("ContextMenu", RecentContextMenu)
     RecentView.OnEvent("ItemSelect", RecentItemSelect)
 
-    TransferStatusText := Panel.AddText(
-        "xm y+6 w716 h22 +0x200 +0x100", "↓ 无活动传输 · 点击查看")
-    TransferStatusText.OnEvent("Click", OpenTransferCenter)
-    StatusText := Panel.AddText("xm y+2 w716 h22 +0x200 +0x100", "就绪")
+    StatusText := Panel.AddText("xm y+6 w500 h22 +0x200 +0x100", "就绪")
     StatusText.OnEvent("Click", HandleStatusAction)
+    TransferStatusText := Panel.AddText(
+        "x+8 yp w208 h22 Right +0x200 +0x100", "↓ 下载")
+    TransferStatusText.OnEvent("Click", OpenTransferCenter)
     Panel.OnEvent("Close", HandlePanelClose)
     Panel.OnEvent("Escape", HandlePanelEscape)
     Panel.OnEvent("Size", ResizePanel)
@@ -2534,7 +2535,7 @@ ResizePanel(guiObj, minMax, width, height) {
     global ShowRecentSidebar
     if minMax = -1
         return
-    contentHeight := Max(160, height - 118)
+    contentHeight := Max(160, height - 92)
     if ShowRecentSidebar {
         sidebarWidth := Min(280, Max(190, Floor(width * 0.28)))
         mainWidth := Max(280, width - sidebarWidth - 36)
@@ -2550,8 +2551,11 @@ ResizePanel(guiObj, minMax, width, height) {
         RecentLabel.Visible := false
         RecentView.Visible := false
     }
-    TransferStatusText.Move(, height - 53, Max(200, width - 24))
-    StatusText.Move(, height - 27, Max(200, width - 24))
+    transferWidth := Min(360, Max(150, Floor(width * 0.38)))
+    statusWidth := Max(100, width - transferWidth - 32)
+    StatusText.Move(12, height - 27, statusWidth, 22)
+    TransferStatusText.Move(20 + statusWidth, height - 27,
+        transferWidth, 22)
 }
 
 RequestNativeLayout() {
@@ -4174,6 +4178,7 @@ OpenItemWithDefaultApplication(path) {
 InstallPanelHotkeys() {
     HotIf(IsPanelFileViewActive)
     Hotkey("Enter", PanelOpenSelection)
+    Hotkey("Delete", PanelDeleteSelection)
     Hotkey("+F10", PanelShowSystemMenu)
     Hotkey("^Enter", PanelRevealSelection)
     Hotkey("^c", PanelCopyFileObjects)
@@ -4213,6 +4218,12 @@ PanelOpenSelection(*) {
     context := GetActiveSelectionContext()
     if context.Paths.Length
         OpenSelectedItems(context.Paths)
+}
+
+PanelDeleteSelection(*) {
+    context := GetActiveSelectionContext()
+    if context.Paths.Length
+        DeletePathsToRecycleBin(context.Paths)
 }
 
 PanelShowSystemMenu(*) {
@@ -5082,6 +5093,11 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
         contextMenu.Disable(addText)
     if !removeCount
         contextMenu.Disable(removeText)
+
+    contextMenu.Add()
+    deleteText := "删除`tDelete"
+    contextMenu.Add(deleteText,
+        DeletePathsToRecycleBin.Bind(paths.Clone()))
 
     contextMenu.Add()
     systemText := "更多系统操作…`tShift+F10"
@@ -5994,6 +6010,213 @@ RemoveInvalidTransferTargets(*) {
     SetUserStatus("已移除不可用的目标位置")
 }
 
+DeletePathsToRecycleBin(paths, *) {
+    existing := []
+    for path in paths {
+        normalized := NormalizePath(path)
+        if FileExist(normalized) && !ArrayContainsPath(existing, normalized)
+            existing.Push(normalized)
+    }
+    if !existing.Length {
+        ShowPanelMsgBox("所选项目均不存在或当前无法访问。",
+            "移入回收站", "Icon!")
+        return false
+    }
+    itemText := existing.Length = 1
+        ? "“" GetFileName(existing[1]) "”"
+        : existing.Length " 个项目"
+    answer := ShowPanelMsgBox(
+        "确定要将 " itemText " 移入回收站吗？`n`n"
+        . "PopDrop 不会在回收站不可用时改为永久删除。",
+        "移入回收站", "YesNo Default2 Icon!")
+    if answer != "Yes"
+        return false
+    return PerformRecycleDelete(existing)
+}
+
+PerformRecycleDelete(paths) {
+    ; FOFX_RECYCLEONDELETE makes recycling part of the requested Shell
+    ; operation. There is deliberately no FileDelete/DirDelete fallback.
+    global Panel
+    validPaths := []
+    skipped := 0
+    details := []
+    for path in paths {
+        path := NormalizePath(path)
+        if !FileExist(path) {
+            skipped += 1
+            details.Push(path "：项目不存在或无法访问")
+            continue
+        }
+        if IsPathRoot(path) {
+            skipped += 1
+            details.Push(path "：不能将磁盘或共享根目录移入回收站")
+            continue
+        }
+        if !ArrayContainsPath(validPaths, path)
+            validPaths.Push(path)
+    }
+    if !validPaths.Length {
+        SetUserStatus("没有可移入回收站的项目")
+        return {
+            Success: 0, Failed: 0, Skipped: skipped,
+            Aborted: false, Changed: false, RefreshQueued: false,
+            Details: details
+        }
+    }
+
+    viewState := CaptureViewState(validPaths)
+    state := {
+        Operation: "delete",
+        Target: "",
+        Success: 0,
+        Failed: 0,
+        Changed: false,
+        Mappings: Map(),
+        ResultPaths: [],
+        PinnedMappingFailures: [],
+        DeletedPaths: [],
+        Details: details
+    }
+    sink := CreateFileOperationProgressSink(state)
+    fileOperation := 0
+    cookie := 0
+    queued := 0
+    aborted := 0
+    performHr := 0x80004005
+    try {
+        clsid := GuidBuffer("{3AD05575-8857-4850-9277-11B85BDB8E09}")
+        iidFileOperation := GuidBuffer(
+            "{947AAB5F-0A5C-4C13-B4D6-4BF7836FC9F8}")
+        hr := DllCall("ole32\CoCreateInstance", "ptr", clsid.Ptr,
+            "ptr", 0, "uint", 1, "ptr", iidFileOperation.Ptr,
+            "ptr*", &fileOperation, "int")
+        if hr != 0 || !fileOperation
+            throw Error("无法创建 Windows Shell 回收站操作。")
+
+        ; FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR |
+        ; FOFX_SHOWELEVATIONPROMPT | FOFX_RECYCLEONDELETE |
+        ; FOFX_ADDUNDORECORD. Windows 10/11 therefore receives both explicit
+        ; Recycle Bin and user-session undo semantics.
+        operationFlags := 0x40 | 0x200 | 0x40000 | 0x80000 | 0x20000000
+        ComCall(5, fileOperation, "uint", operationFlags)
+        ComCall(9, fileOperation, "ptr", Panel.Hwnd)
+        hr := ComCall(3, fileOperation, "ptr", sink.Ptr, "uint*", &cookie)
+        if hr != 0
+            throw Error("无法订阅回收站操作结果。")
+
+        for sourcePath in validPaths {
+            sourceItem := CreateShellItem(sourcePath)
+            if !sourceItem {
+                state.Failed += 1
+                state.Details.Push(sourcePath "：Shell 无法解析")
+                continue
+            }
+            try {
+                hr := ComCall(18, fileOperation, "ptr", sourceItem,
+                    "ptr", 0)
+                if HResultSucceeded(hr)
+                    queued += 1
+                else {
+                    state.Failed += 1
+                    state.Details.Push(
+                        sourcePath "：无法加入回收站操作队列")
+                }
+            } finally {
+                ObjRelease(sourceItem)
+            }
+        }
+        if !queued
+            throw Error("没有项目能够加入回收站操作队列。")
+
+        BeginAutoHidePause()
+        try performHr := ComCall(21, fileOperation)
+        finally EndAutoHidePause()
+        ComCall(22, fileOperation, "int*", &aborted)
+    } catch as err {
+        ShowPanelMsgBox(
+            "无法将所选项目移入回收站：`n" err.Message
+            . "`n`n未执行永久删除。",
+            "删除失败", "Iconx")
+    } finally {
+        if fileOperation && cookie
+            try ComCall(4, fileOperation, "uint", cookie)
+        if fileOperation
+            ObjRelease(fileOperation)
+        ReleaseFileOperationSink(sink)
+    }
+
+    refreshQueued := false
+    totalFailures := state.Failed + skipped
+    if state.Changed {
+        try RemoveDeletedPinnedPaths(state.DeletedPaths)
+        catch as err
+            ShowPanelMsgBox(
+                "项目已移入回收站，但固定项配置更新失败：`n"
+                . err.Message "`n`n请检查 config.ini。",
+                "固定项更新失败", "Icon!")
+        QueueSingleRefreshAfterFileOperation(viewState, Map())
+        refreshQueued := true
+        if totalFailures {
+            SetActionStatus(
+                "已将 " state.Success " 个项目移入回收站，"
+                . totalFailures " 个失败或跳过    查看详情",
+                ShowRecycleDeleteDetails.Bind(state.Details.Clone()))
+        } else if aborted {
+            SetUserStatus("已将 " state.Success
+                . " 个项目移入回收站；操作随后被取消")
+        } else {
+            SetUserStatus("已将 " state.Success " 个项目移入回收站")
+        }
+    } else if aborted || HResultSucceeded(performHr) {
+        SetUserStatus("删除操作已取消，未产生文件变化")
+    }
+    return {
+        Success: state.Success,
+        Failed: state.Failed,
+        Skipped: skipped,
+        Aborted: !!aborted,
+        Changed: state.Changed,
+        RefreshQueued: refreshQueued,
+        Details: state.Details
+    }
+}
+
+RemoveDeletedPinnedPaths(deletedPaths) {
+    global PinnedPaths
+    if !deletedPaths.Length
+        return
+    original := PinnedPaths.Clone()
+    remaining := []
+    for pinnedPath in PinnedPaths {
+        deleted := false
+        for deletedPath in deletedPaths {
+            if IsSameOrDescendantPath(pinnedPath, deletedPath) {
+                deleted := true
+                break
+            }
+        }
+        if !deleted
+            remaining.Push(pinnedPath)
+    }
+    if PathArraysEqual(original, remaining)
+        return
+    PinnedPaths := remaining
+    try SavePinnedFiles()
+    catch as err {
+        PinnedPaths := original
+        throw err
+    }
+}
+
+ShowRecycleDeleteDetails(details, *) {
+    message := details.Length
+        ? JoinArray(details, "`n") : "没有更多错误详情。"
+    ShowPanelMsgBox(
+        message "`n`nPopDrop 没有执行永久删除。",
+        "回收站操作详情", "Iconi")
+}
+
 PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
     ; Native IFileOperation pipeline. The advised
     ; IFileOperationProgressSink records actual destination Shell items;
@@ -6016,7 +6239,12 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
     suppressFinalStatus := IsObject(operationContext)
         && HasProp(operationContext, "SuppressFinalStatus")
         && operationContext.SuppressFinalStatus
+    adoptDirectDrop := IsObject(operationContext)
+        && HasProp(operationContext, "FromDrop") && operationContext.FromDrop
+        && HasProp(operationContext, "SourceKind")
+        && operationContext.SourceKind = "External"
     validPaths := []
+    adoptedPaths := []
     skipped := 0
     noOp := 0
     validationDetails := []
@@ -6042,14 +6270,48 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
             validationDetails.Push(path "：不能复制或移动到自身或后代目录")
             continue
         }
-        if operation = "move" && PathsEqual(GetParentPath(path), targetPath) {
-            noOp += 1
-            continue
+        if PathsEqual(GetParentPath(path), targetPath) {
+            if adoptDirectDrop {
+                adoptedPaths.Push(path)
+                validationDetails.Push(path
+                    "：来源已直接保存到目标文件夹，未再次复制")
+                continue
+            }
+            if operation = "move" {
+                noOp += 1
+                continue
+            }
         }
         if !ArrayContainsPath(validPaths, path)
             validPaths.Push(path)
     }
     if !validPaths.Length {
+        if adoptedPaths.Length {
+            viewState := CaptureViewState(adoptedPaths)
+            try RememberSuccessfulTarget(targetPath)
+            catch {
+                ; The file is already safe in the target. A recent-target
+                ; bookkeeping failure must not trigger a second copy.
+            }
+            QueueSingleRefreshAfterFileOperation(viewState, Map())
+            if !suppressFinalStatus
+                SetActionStatus(
+                    "来源已将 " adoptedPaths.Length
+                    . " 个项目直接保存到「" targetName
+                    . "」，PopDrop 未重复复制    打开目标文件夹",
+                    OpenFolderPath.Bind(targetPath))
+            return {
+                Success: adoptedPaths.Length,
+                Failed: 0,
+                Skipped: skipped + noOp,
+                Aborted: false,
+                Changed: true,
+                RefreshQueued: true,
+                Details: validationDetails,
+                ResultPaths: adoptedPaths.Clone(),
+                Adopted: adoptedPaths.Length
+            }
+        }
         message := noOp
             ? "所选项目已属于该来源或目标与源位置相同，没有需要执行的项目。"
             : "没有可执行的项目；失效路径或文件夹自身/后代目标已跳过。"
@@ -6063,15 +6325,19 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
         }
     }
 
-    viewState := CaptureViewState(validPaths)
+    viewStatePaths := validPaths.Clone()
+    for path in adoptedPaths
+        viewStatePaths.Push(path)
+    viewState := CaptureViewState(viewStatePaths)
     state := {
         Operation: operation,
         Target: targetPath,
-        Success: 0,
+        Success: adoptedPaths.Length,
         Failed: 0,
-        Changed: false,
+        Changed: adoptedPaths.Length > 0,
         Mappings: Map(),
-        ResultPaths: [],
+        ResultPaths: adoptedPaths.Clone(),
+        Adopted: adoptedPaths.Length,
         PinnedMappingFailures: [],
         Details: []
     }
@@ -6191,6 +6457,9 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
             message := "已将 " state.Success " 个项目" actionText
                 . "到「" targetName "」    打开目标文件夹"
         }
+        if state.Adopted
+            message .= "；其中 " state.Adopted
+                . " 项由来源直接保存，未重复复制"
         if IsObject(operationContext)
             && HasProp(operationContext, "FromDrop")
             && operationContext.FromDrop
@@ -6219,7 +6488,8 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
         Changed: state.Changed,
         RefreshQueued: refreshQueued,
         Details: state.Details,
-        ResultPaths: state.ResultPaths
+        ResultPaths: state.ResultPaths,
+        Adopted: state.Adopted
     }
 }
 
@@ -6505,6 +6775,7 @@ FileOpSinkPreDeleteItem(this, flags, item) {
     return 0
 }
 FileOpSinkPostDeleteItem(this, flags, item, hr, created) {
+    RecordFileOperationResult(this, item, hr, created)
     return 0
 }
 FileOpSinkPreNewItem(this, flags, destination, newName) {
@@ -6534,6 +6805,13 @@ RecordFileOperationResult(this, originalItem, hr, createdItem) {
     state := FileOperationSinks[this].State
     originalPath := GetShellItemPath(originalItem)
     if HResultSucceeded(hr) {
+        if state.Operation = "delete" {
+            state.Success += 1
+            state.Changed := true
+            if originalPath != ""
+                state.DeletedPaths.Push(originalPath)
+            return
+        }
         newPath := createdItem ? GetShellItemPath(createdItem) : ""
         state.Success += 1
         state.Changed := true
@@ -6843,15 +7121,20 @@ DropTargetDropCore(dataObject, keyState, screenX, screenY, effectPtr) {
         ClearDropVisuals()
         try {
             if session.Decision.Adapter = DROP_ADAPTER_HDROP {
-                session.Paths := ReadHDropPaths(dataObject)
-                if !session.Paths.Length
-                    throw Error("拖拽数据中没有有效的本地文件系统项目。")
-                if session.SourceKind = "External" && target.Type = "Files"
-                    && HDropRequiresAsyncTakeover(
-                        session.Paths, session.AsyncInfo)
+                if HDropShouldUseDirectAsyncTakeover(
+                    session.SourceKind, target, session.AsyncInfo) {
+                    ; Do not pre-read delayed-render CF_HDROP here. Chromium
+                    ; may start one source download per GetData call.
                     CreateExternalTransfer(dataObject,
                         session.Decision.Adapter, target)
-                else {
+                } else {
+                    session.Paths := ReadHDropPaths(dataObject)
+                    if !session.Paths.Length
+                        throw Error("拖拽数据中没有有效的本地文件系统项目。")
+                    if session.SourceKind = "External"
+                        && HasProp(session.Decision, "HasExplicitUrl")
+                        && session.Decision.HasExplicitUrl
+                        session.Paths := DedupeWebHDropPaths(session.Paths)
                     session.InternalItems := GetActiveInternalDropItems(
                         session.Paths)
                     session.PathInfo := BuildDropPathInfo(session.Paths)
@@ -8031,6 +8314,15 @@ RunSelfTests() {
         AssertSelfTest(ResolveDropEffect(
             dropPinnedTarget, 0x0004, 3, "Source") = 1,
             "固定项语义不受 Shift 改变")
+        AssertSelfTest(HDropShouldUseDirectAsyncTakeover(
+            "External", dropFilesTarget, {Supported: true}),
+            "外部异步 HDROP 不依赖 URL 直接接管")
+        AssertSelfTest(!HDropShouldUseDirectAsyncTakeover(
+            "External", dropFilesTarget, {Supported: false}),
+            "同步外部 HDROP 保留本地路径链路")
+        AssertSelfTest(!HDropShouldUseDirectAsyncTakeover(
+            "Source", dropFilesTarget, {Supported: true}),
+            "PopDrop 内部 HDROP 不交给外部 helper")
         AssertSelfTest(ShouldContinuePinnedReorder(dropPinnedTarget),
             "固定项原生分组内保持排序手势")
         AssertSelfTest(!ShouldContinuePinnedReorder({

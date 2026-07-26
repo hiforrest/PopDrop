@@ -1,4 +1,173 @@
-# PopDrop v0.8 外部内容投放开发报告
+# PopDrop v0.8.8 外部内容投放开发报告
+
+## v0.8.8 跨适配器统一图片收敛
+
+v0.8.7 的 EndOperation 后置观察仍只在 `request.adapter == "HDrop"` 且
+`ExtractHDrop()` 产生图片计划时启用。浏览器的数据格式优先级允许同一类网页图片走
+`FILEDESCRIPTORW/FILECONTENTS`、PNG/DIB 或公开 URL；这些路径保存的大图同样可能与
+浏览器自行写入下载目录的小图并存，但不会进入 HDROP 专用观察。这解释了实机仍稳定
+出现“大图先一秒、小图带 `(1)` 后缀随后出现”的结果。
+
+新实现把 `HDropReconcileContext` 提升为与适配器无关的
+`ImageReconcileContext`：
+
+- 在选择任何适配器前保存目标目录基线；
+- HDROP 可继续附带其明确网络来源，其余适配器在落盘后从统一任务状态中的
+  `finalPath` 自动收集图片计划；
+- `VirtualFiles`、`HDrop`、PNG、DIB/DIBV5、URL 和 URL 重试产生的图片全部进入相同
+  后置收敛；
+- 同批多个合法最终图片路径会整体排除，不会互相误判为延迟副本；
+- 只有相对传输开始基线新建或改变、名称归一后属于本批、且不是任何任务最终路径的
+  文件才允许删除或替换。
+- 后置观察按每个规范名称构造窄范围候选模式并以 200 ms 节流轮询，不在五秒窗口内
+  反复枚举整个下载目录。
+
+因此浏览器无论把被跟踪的大图交给哪种标准 Windows 数据格式，晚到的
+`name (1).jpg` 都会与 `name.jpg` 按 WIC 像素尺寸和字节数比较。
+
+反复实测无变化还暴露了部署层风险：`ResolveTransferHelper()` 原先始终优先脚本目录
+根部 EXE，`build.ps1` 却输出到 `native\bin\<架构>`。只要根部残留旧版本，重新构建
+不会改变实际执行组件。源码模式现改为优先 `native\bin`，编译发布模式仍优先同目录。
+helper 状态新增 `HelperVersion=0.8.8`，`WaitForTransferHandshake()` 强制与
+`APP_VERSION` 比较；旧 helper 因缺少版本字段也会被拒绝并终止。
+
+## v0.8.7 EndOperation 后置收敛
+
+实机文件时间给出了新的因果证据：两组大小图均为 helper 保存的大图先创建，另一张小图
+约一秒后创建。v0.8.6 只在 `GetData(CF_HDROP)` 前后和最终落盘前扫描候选；而 helper
+原先在落盘后调用 `IDataObjectAsyncCapability::EndOperation()`，随后立即退出。来源
+程序可以把 `EndOperation` 当作继续或完成自身拖放动作的信号，因此晚到文件不可能被
+此前的任何去重阶段看到。
+
+v0.8.7 增加 `HDropReconcileContext`，在 `EndOperation` 前保存目标目录的精确快照和
+每个已保存图片的最终路径、WIC 尺寸、字节数、任务行及安全来源。调用
+`EndOperation` 后，后台 helper 继续执行五秒有界观察：
+
+- 只检查相对于结束前快照新建或发生变化的文件；
+- 文件名必须与本批图片的规范候选键匹配；
+- 排除当前已选择的最终路径和未变化的既有文件；
+- 等待晚到文件关闭写句柄后再读取尺寸，避免比较半成品；
+- 晚到图片更小或完全相同时删除晚到副本；
+- 晚到图片像素更大时，写入隐藏 part 后原子替换原最终文件，再删除晚到路径；
+- 替换后重新应用 Zone Identifier / `IAttachmentExecute` 安全来源；
+- 清理或安全标记失败时转为 `NeedsAttention`，不会伪装成功。
+
+批次在观察期间保持 `Finalizing`，完成后才触发最终状态和刷新；主面板不等待该过程，
+全局传输槽也已提前释放，因此不会阻塞其他下载。
+
+## v0.8.6 网页图片质量收敛
+
+v0.8.5 的“目标目录候选绝对优先”解决了同目录重复复制，却会在浏览器先写入缩略图、
+稍后提供缓存原图时保留较小版本。新的实现把一次拖放中的网页图片视为候选组，而不是
+互相独立的文件：
+
+- `WaitForPathReady()` 在后台 helper 中等待候选写句柄关闭，比较时不再使用仍在增长的
+  瞬时大小；
+- WIC 解码第一帧元数据并取得真实宽高，选择顺序为像素面积、文件字节数、目标路径；
+- 数字副本后缀在图片候选键中被规范化，`photo.jpg` 与 `photo (1).jpg` 可以正确归组；
+- Chromium 在渲染 `CF_HDROP` 时可能把缩略图直接写入默认下载目录，却不把该路径列入
+  DROPFILES。helper 在 `GetData` 前取得目标目录文件快照，随后只把名称匹配、相对快照
+  新建或发生变化的图片补入候选组；未变化的既有文件不参与替换；
+- 若原图来自缓存而缩略图已经位于目标，原图先分块写入同卷隐藏 part，刷盘后使用
+  `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` 原子替换精确的小图路径。该路径
+  必须来自本批候选且仍位于目标目录，不会按名称覆盖任意旧文件；
+- 若较大候选本身已在目标，则直接认领它并删除本批中其余较小目标候选。
+
+AHK 启动告警的根因是 `adoptedPaths := []` 被误插入 `PerformRecycleDelete()`，
+实际使用它的 `PerformShellFileOperation()` 没有初始化。初始化现已移动到正确函数，
+并由静态测试约束其必须出现在第一次 `.Push()` 之前。
+
+## v0.8.5 同目录来源认领
+
+继续实测后，重复文件仍可能在只执行一次 `GetData(CF_HDROP)` 时出现。新的证据与路径
+模型表明：浏览器可把延迟文件自身建立在默认下载目录，而 PopDrop Files 来源也指向
+同一目录。此时来源路径已经是最终目标文件；旧 helper 仍执行
+`source → hidden part → unique final`，于是同目录内产生自动改名副本。浏览器持有原
+文件继续写入时，还会形成“一份较小、一份稍后完成”的尺寸差异。
+
+helper 的 `SameDirectoryPath()` 优先比较目录句柄的卷序列号与文件索引，无法获得可靠
+标识时才回退到完整路径比较。命中后进入 `WaitForSourceReady()`：
+
+- 不创建 part 或目标文件；
+- 用不包含 `FILE_SHARE_WRITE` 的只读打开检测来源写句柄是否已经关闭；
+- 每 100 ms 可取消轮询，状态写入仍受 125 ms 节流；
+- 未完成时只显示已观察字节，不提供百分比和剩余时间；
+- 最长等待 30 分钟，来源退出、取消、超时和其他 Win32 错误分别结束；
+- 完成后以原来源路径作为 `finalPath`，必要时调用 `IAttachmentExecute`。
+
+同名 HDROP 候选去重也调整了优先级：目标目录中的候选优先于初始大小。否则浏览器刚
+建立的目标文件可能暂时较小，旧“保留较大项”规则会选择另一个 Temp 候选并复制回目标，
+再次形成 `(2)`。只有候选是否已在目标一致时才继续按已知大小选择。
+
+同步外部 HDROP 在 `PerformShellFileOperation()` 中也记录 `adoptedPaths`。只有
+`FromDrop=true && SourceKind=External` 才会认领同目录路径；上下文菜单主动选择
+“复制到当前目录”仍交给 Shell 创建副本。纯认领批次排队一次扫描并返回成功结果，
+混合批次与其他 Shell 成功项共用一次刷新。
+
+## v0.8.4 异步 HDROP 零预读
+
+v0.8.3 仍把“明确 URL”作为直接接管异步 HDROP 的条件。实机截图和行为证明另一条路径
+仍存在：浏览器对象支持异步能力，但当前 URL 格式查询没有命中；AHK 因此先调用
+`ReadHDropPaths()`，随后发现路径位于 Temp，才调用 `CreateExternalTransfer()`。
+helper 缺失时后者报错，但前一次 `GetData(CF_HDROP)` 已经让浏览器生成了一张图片。
+
+v0.8.4 删除 `HDropRequiresAsyncTakeover(paths, asyncInfo)` 及其调用。新的决策只依赖：
+
+- 来源是外部应用；
+- 目标是普通 Files 来源；
+- 适配器为 `CF_HDROP`；
+- 数据对象声明 `IDataObjectAsyncCapability`。
+
+满足条件时直接进入 `CreateExternalTransfer()`；该函数首先解析 helper，成功后才进行
+COM marshaling。主进程不会读取路径。内部拖放和同步外部 HDROP 才进入
+`ReadHDropPaths() → ExecuteLocalDrop() → IFileOperation`。因此 Drop 中不再存在
+“读取路径后又把同一数据对象交给 helper”的控制流。
+
+## v0.8.3 单次延迟渲染接管
+
+第二轮实机反馈提供了决定性证据：首个文件瞬间完成且不进入传输中心，第二个文件稍后
+才由 helper 完成；将 `native` 改名后虽然 PopDrop 报 helper 缺失，首个文件仍会出现。
+这与 Chromium 延迟渲染的行为一致：旧 Drop 路径先由 AHK 调用
+`GetData(CF_HDROP)` 读取路径，再把同一个 `IDataObject` 交给 helper，helper 又调用
+一次 `GetData(CF_HDROP)`。每次读取都可能让浏览器启动一条独立文件生成通道。
+
+v0.8.3 对“外部来源 + Files 目标 + 明确 URL + 异步能力”的 HDROP 改为：
+
+1. 在读取任何 HDROP 数据前检查 helper 是否存在；
+2. 直接将 `IDataObject` marshaling 给 helper；
+3. helper 完成唯一一次 `GetData(CF_HDROP)`；
+4. 若这一次返回多个同名网页候选，再在 helper 内按大小稳定收敛；
+5. helper 缺失或接管失败时不读取 HDROP，因此不会留下传输中心之外的文件。
+
+普通资源管理器、QQ、微信没有网页 URL 特征，仍由 AHK 读取一次稳定路径并交给原
+`IFileOperation`，没有改写回归基线。
+
+同版还新增 `IFileOperation` 回收站删除（右键“删除”和 `Delete` 键），不使用
+`FileDelete/DirDelete` 永久删除回退；缩略图默认策略改为 `Full`，实际
+`IShellItemImageFactory` 标志继续只在 `Fast` 时附加缓存限定标志 `0x10`。
+
+## v0.8.2 链接图片重复接收修正
+
+实机反馈表明，链接包裹图片的重复内容不一定进入异步 Temp HDROP helper：浏览器可能
+提供非 Temp `CF_HDROP`，也可能提供同一批次内的多个虚拟文件描述符。v0.8.2 以
+“同一数据对象存在明确 URL + 安全文件名相同”为网页重复候选条件：
+
+- `CF_HDROP` 在 Drop 后、`IFileOperation` 前按文件名和大小收敛；
+- 虚拟文件在 `GetData(FILECONTENTS)` 前按描述符名称和已知大小收敛；
+- 大小不同保留较大项，等大/均未知时保留第一项；
+- 没有明确 URL 的本地或虚拟多文件不参与去重。
+
+因此第二个网络流不会被请求，而不是下载完成后再删除重复文件。
+
+## v0.8.1 实机反馈修正
+
+- 传输中心改用任务内容签名判断真实变化，重建行时保存并恢复批次/项目选择。
+- 成功历史统一显示 100%，原生 helper 保存全程平均速度。
+- 下载入口与主状态栏合并为一行右对齐，并增加 300 ms 启动延迟、800 ms 最短活动
+  展示、3 秒完成提示及需要查看后才消失的失败状态。
+- 浏览器异步临时 `CF_HDROP` 中的同名图片候选按大小保留更完整文件；稳定本地文件
+  链路不执行这项去重。
+- 设置页分组标题改为“下载”。
 
 ## 实现摘要
 
@@ -45,11 +214,12 @@ CF_HDROP
 IDropTarget::DragEnter
   └─ QueryGetData / optional EnumFormatEtc
 IDropTarget::Drop
-  ├─ stable CF_HDROP → existing IFileOperation
-  └─ async/temp HDROP or external adapter
+  ├─ stable CF_HDROP → one GetData → existing IFileOperation
+  └─ async web HDROP or external adapter (no UI GetData)
        ├─ CoMarshalInterface(IDataObject)
        ├─ launch PopDropTransfer.exe
        ├─ helper CoUnmarshalInterface + StartOperation
+       ├─ helper-only GetData for async web HDROP
        ├─ bounded ready handshake
        └─ return OLE loop
             └─ helper stream/HTTP → hidden part → flush → atomic final
@@ -114,7 +284,7 @@ URL 重试数据只以 `CryptProtectData` 当前用户 DPAPI 密文保存在批�
 
 ## UI、temporary 与刷新
 
-主状态栏上方新增独立固定传输状态，点击打开非模态传输中心。中心按批次列显示文件、
+主状态栏右侧新增固定下载入口，点击打开非模态传输中心。中心按批次列显示文件、
 安全来源值、目标、已完成/总大小、速度和状态；提供取消单项、取消整批、公开 URL
 重试、打开目标和清除记录。完成记录最多保留 80 个批次并在 24 小时后清理。
 
@@ -132,7 +302,7 @@ DragEnter 到 helper ready 或本地 Drop 完成期间沿用一层 temporary 暂
 
 ```text
 python3 -m unittest discover -s tests -v
-Ran 28 tests
+Ran 44 tests
 OK
 ```
 
@@ -140,10 +310,14 @@ OK
 
 - 10 组格式优先级、Unicode 文本拒绝及 URL 协议/凭据策略；
 - DragEnter 无 GetData、Drop 后两类执行入口和旧 IFileOperation 接线；
+- 网页异步 HDROP 在 AHK 预读前直接接管、helper 缺失检查早于 marshaling、
+  helper 内只有一次 `GetData(CF_HDROP)`；
 - COM marshaling、AsyncCapability、STGMEDIUM 和 IStream/HGLOBAL 接线；
 - part 隐藏/刷盘/原子落盘、AttachmentExecute、DPAPI 和 TLS 不降级；
 - TransferManager 状态区、传输中心、取消、URL 重试、分组标题和退出；
 - ExternalTransfer 配置的 UTF-16LE/BOM/CRLF/布局区域；
+- 回收站删除菜单/快捷键/`IFileOperation` 标志，以及 `ThumbnailPolicy=Full`
+  的模板、缺省读取和 Shell 缩略图标志；
 - 本地 HTTP 重定向、UTF-8 Content-Disposition、HTML 登录页、未知长度、
   chunked、Range 和提前断流；
 - 第一期原 11 项静态/逻辑回归测试。

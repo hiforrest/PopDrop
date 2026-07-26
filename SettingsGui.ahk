@@ -291,7 +291,7 @@ BuildGeneralSettingsPage(c, tabs) {
     c.EscapeHide := g.AddCheckBox("x50 y420",
         "按 Esc 隐藏 PopDrop")
 
-    g.AddGroupBox("x30 y507 w818 h116", "外部内容投放")
+    g.AddGroupBox("x30 y507 w818 h116", "下载")
     c.EnableUrlFallback := g.AddCheckBox("x50 y536",
         "允许公开 HTTPS 文件 URL 作为最后兜底")
     c.AllowHttp := g.AddCheckBox("x410 yp",

@@ -24,6 +24,11 @@ global TransferAllowHttp := false
 global TransferMaxConcurrent := 3
 global TransferShowNotifications := true
 global TransferLastOrphanCleanup := 0
+global TransferUiActiveDetectedTick := 0
+global TransferUiActiveShownTick := 0
+global TransferUiLastActiveText := ""
+global TransferUiCompletionPending := false
+global TransferUiCompletionShownTick := 0
 
 InitExternalDrop() {
     global TransferInspectEnabled, TransferInspectLog
@@ -101,12 +106,52 @@ ClassifyDataObject(dataObject) {
             || DataObjectSupportsFormat(dataObject, formats.InetUrlA, 1, -1)
             || DataObjectSupportsFormat(dataObject, formats.UriList, 1, -1))
     decision := ClassifyAvailableDropFormats(available)
+    decision.HasExplicitUrl := available["Url"]
 
     if TransferInspectEnabled {
         decision.Formats := EnumerateDataObjectFormats(dataObject)
         WriteDropInspection(decision, dataObject)
     }
     return decision
+}
+
+DedupeWebHDropPaths(paths) {
+    if paths.Length < 2
+        return paths
+    keep := []
+    bestByName := Map()
+    sizes := []
+    for index, path in paths {
+        keep.Push(true)
+        size := -1
+        attributes := FileExist(path)
+        if attributes && !InStr(attributes, "D") {
+            try size := FileGetSize(path)
+            nameKey := StrLower(GetFileName(path))
+            if nameKey != "" {
+                if !bestByName.Has(nameKey)
+                    bestByName[nameKey] := index
+                else {
+                    currentIndex := bestByName[nameKey]
+                    currentSize := sizes.Length >= currentIndex
+                        ? sizes[currentIndex] : -1
+                    if size >= 0
+                        && (currentSize < 0 || size > currentSize) {
+                        keep[currentIndex] := false
+                        bestByName[nameKey] := index
+                    } else
+                        keep[index] := false
+                }
+            }
+        }
+        sizes.Push(size)
+    }
+    result := []
+    for index, path in paths {
+        if keep[index]
+            result.Push(path)
+    }
+    return result
 }
 
 ClassifyAvailableDropFormats(available) {
@@ -255,15 +300,17 @@ DataObjectAsyncMode(dataObject) {
     }
 }
 
-HDropRequiresAsyncTakeover(paths, asyncInfo) {
-    if !asyncInfo.Supported
-        return false
-    tempRoot := RTrim(NormalizePath(A_Temp), "\")
-    for path in paths {
-        if IsSameOrDescendantPath(path, tempRoot)
-            return true
-    }
-    return false
+HDropShouldUseDirectAsyncTakeover(sourceKind, target, asyncInfo) {
+    ; Chromium can treat every IDataObject::GetData(CF_HDROP) call as a new
+    ; delayed-render request. URL formats are not a reliable browser marker:
+    ; some linked images expose async CF_HDROP without any URL format accepted
+    ; by QueryGetData. Therefore every external async HDROP is marshaled
+    ; directly to the helper before anyone reads CF_HDROP. The helper performs
+    ; the only GetData call. Internal PopDrop drags and synchronous Explorer/
+    ; QQ/WeChat HDROP stay on the existing local IFileOperation path.
+    return sourceKind = "External"
+        && IsObject(target) && target.Type = "Files"
+        && IsObject(asyncInfo) && asyncInfo.Supported
 }
 
 ExternalAdapterAllowedAtTarget(adapter, target) {
@@ -346,12 +393,14 @@ CreateExternalTransfer(dataObject, adapter, target) {
         CancelPath: cancelPath, ReadyPath: readyPath, MarshalPath: marshalPath,
         RetryPath: retryPath,
         Pid: pid, Status: "Preparing", Items: [], Created: A_Now,
-        Completed: false, RefreshQueued: false, LastUpdate: A_TickCount
+        Completed: false, RefreshQueued: false, LastUpdate: A_TickCount,
+        AttentionSeen: false
     }
     TransferBatches[batchId] := batch
     try WaitForTransferHandshake(batch, 1200)
     catch as err {
         TransferBatches.Delete(batchId)
+        try ProcessClose(pid)
         ; A terminated helper either never consumed the marshal packet or
         ; already released it while exiting. CoReleaseMarshalData safely
         ; reports the latter and avoids leaking the former.
@@ -462,11 +511,12 @@ ReleaseMarshaledDataFile(path) {
 }
 
 ResolveTransferHelper() {
-    candidates := [
-        A_ScriptDir "\PopDropTransfer.exe",
-        A_ScriptDir "\native\bin\" (A_PtrSize = 8 ? "x64" : "x86")
-            "\PopDropTransfer.exe"
-    ]
+    rootHelper := A_ScriptDir "\PopDropTransfer.exe"
+    builtHelper := A_ScriptDir "\native\bin\"
+        . (A_PtrSize = 8 ? "x64" : "x86") "\PopDropTransfer.exe"
+    candidates := A_IsCompiled
+        ? [rootHelper, builtHelper]
+        : [builtHelper, rootHelper]
     for path in candidates {
         if FileExist(path)
             return path
@@ -496,10 +546,22 @@ CreateTransferId(prefix) {
 }
 
 WaitForTransferHandshake(batch, timeoutMs) {
+    global APP_VERSION
     started := A_TickCount
     while ElapsedTickMilliseconds(started, A_TickCount) < timeoutMs {
-        if FileExist(batch.ReadyPath)
+        if FileExist(batch.ReadyPath) {
+            helperVersion := IniRead(
+                batch.StatePath, "Batch", "HelperVersion", "")
+            if helperVersion = ""
+                throw Error("传输组件版本过旧或无法识别。请重新运行 "
+                    . "native\build.ps1，并移除脚本目录中残留的旧 "
+                    . "PopDropTransfer.exe。")
+            if helperVersion != APP_VERSION
+                throw Error("传输组件版本不匹配：PopDrop "
+                    . APP_VERSION "，helper " helperVersion
+                    . "。请重新运行 native\build.ps1。")
             return true
+        }
         if !ProcessExist(batch.Pid)
             throw Error("传输 helper 在接管数据前退出。")
         Sleep(15)
@@ -515,8 +577,7 @@ PollTransferJobs() {
     changed := false
     completedNow := []
     for id, batch in TransferBatches {
-        previous := batch.Status "|" batch.LastUpdate "|"
-            . (batch.Items.Length ? batch.Items.Length : 0)
+        previous := TransferBatchUiSignature(batch)
         if FileExist(batch.StatePath)
             ReadTransferState(batch)
         else if !ProcessExist(batch.Pid) && !batch.Completed {
@@ -524,8 +585,7 @@ PollTransferJobs() {
             batch.Error := "传输 helper 意外退出。"
             batch.Completed := true
         }
-        current := batch.Status "|" batch.LastUpdate "|"
-            . (batch.Items.Length ? batch.Items.Length : 0)
+        current := TransferBatchUiSignature(batch)
         if previous != current
             changed := true
         if batch.Completed && !batch.RefreshQueued {
@@ -545,6 +605,15 @@ PollTransferJobs() {
         TrimTransferHistory(80)
     if changed
         UpdateTransferUi()
+}
+
+TransferBatchUiSignature(batch) {
+    signature := batch.Status "|" (HasProp(batch, "Error") ? batch.Error : "")
+        . "|" batch.Completed "|" batch.Items.Length
+    for item in batch.Items
+        signature .= Chr(30) item.Id "|" item.Status "|" item.Done "|"
+            . item.Total "|" item.Speed "|" item.Error "|" item.FinalPath
+    return signature
 }
 
 TrimTransferHistory(limit) {
@@ -631,7 +700,7 @@ TransferBatchActiveCount(batch) {
 
 GetTransferAggregate() {
     global TransferBatches
-    result := {Active: 0, Queued: 0, Failed: 0, Done: 0,
+    result := {Active: 0, Queued: 0, Failed: 0, UnseenFailed: 0, Done: 0,
         Total: 0, KnownTotal: true, Speed: 0, Current: ""}
     for id, batch in TransferBatches {
         if !batch.Items.Length && !batch.Completed {
@@ -655,8 +724,11 @@ GetTransferAggregate() {
                     result.KnownTotal := false
                 if result.Current = ""
                     result.Current := item.Name
-            } else if item.Status = "Failed" || item.Status = "NeedsAttention"
+            } else if item.Status = "Failed" || item.Status = "NeedsAttention" {
                 result.Failed += 1
+                if !HasProp(batch, "AttentionSeen") || !batch.AttentionSeen
+                    result.UnseenFailed += 1
+            }
         }
     }
     return result
@@ -664,26 +736,67 @@ GetTransferAggregate() {
 
 UpdateTransferUi() {
     global TransferStatusText, TransferCenter
+    global TransferUiActiveDetectedTick, TransferUiActiveShownTick
+    global TransferUiLastActiveText, TransferUiCompletionPending
+    global TransferUiCompletionShownTick
     aggregate := GetTransferAggregate()
+    now := A_TickCount
     if IsObject(TransferStatusText) {
         if aggregate.Active || aggregate.Queued {
-            text := "↓ " aggregate.Active " 个进行中"
-            if aggregate.Queued
-                text .= " · " aggregate.Queued " 个等待"
+            if !TransferUiActiveDetectedTick
+                TransferUiActiveDetectedTick := now
+            count := aggregate.Active + aggregate.Queued
+            text := "↓ 正在下载 " count " 项"
             if aggregate.KnownTotal && aggregate.Total > 0
                 text .= " · " Round(aggregate.Done * 100 / aggregate.Total) "%"
-            if aggregate.Speed > 0
-                text .= " · " FormatByteRate(aggregate.Speed)
-            if aggregate.KnownTotal && aggregate.Total > aggregate.Done
-                && aggregate.Speed > 0
-                text .= " · 剩余约 "
-                    . FormatDuration(Ceil(
-                        (aggregate.Total - aggregate.Done) / aggregate.Speed))
-            TransferStatusText.Text := text
-        } else if aggregate.Failed
-            TransferStatusText.Text := "↓ " aggregate.Failed " 个传输失败 · 点击查看"
-        else
-            TransferStatusText.Text := "↓ 无活动传输 · 点击查看"
+            if ElapsedTickMilliseconds(
+                TransferUiActiveDetectedTick, now) < 300
+                && !TransferUiActiveShownTick {
+                TransferStatusText.Text := "↓ 下载"
+                remaining := 300 - ElapsedTickMilliseconds(
+                    TransferUiActiveDetectedTick, now)
+                SetTimer(UpdateTransferUi, -Max(1, remaining))
+            } else {
+                if !TransferUiActiveShownTick
+                    TransferUiActiveShownTick := now
+                TransferUiLastActiveText := text
+                TransferStatusText.Text := text
+            }
+        } else {
+            TransferUiActiveDetectedTick := 0
+            if TransferUiActiveShownTick
+                && ElapsedTickMilliseconds(
+                    TransferUiActiveShownTick, now) < 800 {
+                TransferStatusText.Text := TransferUiLastActiveText
+                remaining := 800 - ElapsedTickMilliseconds(
+                    TransferUiActiveShownTick, now)
+                SetTimer(UpdateTransferUi, -Max(1, remaining))
+            } else {
+                TransferUiActiveShownTick := 0
+                TransferUiLastActiveText := ""
+                if aggregate.UnseenFailed {
+                    TransferUiCompletionPending := false
+                    TransferUiCompletionShownTick := 0
+                    TransferStatusText.Text := "! " aggregate.UnseenFailed
+                        . " 项下载失败 · 查看"
+                } else if TransferUiCompletionPending {
+                    TransferUiCompletionPending := false
+                    TransferUiCompletionShownTick := now
+                    TransferStatusText.Text := "✓ 下载完成 · 查看"
+                    SetTimer(UpdateTransferUi, -3000)
+                } else if TransferUiCompletionShownTick
+                    && ElapsedTickMilliseconds(
+                        TransferUiCompletionShownTick, now) < 3000 {
+                    TransferStatusText.Text := "✓ 下载完成 · 查看"
+                    remaining := 3000 - ElapsedTickMilliseconds(
+                        TransferUiCompletionShownTick, now)
+                    SetTimer(UpdateTransferUi, -Max(1, remaining))
+                } else {
+                    TransferUiCompletionShownTick := 0
+                    TransferStatusText.Text := "↓ 下载"
+                }
+            }
+        }
     }
     UpdateTransferGroupHeaders()
     UpdateTransferTrayTip(aggregate)
@@ -759,14 +872,16 @@ UpdateTransferTrayTip(aggregate) {
     if aggregate.Active || aggregate.Queued
         A_IconTip := "PopDrop v" APP_VERSION " · ↓ "
             . (aggregate.Active + aggregate.Queued) " 项"
-    else if aggregate.Failed
-        A_IconTip := "PopDrop v" APP_VERSION " · " aggregate.Failed " 个传输失败"
+    else if aggregate.UnseenFailed
+        A_IconTip := "PopDrop v" APP_VERSION " · "
+            . aggregate.UnseenFailed " 个下载失败"
     else
         A_IconTip := "PopDrop v" APP_VERSION
 }
 
 CompleteTransferBatchUi(batch) {
     global TransferShowNotifications, PanelVisible
+    global TransferUiCompletionPending, TransferUiCompletionShownTick
     success := TransferBatchSuccessCount(batch)
     failed := 0
     cancelled := 0
@@ -776,6 +891,12 @@ CompleteTransferBatchUi(batch) {
         else if item.Status = "Cancelled"
             cancelled += 1
     }
+    if failed {
+        batch.AttentionSeen := false
+        TransferUiCompletionPending := false
+        TransferUiCompletionShownTick := 0
+    } else if success
+        TransferUiCompletionPending := true
     if success
         SetActionStatus("后台接收完成：" success " 项已保存到「"
             . batch.TargetName "」"
@@ -800,6 +921,7 @@ OpenTransferCenter(*) {
         TransferCenter.Show()
         WinActivate("ahk_id " TransferCenter.Hwnd)
         RefreshTransferCenter()
+        AcknowledgeTransferFailures()
         return
     }
     center := Gui("+Owner" Panel.Hwnd " +Resize -MinimizeBox",
@@ -810,6 +932,10 @@ OpenTransferCenter(*) {
     center.List := center.AddListView(
         "xm ym w820 h320 Report -Multi NoSortHdr",
         ["批次", "文件名", "来源", "目标", "进度", "速度", "状态"])
+    center.SelectedBatch := ""
+    center.SelectedItem := ""
+    center.List.OnEvent("ItemSelect",
+        TransferCenterItemSelect.Bind(center))
     center.List.ModifyCol(1, 78)
     center.List.ModifyCol(2, 190)
     center.List.ModifyCol(3, 95)
@@ -833,6 +959,35 @@ OpenTransferCenter(*) {
     TransferCenter := center
     RefreshTransferCenter()
     center.Show("w844 h382")
+    AcknowledgeTransferFailures()
+}
+
+AcknowledgeTransferFailures() {
+    global TransferBatches
+    changed := false
+    for id, batch in TransferBatches {
+        if batch.Completed
+            && (!HasProp(batch, "AttentionSeen") || !batch.AttentionSeen) {
+            for item in batch.Items {
+                if item.Status = "Failed" || item.Status = "NeedsAttention" {
+                    batch.AttentionSeen := true
+                    changed := true
+                    break
+                }
+            }
+        }
+    }
+    if changed
+        UpdateTransferUi()
+}
+
+TransferCenterItemSelect(center, list, row, selected) {
+    global TransferCenterRows
+    if selected && TransferCenterRows.Has(row) {
+        reference := TransferCenterRows[row]
+        center.SelectedBatch := reference.Batch
+        center.SelectedItem := reference.Item
+    }
 }
 
 RefreshTransferCenter() {
@@ -840,9 +995,19 @@ RefreshTransferCenter() {
     if !IsObject(TransferCenter)
         return
     list := TransferCenter.List
+    selectedBatch := HasProp(TransferCenter, "SelectedBatch")
+        ? TransferCenter.SelectedBatch : ""
+    selectedItem := HasProp(TransferCenter, "SelectedItem")
+        ? TransferCenter.SelectedItem : ""
+    liveRow := list.GetNext(0)
+    if liveRow && TransferCenterRows.Has(liveRow) {
+        selectedBatch := TransferCenterRows[liveRow].Batch
+        selectedItem := TransferCenterRows[liveRow].Item
+    }
     list.Opt("-Redraw")
     list.Delete()
     TransferCenterRows := Map()
+    selectedRow := 0
     for id, batch in TransferBatches {
         batchLabel := SubStr(StrReplace(id, "batch-", ""), 1, 8)
         if !batch.Items.Length {
@@ -850,6 +1015,8 @@ RefreshTransferCenter() {
                 batch.Adapter, batch.TargetName,
                 "—", "—", TransferStatusLabel(batch.Status))
             TransferCenterRows[row] := {Batch: id, Item: ""}
+            if id = selectedBatch && selectedItem = ""
+                selectedRow := row
             continue
         }
         for item in batch.Items {
@@ -857,6 +1024,10 @@ RefreshTransferCenter() {
                 ? FormatBytes(item.Done) " / " FormatBytes(item.Total)
                     . (item.Total ? " (" Round(item.Done * 100 / item.Total) "%)" : "")
                 : FormatBytes(item.Done)
+            if item.Status = "Completed"
+                || (item.Status = "NeedsAttention" && item.FinalPath != "")
+                progress := item.Done > 0
+                    ? "100% · " FormatBytes(item.Done) : "100%"
             if item.Total > item.Done && item.Speed > 0
                 progress .= " · 剩余约 "
                     . FormatDuration(Ceil((item.Total - item.Done) / item.Speed))
@@ -866,8 +1037,12 @@ RefreshTransferCenter() {
                 TransferStatusLabel(item.Status)
                     . (item.Error != "" ? " · " item.Error : ""))
             TransferCenterRows[row] := {Batch: id, Item: item.Id}
+            if id = selectedBatch && item.Id = selectedItem
+                selectedRow := row
         }
     }
+    if selectedRow
+        list.Modify(selectedRow, "Select Focus Vis")
     list.Opt("+Redraw")
 }
 
@@ -896,8 +1071,16 @@ GetSelectedTransferReference() {
     global TransferCenter, TransferCenterRows
     if !IsObject(TransferCenter)
         return 0
-    row := TransferCenter.List.GetNext(0, "F")
-    return row && TransferCenterRows.Has(row) ? TransferCenterRows[row] : 0
+    row := TransferCenter.List.GetNext(0)
+    if row && TransferCenterRows.Has(row)
+        return TransferCenterRows[row]
+    if HasProp(TransferCenter, "SelectedBatch")
+        && TransferCenter.SelectedBatch != ""
+        return {
+            Batch: TransferCenter.SelectedBatch,
+            Item: TransferCenter.SelectedItem
+        }
+    return 0
 }
 
 CancelSelectedTransfer(wholeBatch, *) {
@@ -983,10 +1166,16 @@ RetryUrlTransfer(previous) {
         CancelPath: cancelPath, ReadyPath: readyPath, MarshalPath: "",
         RetryPath: retryPath, Pid: pid, Status: "Preparing", Items: [],
         Created: A_Now, Completed: false, RefreshQueued: false,
-        LastUpdate: A_TickCount
+        LastUpdate: A_TickCount, AttentionSeen: false
     }
     TransferBatches[batchId] := batch
-    WaitForTransferHandshake(batch, 1200)
+    try WaitForTransferHandshake(batch, 1200)
+    catch as err {
+        TransferBatches.Delete(batchId)
+        try ProcessClose(pid)
+        try DirDelete(batchDir, true)
+        throw err
+    }
     UpdateTransferUi()
 }
 
