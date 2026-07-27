@@ -447,6 +447,7 @@ class PopDropConfigDocument {
                 && SubStr(folded, 1, 12) != "sourceallow:")
             return 3
         if folded = "openapps" || SubStr(folded, 1, 8) = "openapp:"
+            || SubStr(folded, 1, 14) = "openappaction:"
             return 4
         if folded = "transferfavorites"
             || folded = "transferfavoritelabels"
@@ -488,8 +489,13 @@ class PopDropConfigDocument {
                 return 30
             return 40
         }
-        if area = 4
-            return folded = "openapps" ? 10 : 20
+        if area = 4 {
+            if folded = "openapps"
+                return 10
+            if SubStr(folded, 1, 14) = "openappaction:"
+                return 30
+            return 20
+        }
         if area = 5 {
             if folded = "transferfavorites"
                 return 10

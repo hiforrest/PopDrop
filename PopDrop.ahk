@@ -16,7 +16,7 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global APP_VERSION := "0.9.0"
-global CONFIG_VERSION := "14"
+global CONFIG_VERSION := "16"
 
 ; ──── 文件夹模式常量 ────
 global MODE_FILES := "Files"
@@ -29,6 +29,15 @@ global SCOPE_RECURSIVE_FILES := "RecursiveFiles"
 global FOLDER_TIME_MODIFIED := "DirectoryModified"
 global FOLDER_TIME_LATEST_CONTENT := "LatestContent"
 global NO_EXTENSION_TOKEN := "<none>"
+global ACTION_TARGET_FILES := "Files"
+global ACTION_TARGET_FOLDERS := "Folders"
+global ACTION_TARGET_BOTH := "Both"
+global ACTION_EXECUTION_PER_ITEM := "PerItem"
+global ACTION_EXECUTION_BATCH := "Batch"
+global ACTION_WORKDIR_FOLDER := "Folder"
+global ACTION_WORKDIR_PROGRAM := "ProgramDirectory"
+global ACTION_WORKDIR_CUSTOM := "Custom"
+global ACTION_COMMAND_LINE_LIMIT := 32760
 
 ; ──── 文件激活模式 ────
 global OPEN_MODE_DOUBLE := "DoubleClick"
@@ -209,6 +218,8 @@ global FileOperationSinks := Map()
 global LastOpenAppUndoState := 0
 global CurrentStatusAction := 0
 global OpenAppsConfigNeedsMigration := false
+global OpenAppActionSerialTasks := Map()
+global NextOpenAppActionSerialTaskId := 0
 global GlobalOpenFileMode := OPEN_MODE_DOUBLE
 global DefaultContextMenu := CONTEXT_MENU_POPDROP
 global PendingContextMenuMouseShift := Map()
@@ -431,6 +442,8 @@ EnsureConfig() {
     "[OpenApps]`n"
     "; 顺序和稳定 ID，例如：Order=7zip,everedit`n"
     "; 详情保存在 [OpenApp:<ID>]；ID 建议只使用字母、数字、-、_`n"
+    "; 每个应用可用 ShowInOpenMenu 控制打开方式，并用 ActionOrder 排列工具动作`n"
+    "; 动作详情保存在 [OpenAppAction:<应用ID>:<动作ID>]，ArgNNN 每行一个参数`n"
     "Order=`n"
     "`n"
     "; <PopDrop:area 5>`n"
@@ -933,6 +946,13 @@ LoadSettings(*) {
     }
 
     OpenApps := LoadOpenApps()
+    for app in OpenApps {
+        for action in app.Actions {
+            if !action.Valid
+                ConfigErrors.Push("工具动作配置无效：[OpenAppAction:"
+                    app.Id ":" action.Id "] " action.ValidationError)
+        }
+    }
     if OpenAppsConfigNeedsMigration {
         try {
             SaveOpenApps()
@@ -1726,10 +1746,11 @@ GetFileExtensionType(path) {
 }
 
 LoadOpenApps() {
-    global ConfigPath, OpenAppsConfigNeedsMigration
+    global ConfigPath, OpenAppsConfigNeedsMigration, ConfigErrors
     apps := []
     seenIds := Map()
     seenPaths := Map()
+    actionDocument := PopDropConfigDocument(ConfigPath)
     legacyFormat := OpenAppsConfigUsesLegacyFormat(ConfigPath)
     if legacyFormat
         OpenAppsConfigNeedsMigration := true
@@ -1762,19 +1783,197 @@ LoadOpenApps() {
         extensions := NormalizeOpenAppExtensions(
             IniRead(ConfigPath, section, "Extensions", ""))
         enabled := IniRead(ConfigPath, section, "Enabled", "1") != "0"
+        rawShowInOpenMenu := Trim(IniRead(
+            ConfigPath, section, "ShowInOpenMenu", "1"))
+        showInOpenMenu := rawShowInOpenMenu != "0"
+        if rawShowInOpenMenu != "0" && rawShowInOpenMenu != "1" {
+            showInOpenMenu := true
+            ConfigErrors.Push("[" section "] ShowInOpenMenu 值无效："
+                rawShowInOpenMenu "。已按 1 处理。")
+        }
         icon := NormalizePath(IniRead(ConfigPath, section, "Icon", programPath))
         if icon = ""
             icon := programPath
-        apps.Push({
+        app := {
             Id: id,
             Path: programPath,
             Name: name,
             Icon: icon,
             Extensions: extensions,
-            Enabled: enabled
-        })
+            Enabled: enabled,
+            ShowInOpenMenu: showInOpenMenu,
+            Actions: []
+        }
+        app.Actions := LoadOpenAppActions(app, actionDocument)
+        apps.Push(app)
     }
     return apps
+}
+
+LoadOpenAppActions(app, actionDocument) {
+    global ConfigPath, ConfigErrors, OpenAppsConfigNeedsMigration
+    global ACTION_EXECUTION_PER_ITEM, ACTION_EXECUTION_BATCH
+    global ACTION_WORKDIR_FOLDER
+    result := []
+    appSection := "OpenApp:" app.Id
+    rawOrder := IniRead(ConfigPath, appSection, "ActionOrder", "")
+    ids := ParseOpenAppActionOrder(rawOrder)
+    orderSeen := Map()
+    for part in StrSplit(rawOrder, ",") {
+        candidate := Trim(part)
+        if candidate != "" && !IsSafeOpenAppActionId(candidate)
+            ConfigErrors.Push("[" appSection "] ActionOrder 包含无效动作 ID："
+                candidate)
+        else if candidate != "" {
+            foldedCandidate := StrLower(candidate)
+            if orderSeen.Has(foldedCandidate)
+                ConfigErrors.Push("[" appSection "] ActionOrder 动作 ID 重复："
+                    candidate)
+            else
+                orderSeen[foldedCandidate] := true
+        }
+    }
+    seen := Map()
+    for id in ids {
+        folded := StrLower(id)
+        if seen.Has(folded)
+            continue
+        seen[folded] := true
+        section := "OpenAppAction:" app.Id ":" id
+        argResult := ReadOpenAppActionArgs(actionDocument, section)
+        boolErrors := []
+        missing := Chr(30) "missing" Chr(30)
+        rawExecutionMode := actionDocument.GetValue(
+            section, "ExecutionMode", missing)
+        legacySchema := rawExecutionMode = missing
+        if legacySchema {
+            legacySelectionMode := Trim(actionDocument.GetValue(
+                section, "SelectionMode", "Single"))
+            executionMode := StrLower(legacySelectionMode) = "any"
+                ? ACTION_EXECUTION_BATCH : ACTION_EXECUTION_PER_ITEM
+            if !ValueInArray(StrLower(legacySelectionMode),
+                ["single", "any"])
+                executionMode := legacySelectionMode
+            OpenAppsConfigNeedsMigration := true
+        } else
+            executionMode := Trim(rawExecutionMode)
+        rawRequireCommonFolder := actionDocument.GetValue(
+            section, "RequireCommonFolder", missing)
+        if rawRequireCommonFolder = missing {
+            rawRequireCommonFolder := actionDocument.GetValue(
+                section, "RequireCommonParent", "0")
+            OpenAppsConfigNeedsMigration := true
+        }
+        requireCommonFolder := ParseOpenAppActionBoolean(
+            rawRequireCommonFolder, false,
+            "RequireCommonFolder", boolErrors)
+        confirm := ParseOpenAppActionBoolean(
+            IniRead(ConfigPath, section, "Confirm", "0"),
+            false, "Confirm", boolErrors)
+        enabled := ParseOpenAppActionBoolean(
+            IniRead(ConfigPath, section, "Enabled", "1"),
+            true, "Enabled", boolErrors)
+        rawExtensions := IniRead(
+            ConfigPath, section, "Extensions", "")
+        extensionErrors := ValidateActionExtensionInput(rawExtensions)
+        workingDirectoryMode := Trim(actionDocument.GetValue(
+            section, "WorkingDirectoryMode", ACTION_WORKDIR_FOLDER))
+        if StrLower(workingDirectoryMode) = "parent" {
+            workingDirectoryMode := ACTION_WORKDIR_FOLDER
+            OpenAppsConfigNeedsMigration := true
+        }
+        workingDirectory := Trim(actionDocument.GetValue(
+            section, "WorkingDirectory", ""))
+        if legacySchema {
+            for index, arg in argResult.Args
+                argResult.Args[index] := StrReplace(
+                    arg, "{parent}", "{folder}", false)
+            workingDirectory := StrReplace(
+                workingDirectory, "{parent}", "{folder}", false)
+        }
+        action := {
+            Id: id,
+            Name: Trim(IniRead(ConfigPath, section, "Name", "")),
+            Executable: NormalizePath(
+                IniRead(ConfigPath, section, "Executable", "")),
+            TargetTypes: Trim(IniRead(
+                ConfigPath, section, "TargetTypes", "Files")),
+            ExecutionMode: executionMode,
+            Extensions: NormalizeActionExtensions(rawExtensions),
+            RequireCommonFolder: requireCommonFolder,
+            WorkingDirectoryMode: workingDirectoryMode,
+            WorkingDirectory: workingDirectory,
+            Confirm: confirm,
+            Enabled: enabled,
+            Args: argResult.Args,
+            Valid: argResult.Valid,
+            ValidationError: argResult.Error
+        }
+        validation := ValidateOpenAppAction(action, app, false)
+        for item in boolErrors
+            validation.Errors.Push(item)
+        for item in extensionErrors
+            validation.Errors.Push(item)
+        if validation.Errors.Length {
+            action.Valid := false
+            action.ValidationError := JoinArray(validation.Errors, "；")
+        }
+        result.Push(action)
+    }
+    return result
+}
+
+ParseOpenAppActionBoolean(raw, defaultValue, key, errors) {
+    raw := Trim(raw)
+    if raw = "1"
+        return true
+    if raw = "0"
+        return false
+    errors.Push(key " 必须是 0 或 1")
+    return defaultValue
+}
+
+ParseOpenAppActionOrder(raw) {
+    ids := []
+    seen := Map()
+    for part in StrSplit(raw, ",") {
+        id := Trim(part)
+        folded := StrLower(id)
+        if !IsSafeOpenAppActionId(id) || seen.Has(folded)
+            continue
+        seen[folded] := true
+        ids.Push(id)
+    }
+    return ids
+}
+
+IsSafeOpenAppActionId(id) {
+    return RegExMatch(Trim(id), "i)^[a-z0-9][a-z0-9_-]*$")
+}
+
+ReadOpenAppActionArgs(document, section) {
+    rawCount := Trim(document.GetValue(section, "ArgCount", ""))
+    if !RegExMatch(rawCount, "^\d+$")
+        return {Args: [], Valid: false, Error: "ArgCount 必须是非负整数"}
+    count := Integer(rawCount)
+    if count > 999
+        return {Args: [], Valid: false, Error: "ArgCount 不能超过 999"}
+    indexed := Map()
+    for entry in document.GetEntries(section) {
+        if RegExMatch(entry.Key, "i)^Arg(\d{3})$", &match)
+            indexed[Integer(match[1])] := entry.Value
+    }
+    if indexed.Count != count
+        return {Args: [], Valid: false,
+            Error: "ArgCount 与 ArgNNN 参数项数量不一致"}
+    args := []
+    Loop count {
+        key := "Arg" Format("{:03}", A_Index)
+        if !indexed.Has(A_Index)
+            return {Args: args, Valid: false, Error: "缺少 " key}
+        args.Push(indexed[A_Index])
+    }
+    return {Args: args, Valid: true, Error: ""}
 }
 
 OpenAppsConfigUsesLegacyFormat(path) {
@@ -1854,13 +2053,65 @@ NormalizeOpenAppExtensions(raw) {
     return result
 }
 
+NormalizeActionExtensions(raw) {
+    global NO_EXTENSION_TOKEN
+    result := []
+    seen := Map()
+    raw := RegExReplace(raw, "[;\s]+", ",")
+    for part in StrSplit(raw, ",") {
+        value := StrLower(Trim(part))
+        if value = ""
+            continue
+        if value = StrLower(NO_EXTENSION_TOKEN) || value = "none"
+            value := NO_EXTENSION_TOKEN
+        else {
+            value := SubStr(value, 1, 1) = "." ? value : "." value
+            if value = "." || RegExMatch(value, "[\\/:*?`"<>|{}]")
+                continue
+        }
+        if !seen.Has(value) {
+            seen[value] := true
+            result.Push(value)
+        }
+    }
+    ; Longest suffix first makes the intended .tar.gz semantics explicit.
+    Loop result.Length {
+        left := A_Index
+        right := left + 1
+        while right <= result.Length {
+            if StrLen(result[right]) > StrLen(result[left]) {
+                swap := result[left]
+                result[left] := result[right]
+                result[right] := swap
+            }
+            right += 1
+        }
+    }
+    return result
+}
+
+ValidateActionExtensionInput(raw) {
+    errors := []
+    raw := RegExReplace(raw, "[;\s]+", ",")
+    for part in StrSplit(raw, ",") {
+        value := StrLower(Trim(part))
+        if value = "" || value = "<none>" || value = "none"
+            continue
+        if SubStr(value, 1, 1) = "."
+            value := SubStr(value, 2)
+        if value = "" || RegExMatch(value, "[\\/:*?`"<>|{}]")
+            errors.Push("无效扩展名：" part)
+    }
+    return errors
+}
+
 GetApplicableOpenApps(filePath) {
     global OpenApps
     extensionType := GetFileExtensionType(filePath)
     exact := []
     generic := []
     for app in OpenApps {
-        if !app.Enabled
+        if !app.Enabled || !app.ShowInOpenMenu
             continue
         if !app.Extensions.Length {
             generic.Push(app)
@@ -1876,6 +2127,369 @@ GetApplicableOpenApps(filePath) {
     for app in generic
         exact.Push(app)
     return exact
+}
+
+CloneOpenAppAction(action) {
+    return {
+        Id: action.Id,
+        Name: action.Name,
+        Executable: action.Executable,
+        TargetTypes: action.TargetTypes,
+        ExecutionMode: action.ExecutionMode,
+        Extensions: action.Extensions.Clone(),
+        RequireCommonFolder: action.RequireCommonFolder,
+        WorkingDirectoryMode: action.WorkingDirectoryMode,
+        WorkingDirectory: action.WorkingDirectory,
+        Confirm: action.Confirm,
+        Enabled: action.Enabled,
+        Args: action.Args.Clone(),
+        Valid: action.Valid,
+        ValidationError: action.ValidationError
+    }
+}
+
+ValidateOpenAppAction(action, app, requireExisting := true) {
+    global ACTION_TARGET_FILES, ACTION_TARGET_FOLDERS, ACTION_TARGET_BOTH
+    global ACTION_EXECUTION_PER_ITEM, ACTION_EXECUTION_BATCH
+    global ACTION_WORKDIR_FOLDER, ACTION_WORKDIR_PROGRAM
+    global ACTION_WORKDIR_CUSTOM
+    errors := []
+    warnings := []
+    if Trim(action.Name) = ""
+        errors.Push("动作名称不能为空")
+    executable := action.Executable != "" ? action.Executable : app.Path
+    if !IsExecutablePath(executable)
+        errors.Push("执行程序必须是 .exe")
+    else if requireExisting && !IsExistingExecutable(executable)
+        warnings.Push("执行程序不存在：" executable)
+    if !ValueInArray(action.TargetTypes,
+        [ACTION_TARGET_FILES, ACTION_TARGET_FOLDERS, ACTION_TARGET_BOTH])
+        errors.Push("适用对象无效")
+    if !ValueInArray(action.ExecutionMode,
+        [ACTION_EXECUTION_PER_ITEM, ACTION_EXECUTION_BATCH])
+        errors.Push("执行模式无效")
+    if !ValueInArray(action.WorkingDirectoryMode,
+        [ACTION_WORKDIR_FOLDER, ACTION_WORKDIR_PROGRAM,
+         ACTION_WORKDIR_CUSTOM])
+        errors.Push("工作目录模式无效")
+    if action.WorkingDirectoryMode = ACTION_WORKDIR_CUSTOM
+        && Trim(action.WorkingDirectory) = ""
+        errors.Push("自定义工作目录不能为空")
+    allowItems := action.ExecutionMode = ACTION_EXECUTION_BATCH
+    for arg in action.Args
+        ValidateActionTemplateText(arg, allowItems, errors)
+    if action.WorkingDirectoryMode = ACTION_WORKDIR_CUSTOM
+        ValidateActionTemplateText(action.WorkingDirectory, false, errors)
+    return {Errors: errors, Warnings: warnings}
+}
+
+ValidateActionTemplateText(text, allowItems, errors) {
+    position := 1
+    while (foundAt := RegExMatch(
+        text, "\{([^{}]+)\}", &match, position
+    )) {
+        variable := StrLower(match[1])
+        if !ValueInArray(variable,
+            ["item", "items", "folder", "parent", "name", "stem",
+             "ext", "date", "time", "datetime", "index", "count",
+             "size"])
+            errors.Push("未知参数变量：{" match[1] "}")
+        if variable = "items" && (!allowItems || StrLower(text) != "{items}")
+            errors.Push(allowItems
+                ? "{items} 必须单独占一个参数"
+                : "逐个执行模式不能使用 {items}")
+        position := foundAt + StrLen(match[0])
+    }
+    cleaned := text
+    for variable in ["item", "items", "folder", "parent", "name",
+        "stem", "ext", "date", "time", "datetime", "index",
+        "count", "size"]
+        cleaned := StrReplace(
+            cleaned, "{" variable "}", "", false)
+    if RegExMatch(cleaned, "[{}]")
+        errors.Push("参数变量的大括号不完整或名称未知")
+}
+
+GetApplicableOpenAppActions(paths, clickedPath) {
+    global OpenApps
+    result := []
+    for app in OpenApps {
+        if !app.Enabled
+            continue
+        for action in app.Actions {
+            if IsOpenAppActionApplicable(app, action, paths, clickedPath)
+                result.Push({App: app, Action: action})
+        }
+    }
+    return result
+}
+
+IsOpenAppActionApplicable(app, action, paths, clickedPath,
+    requireExecutable := true
+) {
+    global ACTION_TARGET_FILES, ACTION_TARGET_FOLDERS
+    global ACTION_EXECUTION_BATCH, ACTION_WORKDIR_FOLDER
+    if !app.Enabled || !action.Enabled || !action.Valid || !paths.Length
+        return false
+    if !FileExist(clickedPath) || !ArrayContainsPath(paths, clickedPath)
+        return false
+    executable := action.Executable != "" ? action.Executable : app.Path
+    if requireExecutable && !IsExistingExecutable(executable)
+        return false
+    hasFile := false
+    hasFolder := false
+    for path in paths {
+        attributes := FileExist(path)
+        if attributes = ""
+            return false
+        if InStr(attributes, "D")
+            hasFolder := true
+        else {
+            hasFile := true
+            if action.Extensions.Length
+                && !ActionExtensionMatchesPath(path, action.Extensions)
+                return false
+        }
+    }
+    if action.TargetTypes = ACTION_TARGET_FILES && hasFolder
+        return false
+    if action.TargetTypes = ACTION_TARGET_FOLDERS && hasFile
+        return false
+    if action.RequireCommonFolder && GetCommonFolderPath(paths) = ""
+        return false
+    if action.ExecutionMode = ACTION_EXECUTION_BATCH {
+        needsFolder := action.WorkingDirectoryMode = ACTION_WORKDIR_FOLDER
+            || OpenAppActionUsesVariable(action, "folder")
+        if needsFolder && GetCommonFolderPath(paths) = ""
+            return false
+        if OpenAppActionUsesVariable(action, "parent")
+            && GetCommonParentFolderPath(paths) = ""
+            return false
+    }
+    return true
+}
+
+ActionExtensionMatchesPath(path, extensions) {
+    global NO_EXTENSION_TOKEN
+    name := StrLower(GetFileName(path))
+    for extension in extensions {
+        if extension = NO_EXTENSION_TOKEN {
+            if GetFileExtensionType(path) = NO_EXTENSION_TOKEN
+                return true
+            continue
+        }
+        if StrLen(name) >= StrLen(extension)
+            && SubStr(name, -StrLen(extension) + 1) = StrLower(extension)
+            return true
+    }
+    return false
+}
+
+GetCommonFolderPath(paths) {
+    if !paths.Length
+        return ""
+    folder := GetParentPath(paths[1])
+    for path in paths {
+        if !PathsEqual(GetParentPath(path), folder)
+            return ""
+    }
+    return folder
+}
+
+GetCommonParentFolderPath(paths) {
+    if !paths.Length
+        return ""
+    parent := GetParentPath(GetParentPath(paths[1]))
+    if parent = ""
+        return ""
+    for path in paths {
+        if !PathsEqual(GetParentPath(GetParentPath(path)), parent)
+            return ""
+    }
+    return parent
+}
+
+OpenAppActionUsesVariable(action, variable) {
+    needle := "{" StrLower(variable) "}"
+    for arg in action.Args {
+        if InStr(StrLower(arg), needle)
+            return true
+    }
+    return InStr(StrLower(action.WorkingDirectory), needle) > 0
+}
+
+RenderOpenAppAction(app, action, paths, clickedPath) {
+    global ACTION_EXECUTION_BATCH
+    validation := ValidateOpenAppAction(action, app, true)
+    if validation.Errors.Length
+        return {Valid: false, Error: JoinArray(validation.Errors, "；")}
+    if !IsOpenAppActionApplicable(app, action, paths, clickedPath, false)
+        return {Valid: false, Error: "当前选择不再符合此动作的执行条件"}
+    executable := NormalizePath(
+        action.Executable != "" ? action.Executable : app.Path)
+    if !IsExistingExecutable(executable)
+        return {Valid: false, Error: "找不到执行程序：" executable}
+    stamp := A_Now
+    commands := []
+    if action.ExecutionMode = ACTION_EXECUTION_BATCH {
+        clickedIndex := FindPathIndex(paths, clickedPath)
+        rendered := RenderOpenAppActionCommand(
+            action, executable, paths, clickedPath,
+            clickedIndex, paths.Length, stamp)
+        if !rendered.Valid
+            return rendered
+        commands.Push(rendered)
+    } else {
+        for index, path in paths {
+            rendered := RenderOpenAppActionCommand(
+                action, executable, [path], path,
+                index, paths.Length, stamp)
+            if !rendered.Valid
+                return {Valid: false, Error: "第 " index " 个项目（"
+                    GetFileName(path) "）：" rendered.Error}
+            commands.Push(rendered)
+        }
+    }
+    result := {
+        Valid: true,
+        ExecutionMode: action.ExecutionMode,
+        Commands: commands
+    }
+    if commands.Length = 1 {
+        result.Executable := commands[1].Executable
+        result.Args := commands[1].Args
+        result.Parameters := commands[1].Parameters
+        result.WorkingDirectory := commands[1].WorkingDirectory
+        result.Preview := commands[1].Preview
+    }
+    return result
+}
+
+RenderOpenAppActionCommand(action, executable, paths, scalarPath,
+    index, count, stamp
+) {
+    global ACTION_WORKDIR_FOLDER, ACTION_WORKDIR_PROGRAM
+    global ACTION_COMMAND_LINE_LIMIT
+    variables := BuildOpenAppActionVariables(
+        scalarPath, index, count, stamp)
+    args := []
+    for template in action.Args {
+        if StrLower(template) = "{items}" {
+            for path in paths
+                args.Push(path)
+        } else
+            args.Push(ReplaceOpenAppActionVariables(template, variables))
+    }
+    if action.WorkingDirectoryMode = ACTION_WORKDIR_FOLDER
+        workingDirectory := variables.Folder
+    else if action.WorkingDirectoryMode = ACTION_WORKDIR_PROGRAM {
+        SplitPath(executable, , &workingDirectory)
+    } else {
+        workingDirectory := ReplaceOpenAppActionVariables(
+            action.WorkingDirectory, variables)
+    }
+    workingDirectory := NormalizePath(workingDirectory)
+    if workingDirectory = "" || !DirExist(workingDirectory)
+        return {Valid: false, Error: "工作目录不存在：" workingDirectory}
+    parameterText := BuildWindowsParameterString(args)
+    commandPreview := QuoteWindowsArgument(executable)
+    if parameterText != ""
+        commandPreview .= " " parameterText
+    if StrLen(commandPreview) > ACTION_COMMAND_LINE_LIMIT
+        return {Valid: false, Error: "最终命令行超过 Windows 安全长度限制"}
+    return {
+        Valid: true,
+        Executable: executable,
+        ItemPath: scalarPath,
+        Args: args,
+        Parameters: parameterText,
+        WorkingDirectory: workingDirectory,
+        Preview: commandPreview
+    }
+}
+
+BuildOpenAppActionVariables(itemPath, index, count, stamp := "") {
+    if stamp = ""
+        stamp := A_Now
+    SplitPath(itemPath, &name, , &extension, &stem)
+    folder := GetParentPath(itemPath)
+    return {
+        Item: itemPath,
+        Folder: folder,
+        Parent: GetParentPath(folder),
+        Name: name,
+        Stem: stem,
+        Ext: StrLower(extension),
+        Date: FormatTime(stamp, "yyyyMMdd"),
+        Time: FormatTime(stamp, "HHmmss"),
+        DateTime: FormatTime(stamp, "yyyyMMdd_HHmmss"),
+        Index: index,
+        Count: count,
+        Size: FormatOpenAppActionSize(itemPath)
+    }
+}
+
+ReplaceOpenAppActionVariables(template, variables) {
+    result := template
+    result := StrReplace(result, "{item}", variables.Item, false)
+    result := StrReplace(result, "{folder}", variables.Folder, false)
+    result := StrReplace(result, "{parent}", variables.Parent, false)
+    result := StrReplace(result, "{name}", variables.Name, false)
+    result := StrReplace(result, "{stem}", variables.Stem, false)
+    result := StrReplace(result, "{ext}", variables.Ext, false)
+    result := StrReplace(result, "{date}", variables.Date, false)
+    result := StrReplace(result, "{time}", variables.Time, false)
+    result := StrReplace(result, "{datetime}", variables.DateTime, false)
+    result := StrReplace(result, "{index}", variables.Index, false)
+    result := StrReplace(result, "{count}", variables.Count, false)
+    result := StrReplace(result, "{size}", variables.Size, false)
+    return result
+}
+
+FormatOpenAppActionSize(path) {
+    attributes := FileExist(path)
+    if attributes = "" || InStr(attributes, "D")
+        return ""
+    try bytes := FileGetSize(path)
+    catch
+        return ""
+    units := ["B", "KB", "MB", "GB", "TB"]
+    value := bytes + 0.0
+    unitIndex := 1
+    while value >= 1024 && unitIndex < units.Length {
+        value /= 1024
+        unitIndex += 1
+    }
+    if unitIndex = 1
+        number := Format("{:.0f}", value)
+    else {
+        number := Format("{:.1f}", value)
+        number := RegExReplace(number, "\.0$")
+    }
+    return number units[unitIndex]
+}
+
+BuildWindowsParameterString(args) {
+    quoted := []
+    for arg in args
+        quoted.Push(QuoteWindowsArgument(arg))
+    return JoinArray(quoted, " ")
+}
+
+ParseWindowsCommandLineForSelfTest(commandLine) {
+    count := 0
+    argv := DllCall("shell32\CommandLineToArgvW",
+        "wstr", commandLine, "int*", &count, "ptr")
+    if !argv
+        throw Error("CommandLineToArgvW 自检调用失败")
+    result := []
+    try {
+        Loop count
+            result.Push(StrGet(NumGet(argv, (A_Index - 1) * A_PtrSize, "ptr")))
+    } finally {
+        DllCall("kernel32\LocalFree", "ptr", argv)
+    }
+    return result
 }
 
 FindOpenAppById(id) {
@@ -1937,7 +2551,9 @@ AddConfiguredOpenApp(*) {
         Name: GetExecutableDisplayName(selected),
         Icon: selected,
         Extensions: [],
-        Enabled: true
+        Enabled: true,
+        ShowInOpenMenu: true,
+        Actions: []
     }
     OpenApps.Push(app)
     SplitPath(selected, , &LastOpenProgramDir)
@@ -1985,7 +2601,9 @@ ChooseOtherProgramForFile(filePath, *) {
             Name: GetExecutableDisplayName(selected),
             Icon: selected,
             Extensions: [extensionType],
-            Enabled: true
+            Enabled: true,
+            ShowInOpenMenu: true,
+            Actions: []
         }
         OpenApps.Push(app)
         changed := true
@@ -2049,6 +2667,16 @@ ReselectMissingOpenApp(app) {
                     duplicate.Extensions.Push(extension)
             }
         }
+        if app.ShowInOpenMenu
+            duplicate.ShowInOpenMenu := true
+        for sourceAction in app.Actions {
+            copiedAction := CloneOpenAppAction(sourceAction)
+            if IsObject(FindOpenAppActionById(
+                duplicate, copiedAction.Id))
+                copiedAction.Id := NewOpenAppActionIdForActions(
+                    duplicate.Actions, copiedAction.Id)
+            duplicate.Actions.Push(copiedAction)
+        }
         RemoveOpenAppById(app.Id, false)
     } else {
         app.Path := selected
@@ -2059,6 +2687,28 @@ ReselectMissingOpenApp(app) {
     SplitPath(selected, , &LastOpenProgramDir)
     SaveOpenApps()
     SetUserStatus("已更新 " app.Name " 的程序路径")
+}
+
+NewOpenAppActionIdForActions(actions, seed) {
+    base := StrLower(Trim(seed))
+    base := RegExReplace(base, "[^a-z0-9_-]+", "-")
+    base := Trim(base, "-_")
+    if base = ""
+        base := "action"
+    candidate := base
+    suffix := 2
+    Loop {
+        found := false
+        for action in actions {
+            if StrLower(action.Id) = StrLower(candidate) {
+                found := true
+                break
+            }
+        }
+        if !found
+            return candidate
+        candidate := base "-" suffix++
+    }
 }
 
 RemoveOpenAppById(id, save := true) {
@@ -2077,11 +2727,16 @@ RemoveOpenAppById(id, save := true) {
 
 CloneOpenApps(apps) {
     result := []
-    for app in apps
+    for app in apps {
+        actions := []
+        for action in app.Actions
+            actions.Push(CloneOpenAppAction(action))
         result.Push({
             Id: app.Id, Path: app.Path, Name: app.Name, Icon: app.Icon,
-            Extensions: app.Extensions.Clone(), Enabled: app.Enabled
+            Extensions: app.Extensions.Clone(), Enabled: app.Enabled,
+            ShowInOpenMenu: app.ShowInOpenMenu, Actions: actions
         })
+    }
     return result
 }
 
@@ -2206,12 +2861,28 @@ GetExecutableProductName(path) {
 }
 
 ShellLaunchExecutable(executablePath, targetPath) {
+    return ShellLaunchExecutableWithArgs(
+        executablePath, [NormalizePath(targetPath)], "")
+}
+
+ShellLaunchExecutableWithArgs(executablePath, args, workingDirectory := "") {
+    launched := ShellLaunchExecutableWithProcess(
+        executablePath, args, workingDirectory)
+    if launched.ProcessHandle
+        DllCall("kernel32\CloseHandle", "ptr", launched.ProcessHandle)
+    return launched.Success
+}
+
+ShellLaunchExecutableWithProcess(executablePath, args,
+    workingDirectory := ""
+) {
     global Panel
     executablePath := NormalizePath(executablePath)
-    targetPath := NormalizePath(targetPath)
     if !IsExistingExecutable(executablePath)
-        return false
-    parameters := QuoteWindowsArgument(targetPath)
+        return {Success: false, ProcessHandle: 0}
+    parameters := BuildWindowsParameterString(args)
+    workingDirectory := workingDirectory = ""
+        ? "" : NormalizePath(workingDirectory)
     infoSize := A_PtrSize = 8 ? 112 : 60
     info := Buffer(infoSize, 0)
     NumPut("uint", infoSize, info, 0)
@@ -2219,13 +2890,211 @@ ShellLaunchExecutable(executablePath, targetPath) {
     NumPut("ptr", IsObject(Panel) ? Panel.Hwnd : 0, info, 8)
     NumPut("ptr", StrPtr(executablePath), info, A_PtrSize = 8 ? 24 : 16)
     NumPut("ptr", StrPtr(parameters), info, A_PtrSize = 8 ? 32 : 20)
+    if workingDirectory != ""
+        NumPut("ptr", StrPtr(workingDirectory), info,
+            A_PtrSize = 8 ? 40 : 24)
     NumPut("int", 1, info, A_PtrSize = 8 ? 48 : 28)
     if !DllCall("shell32\ShellExecuteExW", "ptr", info.Ptr, "int")
-        return false
+        return {Success: false, ProcessHandle: 0}
     processHandle := NumGet(info, A_PtrSize = 8 ? 104 : 56, "ptr")
-    if processHandle
-        DllCall("kernel32\CloseHandle", "ptr", processHandle)
-    return true
+    return {Success: true, ProcessHandle: processHandle}
+}
+
+ExecuteOpenAppAction(appId, actionId, paths, clickedPath, *) {
+    global ACTION_EXECUTION_PER_ITEM
+    app := FindOpenAppById(appId)
+    if !IsObject(app)
+        return
+    action := FindOpenAppActionById(app, actionId)
+    if !IsObject(action)
+        return
+    paths := paths.Clone()
+    rendered := RenderOpenAppAction(app, action, paths, clickedPath)
+    if !rendered.Valid {
+        if InStr(rendered.Error, "找不到执行程序")
+            HandleMissingOpenAppActionExecutable(app, action)
+        else
+            ShowPanelMsgBox("无法执行“" action.Name "”：`n"
+                rendered.Error, app.Name " · 动作失败", "Iconx")
+        return
+    }
+    if action.Confirm {
+        hasFolder := false
+        for path in paths {
+            if InStr(FileExist(path), "D") {
+                hasFolder := true
+                break
+            }
+        }
+        message := "动作：" action.Name
+            . "`n应用：" app.Name
+            . "`n所选项目：" paths.Length " 个"
+            . "`n包含文件夹：" (hasFolder ? "是" : "否")
+            . "`n执行模式："
+            . (action.ExecutionMode = ACTION_EXECUTION_PER_ITEM
+                ? "逐个项目串行执行" : "一次传入全部项目")
+            . "`n`n要继续启动吗？"
+        if ShowPanelMsgBox(message, "确认工具动作",
+            "YesNo Icon?") != "Yes"
+            return
+    }
+    if action.ExecutionMode = ACTION_EXECUTION_PER_ITEM {
+        StartOpenAppActionSerialTask(app, action, rendered.Commands)
+        return
+    }
+    command := rendered.Commands[1]
+    if !ShellLaunchExecutableWithArgs(
+        command.Executable, command.Args, command.WorkingDirectory) {
+        ShowPanelMsgBox("Windows 未能启动工具动作。`n`n应用："
+            app.Name "`n动作：" action.Name "`n程序："
+            command.Executable, "动作启动失败", "Iconx")
+        return
+    }
+    SetUserStatus("已启动：" action.Name)
+}
+
+StartOpenAppActionSerialTask(app, action, commands) {
+    global OpenAppActionSerialTasks, NextOpenAppActionSerialTaskId
+    NextOpenAppActionSerialTaskId += 1
+    taskId := NextOpenAppActionSerialTaskId
+    task := {
+        Id: taskId,
+        AppName: app.Name,
+        ActionName: action.Name,
+        Commands: commands,
+        NextIndex: 1,
+        ProcessHandle: 0,
+        NextCallback: 0,
+        PollCallback: 0
+    }
+    task.NextCallback := RunNextOpenAppActionSerialItem.Bind(task)
+    task.PollCallback := PollOpenAppActionSerialProcess.Bind(task)
+    OpenAppActionSerialTasks[taskId] := task
+    SetUserStatus("已加入串行队列：" action.Name
+        "（" commands.Length " 个项目）")
+    SetTimer(task.NextCallback, -1)
+}
+
+RunNextOpenAppActionSerialItem(task, *) {
+    global OpenAppActionSerialTasks
+    if !OpenAppActionSerialTasks.Has(task.Id)
+        return
+    if task.NextIndex > task.Commands.Length {
+        FinishOpenAppActionSerialTask(task)
+        return
+    }
+    command := task.Commands[task.NextIndex]
+    if !FileExist(command.ItemPath) {
+        FailOpenAppActionSerialTask(task, "第 " task.NextIndex
+            " 个项目已不存在：`n" command.ItemPath)
+        return
+    }
+    launched := ShellLaunchExecutableWithProcess(
+        command.Executable, command.Args, command.WorkingDirectory)
+    if !launched.Success {
+        FailOpenAppActionSerialTask(task, "Windows 未能启动第 "
+            task.NextIndex " 个项目。`n程序：" command.Executable)
+        return
+    }
+    if !launched.ProcessHandle {
+        FailOpenAppActionSerialTask(task,
+            "Windows 已接受启动请求，但没有返回可等待的进程句柄，"
+            "无法保证后续项目真正串行执行。")
+        return
+    }
+    task.ProcessHandle := launched.ProcessHandle
+    SetUserStatus("正在执行：" task.ActionName "（"
+        task.NextIndex "/" task.Commands.Length "）")
+    SetTimer(task.PollCallback, 250)
+}
+
+PollOpenAppActionSerialProcess(task, *) {
+    global OpenAppActionSerialTasks
+    if !OpenAppActionSerialTasks.Has(task.Id)
+        return
+    waitResult := DllCall("kernel32\WaitForSingleObject",
+        "ptr", task.ProcessHandle, "uint", 0, "uint")
+    if waitResult = 258
+        return
+    SetTimer(task.PollCallback, 0)
+    if task.ProcessHandle {
+        DllCall("kernel32\CloseHandle", "ptr", task.ProcessHandle)
+        task.ProcessHandle := 0
+    }
+    if waitResult = 0xFFFFFFFF {
+        FailOpenAppActionSerialTask(task,
+            "等待外部程序结束时发生 Windows 错误。")
+        return
+    }
+    task.NextIndex += 1
+    SetTimer(task.NextCallback, -1)
+}
+
+FinishOpenAppActionSerialTask(task) {
+    global OpenAppActionSerialTasks
+    SetTimer(task.PollCallback, 0)
+    if task.ProcessHandle {
+        DllCall("kernel32\CloseHandle", "ptr", task.ProcessHandle)
+        task.ProcessHandle := 0
+    }
+    if OpenAppActionSerialTasks.Has(task.Id)
+        OpenAppActionSerialTasks.Delete(task.Id)
+    SetUserStatus("串行启动队列已结束：" task.ActionName)
+}
+
+FailOpenAppActionSerialTask(task, reason) {
+    global OpenAppActionSerialTasks
+    SetTimer(task.PollCallback, 0)
+    if task.ProcessHandle {
+        DllCall("kernel32\CloseHandle", "ptr", task.ProcessHandle)
+        task.ProcessHandle := 0
+    }
+    if OpenAppActionSerialTasks.Has(task.Id)
+        OpenAppActionSerialTasks.Delete(task.Id)
+    ShowPanelMsgBox("无法继续执行“" task.ActionName "”：`n"
+        reason "`n`n应用：" task.AppName,
+        task.AppName " · 串行动作失败", "Iconx")
+}
+
+FindOpenAppActionById(app, id) {
+    for action in app.Actions {
+        if StrLower(action.Id) = StrLower(id)
+            return action
+    }
+    return 0
+}
+
+HandleMissingOpenAppActionExecutable(app, action) {
+    if action.Executable = "" {
+        HandleMissingOpenApp(app)
+        return
+    }
+    answer := ShowPanelMsgBox("找不到动作“" action.Name
+        "”的执行程序：`n" action.Executable
+        "`n`n是否立即重新选择 .exe？",
+        app.Name " · 程序不可用", "YesNo Icon!")
+    if answer != "Yes"
+        return
+    selected := SelectPanelFile("3", GetParentPath(action.Executable),
+        "重新选择 " action.Name " 的执行程序", "应用程序 (*.exe)")
+    if selected = ""
+        return
+    selected := NormalizePath(selected)
+    if !IsExistingExecutable(selected) {
+        ShowPanelMsgBox("请选择现有的 .exe 应用程序。",
+            "重新选择程序", "Icon!")
+        return
+    }
+    previous := action.Executable
+    action.Executable := selected
+    try {
+        SaveOpenApps()
+        SetUserStatus("已更新动作“" action.Name "”的执行程序")
+    } catch as err {
+        action.Executable := previous
+        ShowPanelMsgBox("无法保存新的执行程序：`n" err.Message,
+            "配置保存失败", "Iconx")
+    }
 }
 
 IsExecutablePath(path) {
@@ -2276,8 +3145,15 @@ SaveOpenApps() {
 WriteOpenAppsConfig(tempPath) {
     global OpenApps, LastOpenProgramDir, CONFIG_VERSION
     doc := OpenPopDropConfig(tempPath)
+    WriteOpenAppsToDocument(doc, OpenApps)
+    doc.SetValue("General", "LastOpenProgramDir", LastOpenProgramDir, 1)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
+}
+
+WriteOpenAppsToDocument(doc, apps) {
     activeIds := Map()
-    for app in OpenApps
+    for app in apps
         activeIds[StrLower(app.Id)] := true
     oldIds := ParseOpenAppOrder(doc.GetValue("OpenApps", "Order", ""))
     for entry in doc.GetEntries("OpenApps") {
@@ -2286,17 +3162,30 @@ WriteOpenAppsConfig(tempPath) {
             oldIds.Push(entry.Value)
     }
     for id in oldIds {
-        if !activeIds.Has(StrLower(id))
+        if !activeIds.Has(StrLower(id)) {
             doc.DeleteSection("OpenApp:" id)
+            DeleteOpenAppActionSections(doc, id)
+        }
     }
     ids := []
-    for app in OpenApps
+    for app in apps {
         ids.Push(app.Id)
+    }
     doc.ReplaceSection("OpenApps",
         [{Key: "Order", Value: JoinArray(ids, ",")}], 4)
 
-    for app in OpenApps {
+    for app in apps {
         section := "OpenApp:" app.Id
+        oldActionIds := ParseOpenAppActionOrder(
+            doc.GetValue(section, "ActionOrder", ""))
+        activeActionIds := Map()
+        for action in app.Actions
+            activeActionIds[StrLower(action.Id)] := true
+        for oldActionId in oldActionIds {
+            if !activeActionIds.Has(StrLower(oldActionId))
+                doc.DeleteSection(
+                    "OpenAppAction:" app.Id ":" oldActionId)
+        }
         entries := [{Key: "Path", Value: app.Path}]
         if app.Name != GetExecutableDisplayName(app.Path)
             entries.Push({Key: "Name", Value: app.Name})
@@ -2307,12 +3196,65 @@ WriteOpenAppsConfig(tempPath) {
                 Value: JoinArray(app.Extensions, ",")})
         if !app.Enabled
             entries.Push({Key: "Enabled", Value: "0"})
+        if !app.ShowInOpenMenu
+            entries.Push({Key: "ShowInOpenMenu", Value: "0"})
+        if app.Actions.Length {
+            actionIds := []
+            for action in app.Actions
+                actionIds.Push(action.Id)
+            entries.Push({Key: "ActionOrder",
+                Value: JoinArray(actionIds, ",")})
+        }
         doc.ReplaceKnownKeys(section, entries,
-            ["Path", "Name", "Icon", "Extensions", "Enabled"], 4)
+            ["Path", "Name", "Icon", "Extensions", "Enabled",
+             "ShowInOpenMenu", "ActionOrder"], 4)
+        for action in app.Actions
+            WriteOpenAppActionToDocument(doc, app, action)
     }
-    doc.SetValue("General", "LastOpenProgramDir", LastOpenProgramDir, 1)
-    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
-    doc.Save()
+}
+
+DeleteOpenAppActionSections(doc, appId) {
+    prefix := StrLower("OpenAppAction:" appId ":")
+    for sectionName in doc.GetSectionNames() {
+        if SubStr(StrLower(sectionName), 1, StrLen(prefix)) = prefix
+            doc.DeleteSection(sectionName)
+    }
+}
+
+WriteOpenAppActionToDocument(doc, app, action) {
+    section := "OpenAppAction:" app.Id ":" action.Id
+    entries := [
+        {Key: "Name", Value: action.Name},
+        {Key: "Executable", Value: action.Executable},
+        {Key: "TargetTypes", Value: action.TargetTypes},
+        {Key: "ExecutionMode", Value: action.ExecutionMode},
+        {Key: "Extensions", Value: JoinArray(action.Extensions, ",")},
+        {Key: "RequireCommonFolder",
+            Value: action.RequireCommonFolder ? "1" : "0"},
+        {Key: "WorkingDirectoryMode",
+            Value: action.WorkingDirectoryMode},
+        {Key: "WorkingDirectory", Value: action.WorkingDirectory},
+        {Key: "Confirm", Value: action.Confirm ? "1" : "0"},
+        {Key: "Enabled", Value: action.Enabled ? "1" : "0"},
+        {Key: "ArgCount", Value: action.Args.Length}
+    ]
+    known := ["Name", "Executable", "TargetTypes",
+        "ExecutionMode", "SelectionMode", "Extensions",
+        "RequireCommonFolder", "RequireCommonParent",
+        "WorkingDirectoryMode", "WorkingDirectory", "Confirm",
+        "Enabled", "ArgCount"]
+    for oldEntry in doc.GetEntries(section) {
+        if RegExMatch(oldEntry.Key, "i)^Arg\d{3}$")
+            && !ValueInArray(oldEntry.Key, known)
+            known.Push(oldEntry.Key)
+    }
+    for index, arg in action.Args {
+        key := "Arg" Format("{:03}", index)
+        entries.Push({Key: key, Value: arg})
+        if !ValueInArray(key, known)
+            known.Push(key)
+    }
+    doc.ReplaceKnownKeys(section, entries, known, 4)
 }
 
 ShouldIncludeFile(filename, filter) {
@@ -5845,6 +6787,20 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
     contextMenu := Menu()
     openText := "打开`tEnter"
     contextMenu.Add(openText, OpenSelectedItems.Bind(paths.Clone()))
+    usedMenuLabels := Map()
+    usedMenuLabels[StrLower("打开")] := true
+    usedMenuLabels[StrLower("选择其他程序…")] := true
+    usedMenuLabels[StrLower("更多已配置应用…")] := true
+    usedMenuLabels[StrLower("更多工具操作…")] := true
+    usedMenuLabels[StrLower("在文件资源管理器中显示")] := true
+    usedMenuLabels[StrLower("复制到…")] := true
+    usedMenuLabels[StrLower("移动到…")] := true
+    usedMenuLabels[StrLower("复制文件")] := true
+    usedMenuLabels[StrLower("复制路径")] := true
+    usedMenuLabels[StrLower("添加到固定项")] := true
+    usedMenuLabels[StrLower("从固定项移除")] := true
+    usedMenuLabels[StrLower("删除")] := true
+    usedMenuLabels[StrLower("更多系统操作…")] := true
 
     singleFile := paths.Length = 1 && FileExist(paths[1])
         && !InStr(FileExist(paths[1]), "D")
@@ -5856,6 +6812,7 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
             app := apps[A_Index]
             label := UniqueOpenAppMenuLabel(app.Name, usedLabels)
             contextMenu.Add(label, OpenWithConfiguredApp.Bind(app.Id, paths[1]))
+            usedMenuLabels[StrLower(RegExReplace(label, "`t.*$"))] := true
             try contextMenu.SetIcon(label, app.Icon)
         }
         if apps.Length > 5 {
@@ -5864,6 +6821,7 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
                 app := apps[A_Index + 5]
                 label := UniqueOpenAppMenuLabel(app.Name, usedLabels)
                 moreApps.Add(label, OpenWithConfiguredApp.Bind(app.Id, paths[1]))
+                usedMenuLabels[StrLower(RegExReplace(label, "`t.*$"))] := true
                 try moreApps.SetIcon(label, app.Icon)
             }
             contextMenu.Add("更多已配置应用…", moreApps)
@@ -5871,7 +6829,34 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
         contextMenu.Add("选择其他程序…", ChooseOtherProgramForFile.Bind(paths[1]))
     }
 
+    actionPairs := GetApplicableOpenAppActions(paths, clickedPath)
     contextMenu.Add()
+    if actionPairs.Length {
+        actionLabels := BuildOpenAppActionMenuLabels(
+            actionPairs, usedMenuLabels)
+        directActionCount := Min(5, actionPairs.Length)
+        Loop directActionCount {
+            pair := actionPairs[A_Index]
+            label := actionLabels[A_Index]
+            contextMenu.Add(label, ExecuteOpenAppAction.Bind(
+                pair.App.Id, pair.Action.Id, paths.Clone(), clickedPath))
+            try contextMenu.SetIcon(label, pair.App.Icon)
+        }
+        if actionPairs.Length > 5 {
+            moreActions := Menu()
+            Loop actionPairs.Length - 5 {
+                index := A_Index + 5
+                pair := actionPairs[index]
+                label := actionLabels[index]
+                moreActions.Add(label, ExecuteOpenAppAction.Bind(
+                    pair.App.Id, pair.Action.Id,
+                    paths.Clone(), clickedPath))
+                try moreActions.SetIcon(label, pair.App.Icon)
+            }
+            contextMenu.Add("更多工具操作…", moreActions)
+        }
+        contextMenu.Add()
+    }
     revealText := "在文件资源管理器中显示`tCtrl+Enter"
     contextMenu.Add(revealText, RevealPathsInExplorer.Bind(paths.Clone()))
     if !CanRevealTogether(paths)
@@ -5929,6 +6914,30 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
     } finally {
         EndAutoHidePause()
     }
+}
+
+BuildOpenAppActionMenuLabels(actionPairs, usedLabels) {
+    nameCounts := Map()
+    for pair in actionPairs {
+        key := StrLower(Trim(pair.Action.Name))
+        nameCounts[key] := nameCounts.Has(key) ? nameCounts[key] + 1 : 1
+    }
+    labels := []
+    for pair in actionPairs {
+        base := Trim(pair.Action.Name)
+        if nameCounts[StrLower(base)] > 1
+            || usedLabels.Has(StrLower(base))
+            base .= "（" pair.App.Name "）"
+        label := base
+        suffix := 2
+        while usedLabels.Has(StrLower(label)) {
+            label := base "（" suffix "）"
+            suffix += 1
+        }
+        usedLabels[StrLower(label)] := true
+        labels.Push(label)
+    }
+    return labels
 }
 
 UniqueOpenAppMenuLabel(name, usedLabels) {
@@ -9127,6 +10136,7 @@ RunSelfTests() {
         RunConfigDocumentSelfTests()
         RunNoiseFilterSelfTests()
         RunWorkspaceSelfTests()
+        RunOpenAppActionSelfTests()
         AssertSelfTest(ParseGlobalOpenFileMode("") = OPEN_MODE_DOUBLE,
             "缺失全局打开方式回退为双击")
         AssertSelfTest(ParseGlobalOpenFileMode("broken") = OPEN_MODE_DOUBLE,
@@ -9164,6 +10174,54 @@ RunSelfTests() {
             "无扩展名识别")
         AssertSelfTest(GetFileExtensionType("C:\a\archive.tar.gz") = ".gz",
             "只取最后扩展名")
+        actionExtensions := NormalizeActionExtensions(
+            ".GZ, tar.gz, <none>, .tar.gz")
+        AssertSelfTest(actionExtensions.Length = 3
+            && actionExtensions[1] = ".tar.gz",
+            "工具动作扩展名去重并优先最长后缀")
+        AssertSelfTest(ActionExtensionMatchesPath(
+            "C:\a\ARCHIVE.TAR.GZ", actionExtensions),
+            "工具动作最长后缀匹配大小写不敏感")
+        variables := {
+            Item: "C:\空 格\右击 (1)&.tar.gz",
+            Folder: "C:\空 格",
+            Parent: "C:\",
+            Name: "右击 (1)&.tar.gz",
+            Stem: "右击 (1)&.tar",
+            Ext: "gz",
+            Date: "20260726", Time: "153045",
+            DateTime: "20260726_153045",
+            Index: 1, Count: 5, Size: "15KB"
+        }
+        renderedArg := ReplaceOpenAppActionVariables(
+            "-o{folder}\{stem}-{index}of{count}-{date}", variables)
+        AssertSelfTest(renderedArg =
+            "-oC:\空 格\右击 (1)&.tar-1of5-20260726",
+            "标量变量在单个参数内替换")
+        specialArgs := ["x", variables.Item,
+            renderedArg, "C:\第二个\中文 & (2).zip",
+            "尾部\" . Chr(34)]
+        commandLine := QuoteWindowsArgument("C:\Tools\7z.exe")
+            . " " BuildWindowsParameterString(specialArgs)
+        roundTrip := ParseWindowsCommandLineForSelfTest(commandLine)
+        AssertSelfTest(roundTrip.Length = specialArgs.Length + 1
+            && roundTrip[2] = specialArgs[1]
+            && roundTrip[3] = specialArgs[2]
+            && roundTrip[6] = specialArgs[5],
+            "Windows 参数逐项转义可无损还原")
+        invalidAction := {
+            Name: "错误动作", Executable: "",
+            TargetTypes: "Files", ExecutionMode: "Batch",
+            Extensions: [], RequireCommonFolder: false,
+            WorkingDirectoryMode: "Folder", WorkingDirectory: "",
+            Confirm: false, Enabled: true,
+            Args: ["--bad={unknown}", "prefix{items}"],
+            Valid: true, ValidationError: ""
+        }
+        validation := ValidateOpenAppAction(invalidAction,
+            {Path: "C:\Tools\tool.exe"}, false)
+        AssertSelfTest(validation.Errors.Length >= 2,
+            "未知变量和嵌入式 {items} 阻止保存")
         AssertSelfTest(IsExecutablePath("C:\Program Files\7-Zip\7z.exe"),
             "EXE 扩展名识别")
         AssertSelfTest(IsExecutablePath("C:\Tools\APP.EXE"),
@@ -9379,6 +10437,99 @@ RunWorkspaceSelfTests() {
         "稳定工作区 ID 格式")
 }
 
+RunOpenAppActionSelfTests() {
+    global ACTION_COMMAND_LINE_LIMIT
+    testRoot := A_Temp "\PopDrop-action-self-test-"
+        . DllCall("kernel32\GetCurrentProcessId", "uint")
+        . "-" A_TickCount
+    try {
+        firstDir := testRoot "\空 格 & (一)"
+        secondDir := testRoot "\第二处"
+        DirCreate(firstDir)
+        DirCreate(secondDir)
+        first := firstDir "\右击项.TAR.GZ"
+        second := firstDir "\另一个 资料.tar.gz"
+        mismatch := firstDir "\不匹配.txt"
+        cross := secondDir "\跨目录.tar.gz"
+        folder := firstDir "\文件夹"
+        executable := testRoot "\tool.exe"
+        for path in [first, second, mismatch, cross, executable]
+            FileAppend("test", path, "UTF-8")
+        DirCreate(folder)
+        action := {
+            Id: "archive", Name: "压缩测试",
+            Executable: executable,
+            TargetTypes: "Files", ExecutionMode: "Batch",
+            Extensions: [".tar.gz"], RequireCommonFolder: false,
+            WorkingDirectoryMode: "ProgramDirectory",
+            WorkingDirectory: "", Confirm: false, Enabled: true,
+            Args: ["a", "{items}", "-o{folder}\{stem}"],
+            Valid: true, ValidationError: ""
+        }
+        app := {
+            Id: "tool", Path: executable, Name: "工具",
+            Icon: executable, Extensions: [], Enabled: true,
+            ShowInOpenMenu: false, Actions: [action]
+        }
+        AssertSelfTest(IsOpenAppActionApplicable(
+            app, action, [first, second], first),
+            "工具动作同目录多文件全部匹配")
+        AssertSelfTest(!IsOpenAppActionApplicable(
+            app, action, [first, mismatch], first),
+            "工具动作任一文件扩展名不匹配即隐藏")
+        action.RequireCommonFolder := true
+        AssertSelfTest(!IsOpenAppActionApplicable(
+            app, action, [first, cross], first),
+            "工具动作跨目录共同文件夹限制")
+        action.RequireCommonFolder := false
+        action.TargetTypes := "Both"
+        action.Extensions := []
+        AssertSelfTest(IsOpenAppActionApplicable(
+            app, action, [first, folder], first),
+            "工具动作文件与文件夹混合选择")
+        action.TargetTypes := "Files"
+        action.Extensions := [".tar.gz"]
+        rendered := RenderOpenAppAction(
+            app, action, [first, second], first)
+        AssertSelfTest(rendered.Valid && rendered.Args.Length = 4
+            && rendered.Args[2] = first && rendered.Args[3] = second
+            && rendered.Args[4] = "-o" firstDir "\右击项.TAR",
+            "{items} 多参数展开和右击项标量变量")
+        variables := BuildOpenAppActionVariables(
+            first, 2, 5, "20260726153045")
+        AssertSelfTest(variables.Folder = firstDir
+            && variables.Parent = testRoot
+            && variables.Ext = "gz"
+            && variables.Date = "20260726"
+            && variables.Time = "153045"
+            && variables.DateTime = "20260726_153045"
+            && variables.Index = 2 && variables.Count = 5
+            && variables.Size != "",
+            "folder、parent、日期时间、序号、总数和大小变量")
+        action.ExecutionMode := "PerItem"
+        action.Args := ["{item}", "{index}", "{count}",
+            "{folder}", "{parent}", "{ext}"]
+        rendered := RenderOpenAppAction(
+            app, action, [first, cross], first)
+        AssertSelfTest(rendered.Valid && rendered.Commands.Length = 2
+            && rendered.Commands[1].Args[1] = first
+            && rendered.Commands[2].Args[1] = cross
+            && rendered.Commands[2].Args[2] = "2"
+            && rendered.Commands[2].Args[3] = "2"
+            && rendered.Commands[2].Args[4] = secondDir
+            && rendered.Commands[2].Args[5] = testRoot,
+            "逐个模式跨目录生成独立命令并使用当前项目变量")
+        action.ExecutionMode := "Batch"
+        action.Args := [RepeatText("长", ACTION_COMMAND_LINE_LIMIT)]
+        rendered := RenderOpenAppAction(app, action, [first], first)
+        AssertSelfTest(!rendered.Valid
+            && InStr(rendered.Error, "命令行"),
+            "工具动作超长命令行拒绝执行")
+    } finally {
+        try DirDelete(testRoot, true)
+    }
+}
+
 RunNoiseFilterSelfTests() {
     global GlobalNoiseFilter
     global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
@@ -9561,6 +10712,26 @@ RunConfigDocumentSelfTests() {
             {Key: "Name", Value: "测试来源"},
             {Key: "Path", Value: "C:\Temp"}
         ], ["WorkspaceId", "Name", "Path"], 3)
+        testAction := {
+            Id: "extract", Name: "解压测试",
+            Executable: "C:\Tools\7z.exe",
+            TargetTypes: "Files", ExecutionMode: "PerItem",
+            Extensions: [".tar.gz", ".zip"],
+            RequireCommonFolder: true,
+            WorkingDirectoryMode: "Folder",
+            WorkingDirectory: "", Confirm: false, Enabled: true,
+            Args: ["x", "{item}", "-o{folder}\{stem}"],
+            Valid: true, ValidationError: ""
+        }
+        testApp := {
+            Id: "7z", Path: "C:\Tools\7zFM.exe",
+            Name: "7-Zip", Icon: "C:\Tools\7zFM.exe",
+            Extensions: [".zip"], Enabled: true,
+            ShowInOpenMenu: true, Actions: [testAction]
+        }
+        doc.SetValue("OpenAppAction:7z:extract",
+            "UnknownActionOption", "保留", 4)
+        WriteOpenAppsToDocument(doc, [testApp])
         doc.Save()
 
         raw := FileRead(testPath, "RAW")
@@ -9605,6 +10776,24 @@ RunConfigDocumentSelfTests() {
             "工作区固定项和迁移标记写入")
         AssertSelfTest(InStr(text, "UnknownNoiseOption=保留"),
             "噪音过滤节未知配置项保留")
+        actionSection := InStr(text, "[OpenAppAction:7z:extract]")
+        openAppSection := InStr(text, "[OpenApp:7z]")
+        area4 := InStr(text, "; <PopDrop:area 4>")
+        area5 := InStr(text, "; <PopDrop:area 5>")
+        AssertSelfTest(area4 < openAppSection
+            && openAppSection < actionSection && actionSection < area5,
+            "应用动作位于第四区且排在所属应用之后")
+        AssertSelfTest(InStr(text, "ArgCount=3", false, actionSection)
+            && InStr(text, "Arg002={item}", false, actionSection)
+            && InStr(text, "ExecutionMode=PerItem", false, actionSection)
+            && InStr(text, "RequireCommonFolder=1", false, actionSection)
+            && InStr(text, "WorkingDirectoryMode=Folder",
+                false, actionSection)
+            && !InStr(text, "SelectionMode=", false, actionSection)
+            && !InStr(text, "RequireCommonParent=", false, actionSection),
+            "动作参数按 ArgCount 与 ArgNNN 有序写入")
+        AssertSelfTest(InStr(text, "UnknownActionOption=保留"),
+            "动作节未知配置项保留")
         AssertSelfTest(InStr(text, "; HideHidden：是否排除具有 Hidden 属性的文件。")
             && InStr(text, "; CustomPatternCount：下方 CustomPatternNNN"),
             "噪音过滤配置项说明写入且可诊断")
@@ -9622,7 +10811,14 @@ Cleanup(*) {
     global DropCallbacks, DataCallbacks, ThumbnailImageList, MainInstanceMutex
     global WorkerRunning, WorkerPid, WorkerRequestPath, WorkerReadyPath, PanelIconHandle
     global FileOperationSinkCallbacks, DropTargetCallbacks
+    global OpenAppActionSerialTasks
     SetTimer(PollWorkerResult, 0)
+    for taskId, task in OpenAppActionSerialTasks {
+        try SetTimer(task.PollCallback, 0)
+        if task.ProcessHandle
+            try DllCall("kernel32\CloseHandle", "ptr", task.ProcessHandle)
+    }
+    OpenAppActionSerialTasks.Clear()
     CleanupExternalTransfers()
     if WorkerRunning && WorkerPid && ProcessExist(WorkerPid)
         try ProcessClose(WorkerPid)

@@ -28,7 +28,7 @@ Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之�
 
 ```ini
 [General]
-ConfigVersion=14
+ConfigVersion=16
 Hotkey=F2
 OpenFileMode=DoubleClick
 DefaultContextMenu=PopDrop
@@ -804,7 +804,158 @@ DefaultContextMenu=PopDrop
 按当前显示顺序每行一条，不添加引号。“删除”位于“更多系统操作”上方，使用 Windows
 Shell 回收站操作；PopDrop 不会在回收站不可用时改用永久删除。
 
-### 配置用于打开文件的软件
+### 应用与工具操作
+
+PopDrop 把“打开方式”和“工具动作”作为两个不同概念：
+
+- 打开方式表示“用某个程序打开当前文件”，只对单个普通文件显示。
+- 工具动作表示由应用执行的文件操作，可用于文件、文件夹、混合选择或多选。
+
+在“PopDrop 设置 → 共享设置 → 打开与文件操作”的“应用与工具操作”区域中，可以添加
+或编辑应用，并通过“管理动作…”打开独立动作窗口。应用列表的“打开方式”列显示所有
+文件、指定扩展名或“不显示”；“动作”列显示动作数量。关闭“显示在‘打开方式’菜单中”
+后，应用仍可作为纯工具应用提供动作；禁用整个应用会同时隐藏它的打开方式和全部动作。
+同一个主程序路径只能保存一条应用记录，不能通过重复 EXE 模拟多个动作。
+
+动作管理窗口支持添加、编辑、复制、移除和排序。“复制动作”会生成新的稳定动作 ID；
+应用或动作改名、改路径和排序都不会改变已有 ID。应用和动作只先修改设置草稿，只有
+主设置窗口的“保存”会原子写入配置；取消不会改变运行时或磁盘。
+
+动作不再要求单独设置“仅单个/单个或多个”，而是选择执行模式：
+
+- **逐个项目串行执行**：为当前选择生成多个独立命令，在后台等待前一个外部进程退出后
+  再启动下一项。等待过程不阻塞 PopDrop 界面。
+- **一次传入全部项目**：只启动一个外部进程，并把 `{items}` 展开为当前选择中的多个
+  独立路径参数，适合把多个文件压缩到同一个归档。
+
+#### 参数与变量
+
+参数模板使用多行文本框，**每行表示一个参数**。空格、中文、`&`、括号等字符不会造成
+参数拆分。支持以下变量：
+
+| 变量 | 含义 |
+|---|---|
+| `{item}` | 逐个模式中为当前处理项目；全部传入模式中为右击或键盘聚焦项目 |
+| `{items}` | 生成菜单时的全部选择，按当前显示顺序展开为多个独立参数 |
+| `{folder}` | 标量项目所在的文件夹，例如 `D:\Images` |
+| `{parent}` | `{folder}` 的上一级目录，例如 `D:\` |
+| `{name}` | 标量项目的完整文件名，例如 `旅行视频.mov` |
+| `{stem}` | 标量项目去掉最后一个扩展名后的文件名，例如 `旅行视频` |
+| `{ext}` | 标量项目最后一个扩展名，不包含开头的 `.`；无扩展名时为空 |
+| `{date}` | 动作开始时的日期，格式为 `yyyyMMdd` |
+| `{time}` | 动作开始时的时间，格式为 `HHmmss` |
+| `{datetime}` | 日期和时间，格式为 `yyyyMMdd_HHmmss` |
+| `{index}` | 逐个模式中为当前序号；全部传入模式中为右击项目在选择中的序号 |
+| `{count}` | 本次选择的项目总数 |
+| `{size}` | 文件大小的可读值，例如 `15KB`、`2.4MB`；文件夹为空 |
+
+逐个模式中的标量变量随当前处理项目变化；全部传入模式中的标量变量稳定指向右击或
+键盘聚焦项目。日期和时间在一次动作开始时获取，逐个队列中的全部命令共用同一时间戳。
+项目本身为文件夹时，`{folder}` 仍表示该项目所在的目录，而不是项目自身；`{size}`
+不会递归统计目录内容。大小单位按 1024 进位。
+
+`{items}` 只允许用于“一次传入全部项目”，且必须单独占一行，不能写成
+`--files={items}`。其他标量变量可以嵌入同一个参数，例如
+`-o{folder}\{stem}-{date}`；替换完成后，这一整行仍作为一个参数。未知变量、不完整
+大括号、自定义工作目录为空或覆盖程序不是现有 `.exe` 时，设置窗口会阻止保存。
+
+工作目录可选择所选项目所在文件夹、程序所在文件夹或自定义目录。自定义目录支持环境
+变量和上述标量变量，但不支持 `{items}`。逐个模式会分别计算每一项的 `{folder}` 与
+`{parent}`。全部传入模式使用 `{folder}` 或“所选项目所在文件夹”时，全部选择必须
+具有相同 `{folder}`；使用 `{parent}` 时则必须具有相同 `{parent}`。启用“所选项目
+必须位于同一文件夹”会额外要求整个选择具有相同 `{folder}`。
+
+动作扩展名不区分大小写，会自动补全 `.`、去重，并支持 `<none>`。与旧打开方式只比较
+最后扩展名不同，工具动作按完整文件名做最长后缀匹配，因此 `.tar.gz` 可以作为独立
+类型。扩展名条件必须对全部选中文件成立；文件夹不参与扩展名检查，但仍需满足动作的
+适用对象条件。
+
+#### 7-Zip 示例
+
+以下动作使用 `7zFM.exe` 作为应用主程序用于“打开方式”，并用 `7z.exe` 覆盖工具动作
+的执行程序。参数中没有自动加入 `-y` 或其他覆盖确认选项：
+
+```ini
+[OpenApps]
+Order=7z
+
+[OpenApp:7z]
+Path=C:\Program Files\7-Zip\7zFM.exe
+Name=7-Zip
+Icon=C:\Program Files\7-Zip\7zFM.exe
+Extensions=.zip,.7z
+Enabled=1
+ShowInOpenMenu=1
+ActionOrder=extract-folder
+
+[OpenAppAction:7z:extract-folder]
+Name=解压到同名文件夹
+Executable=C:\Program Files\7-Zip\7z.exe
+TargetTypes=Files
+ExecutionMode=PerItem
+Extensions=.zip,.7z,.rar,.tar.gz
+RequireCommonFolder=1
+WorkingDirectoryMode=Folder
+WorkingDirectory=
+Confirm=0
+Enabled=1
+ArgCount=3
+Arg001=x
+Arg002={item}
+Arg003=-o{folder}\{stem}
+```
+
+同一应用还可以增加一个批量压缩动作：
+
+```ini
+[OpenAppAction:7z:compress-7z]
+Name=压缩为 7z
+Executable=C:\Program Files\7-Zip\7z.exe
+TargetTypes=Both
+ExecutionMode=Batch
+Extensions=
+RequireCommonFolder=1
+WorkingDirectoryMode=Folder
+WorkingDirectory=
+Confirm=1
+Enabled=1
+ArgCount=3
+Arg001=a
+Arg002={folder}\archive-{datetime}.7z
+Arg003={items}
+```
+
+该动作只启动一次 7-Zip，并把全部选择作为独立参数传入。它没有自动加入 `-y`；归档
+名称使用动作开始时的时间戳，避免多个手动任务默认使用同一文件名。
+
+`Executable` 留空时继承应用主程序。`TargetTypes` 可为 `Files`、`Folders`、`Both`；
+`ExecutionMode` 可为 `PerItem`、`Batch`；`WorkingDirectoryMode` 可为 `Folder`、
+`ProgramDirectory`、`Custom`。`ActionOrder` 是应用内动作的唯一排序来源。
+
+#### 右键菜单和执行安全
+
+打开应用仍按当前选择实际适用的前 5 个直接显示，其余进入“更多已配置应用…”；菜单
+文案为“用 {应用名} 打开”。工具动作按 `[OpenApps] Order` 的应用顺序和各应用的
+`ActionOrder` 排序，过滤禁用、无效、不适用或程序不存在的动作后，前 5 个直接显示，
+其余进入“更多工具操作…”。重名动作会追加应用名称。
+
+工具动作的回调固定保存生成菜单时的完整选择副本和当前右击项目，执行前再次验证文件、
+文件夹、扩展名、共同文件夹与 EXE。EXE 路径、逐项转义后的参数和工作目录分别
+传给 `ShellExecuteExW`，不经过 `cmd.exe`、PowerShell、批处理、脚本或 Shell 管道。
+最终命令行超过 Windows 安全长度限制时不会启动。
+
+全部传入模式的“已启动”只表示 Windows 接受了启动请求。逐个模式会等待当前启动的
+进程退出再处理下一项，但只能观察进程是否退出，无法判断工具是否实际处理成功；部分
+启动器还可能创建子进程后立即退出。因此任何状态提示都不代表压缩、解压或转换已经完成。
+需要确认的动作会先显示动作、应用、选择数量、是否包含文件夹和执行模式。
+
+旧动作配置继续兼容：`SelectionMode=Single` 迁移为 `ExecutionMode=PerItem`，
+`SelectionMode=Any` 迁移为 `ExecutionMode=Batch`；`RequireCommonParent` 迁移为
+`RequireCommonFolder`，旧的 `WorkingDirectoryMode=Parent` 迁移为 `Folder`。
+由于旧 `{parent}` 实际表示项目所在文件夹，迁移时会改写为 `{folder}`，保持原动作
+输出位置不变。只有成功完成原子保存后，旧键才会被替换；注释、未知键和布局锚点保留。
+
+#### 打开方式与旧配置兼容
 
 “选择其他程序…”只允许选择 `.exe`。Windows 接受启动请求后，PopDrop 才会保存程序，
 并自动合并当前文件的扩展名。路径按 Windows 大小写不敏感规则规范比较，同一程序不会
@@ -827,8 +978,8 @@ Extensions=.md,.txt,<none>
 `-2`、`-3`。
 
 每个 ID 对应一个 `[OpenApp:<ID>]` 配置段。`Path` 必填；`Name`、`Icon`、`Enabled`
-均可省略，分别默认使用程序产品名、EXE 内置图标和启用状态。`Extensions` 留空或省略
-表示适用于所有普通文件。完整写法如下：
+和 `ShowInOpenMenu` 均可省略，分别默认使用程序产品名、EXE 内置图标、启用状态和
+显示打开方式。`Extensions` 留空或省略表示适用于所有普通文件。完整写法如下：
 
 ```ini
 [OpenApps]
@@ -840,6 +991,7 @@ Name=7-Zip
 Icon=C:\Program Files\7-Zip\7zFM.exe
 Extensions=.7z,.zip
 Enabled=1
+ShowInOpenMenu=1
 
 [OpenApp:everedit]
 Path=D:\Tools\EverEdit\EverEdit.exe
@@ -854,6 +1006,12 @@ ID。迁移失败时原配置不会被破坏，并会显示配置错误。
 扩展名匹配，不支持把 `.tar.gz` 当作一个打开类型。未填写扩展名的通用程序排在精确匹配
 之后；顶层最多 5 个，其余放在“更多已配置应用…”中。程序移动或卸载后，点击该程序会
 提供“重新选择”或“移除”。
+
+配置版本 16 在应用动作中引入执行模式和明确的文件夹路径语义。旧配置缺少
+`ShowInOpenMenu` 时默认为
+`1`，缺少 `ActionOrder` 时视为没有动作；不会自动生成 7-Zip 或 WinRAR 动作，也不会
+拆分旧应用。无动作时行为与升级前一致。保存动作时继续保留配置文件中的未知字段、
+未知节、人工注释、UTF-16LE、CRLF 和六个布局锚点，并在完整校验后原子替换。
 
 ### 复制到、移动到和目标位置
 

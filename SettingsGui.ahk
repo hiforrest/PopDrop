@@ -316,13 +316,18 @@ CloneSettingsSource(source) {
 }
 
 CloneSettingsApplication(app) {
+    actions := []
+    for action in app.Actions
+        actions.Push(CloneOpenAppAction(action))
     return {
         Id: app.Id,
         Path: NormalizePath(app.Path),
         Name: app.Name,
         Icon: app.Icon,
         Extensions: app.Extensions.Clone(),
-        Enabled: app.Enabled
+        Enabled: app.Enabled,
+        ShowInOpenMenu: app.ShowInOpenMenu,
+        Actions: actions
     }
 }
 
@@ -763,15 +768,17 @@ BuildOperationsSettingsPage(c, tabs) {
     tabs.UseTab(3)
     g := c.Gui
     g.AddGroupBox("x200 y29 w818 h270",
-        "打开文件的软件 · 应用于所有工作区")
+        "应用与工具操作 · 应用于所有工作区")
     c.AppList := g.AddListView("x220 y56 w778 h174 Report -Multi NoSortHdr",
-        ["名称", "程序", "适用文件", "状态"])
-    c.AppList.ModifyCol(1, 135)
-    c.AppList.ModifyCol(2, 400)
-    c.AppList.ModifyCol(3, 135)
-    c.AppList.ModifyCol(4, 100)
-    c.AppAdd := AddUiButton(g, "x220 y240 w88", "添加软件")
-    c.AppEdit := AddUiButton(g, "x+7 yp w72", "编辑")
+        ["名称", "程序", "打开方式", "动作", "状态"])
+    c.AppList.ModifyCol(1, 120)
+    c.AppList.ModifyCol(2, 330)
+    c.AppList.ModifyCol(3, 145)
+    c.AppList.ModifyCol(4, 60)
+    c.AppList.ModifyCol(5, 100)
+    c.AppAdd := AddUiButton(g, "x220 y240 w88", "添加应用")
+    c.AppEdit := AddUiButton(g, "x+7 yp w78", "编辑应用")
+    c.AppActions := AddUiButton(g, "x+7 yp w92", "管理动作…")
     c.AppRemove := AddUiButton(g, "x+7 yp w72", "移除")
     c.AppUp := AddUiButton(g, "x+7 yp w72", "上移")
     c.AppDown := AddUiButton(g, "x+7 yp w72", "下移")
@@ -795,6 +802,7 @@ BuildOperationsSettingsPage(c, tabs) {
     c.AppList.OnEvent("ItemSelect", ApplicationSelected.Bind(c))
     c.AppAdd.OnEvent("Click", OpenApplicationEditor.Bind(c, 0))
     c.AppEdit.OnEvent("Click", EditSelectedApplication.Bind(c))
+    c.AppActions.OnEvent("Click", ManageSelectedApplicationActions.Bind(c))
     c.AppRemove.OnEvent("Click", RemoveSelectedApplication.Bind(c))
     c.AppUp.OnEvent("Click", MoveSelectedApplication.Bind(c, -1))
     c.AppDown.OnEvent("Click", MoveSelectedApplication.Bind(c, 1))
@@ -1556,16 +1564,33 @@ RefreshApplicationList(c, preferredId := "") {
     c.AppRows := Map()
     selectRow := 0
     for app in c.Draft.Applications {
-        applicable := app.Extensions.Length
-            ? JoinArray(app.Extensions, " ") : "所有文件"
-        status := IsExistingExecutable(app.Path) ? "正常" : "程序不存在"
-        row := c.AppList.Add("", app.Name, app.Path, applicable, status)
+        applicable := !app.ShowInOpenMenu ? "不显示"
+            : (app.Extensions.Length
+                ? JoinArray(app.Extensions, " ") : "所有文件")
+        status := !app.Enabled ? "已禁用"
+            : (IsExistingExecutable(app.Path)
+                ? ApplicationDraftStatus(app) : "程序不存在")
+        row := c.AppList.Add("", app.Name, app.Path, applicable,
+            app.Actions.Length, status)
         c.AppRows[row] := app.Id
         if app.Id = preferredId
             selectRow := row
     }
     if selectRow
         c.AppList.Modify(selectRow, "Select Focus Vis")
+}
+
+ApplicationDraftStatus(app) {
+    for action in app.Actions {
+        validation := ValidateOpenAppAction(action, app, false)
+        if !action.Valid || validation.Errors.Length
+            return "参数有误"
+        executable := action.Executable != ""
+            ? action.Executable : app.Path
+        if action.Enabled && !IsExistingExecutable(executable)
+            return "动作程序不存在"
+    }
+    return "正常"
 }
 
 ApplicationSelected(c, list, row, selected) {
@@ -1596,7 +1621,8 @@ OpenApplicationEditor(c, existing, *) {
     }
     isEdit := IsObject(existing)
     app := isEdit ? CloneSettingsApplication(existing)
-        : {Id: "", Path: "", Name: "", Icon: "", Extensions: [], Enabled: true}
+        : {Id: "", Path: "", Name: "", Icon: "", Extensions: [],
+            Enabled: true, ShowInOpenMenu: true, Actions: []}
     app.OriginalPath := isEdit ? existing.Path : ""
     child := Gui("+Owner" c.Gui.Hwnd " -MaximizeBox -MinimizeBox",
         isEdit ? "编辑软件" : "添加软件")
@@ -1604,31 +1630,52 @@ OpenApplicationEditor(c, existing, *) {
     child.SetFont("s9", "Microsoft YaHei UI")
     child.MarginX := 14
     child.MarginY := 12
-    child.AddText("xm ym+4 w70", "名称：")
+    child.AddText("xm ym+4 w100", "名称：")
     name := AddUiEdit(child, "x90 yp-4 w390", app.Name)
     child.AddText("xm y+18 w70", "程序：")
     path := AddUiEdit(child, "x90 yp-4 w310", app.Path)
     browse := AddUiButton(child, "x+8 yp w72", "浏览…")
-    allFiles := child.AddRadio("xm y+22 Group", "所有文件")
+    enabled := child.AddCheckBox("xm y+18 Checked" (app.Enabled ? "1" : "0"),
+        "启用此应用")
+    showOpen := child.AddCheckBox("xm y+10 Checked"
+        (app.ShowInOpenMenu ? "1" : "0"), "显示在“打开方式”菜单中")
+    allFiles := child.AddRadio("xm y+16 Group", "所有文件")
     specified := child.AddRadio("xm y+12", "指定扩展名：")
     extensions := AddUiEdit(child, "x120 yp-4 w360",
         JoinArray(app.Extensions, ", "))
     hint := child.AddText("x120 y+2 w360 cGray", "多个扩展名用 , 分割")
     allFiles.Value := app.Extensions.Length = 0
     specified.Value := app.Extensions.Length > 0
-    extensions.Enabled := specified.Value
-    allFiles.OnEvent("Click", (*) => extensions.Enabled := false)
-    specified.OnEvent("Click", (*) => extensions.Enabled := true)
+    updateOpenControls := UpdateApplicationOpenMenuControls.Bind(
+        showOpen, allFiles, specified, extensions, hint)
+    allFiles.OnEvent("Click", updateOpenControls)
+    specified.OnEvent("Click", updateOpenControls)
+    showOpen.OnEvent("Click", updateOpenControls)
+    updateOpenControls()
     browse.OnEvent("Click", BrowseExecutableForEditor.Bind(path, name))
-    ok := AddUiButton(child, "x320 y+24 w72 Default", "确定")
+    manageActions := AddUiButton(child, "xm y+20 w100", "管理动作…")
+    manageActions.OnEvent("Click", OpenNestedActionManager.Bind(
+        c, app, child, name, path))
+    ok := AddUiButton(child, "x320 yp w72 Default", "确定")
     cancel := AddUiButton(child, "x+8 yp w72", "取消")
     ok.OnEvent("Click", AcceptApplicationEditor.Bind(
-        c, app, isEdit, name, path, specified, extensions, child))
+        c, app, isEdit, name, path, enabled, showOpen,
+        specified, extensions, child))
     cancel.OnEvent("Click", CloseSettingsChild.Bind(c, child))
     child.OnEvent("Close", CloseSettingsChild.Bind(c, child))
     child.OnEvent("Escape", CloseSettingsChild.Bind(c, child))
     c.Gui.Opt("+Disabled")
-    child.Show("w508 h262")
+    child.Show("w508 h346")
+}
+
+UpdateApplicationOpenMenuControls(
+    showOpen, allFiles, specified, extensions, hint, *
+) {
+    enabled := !!showOpen.Value
+    allFiles.Enabled := enabled
+    specified.Enabled := enabled
+    extensions.Enabled := enabled && specified.Value
+    hint.Enabled := enabled
 }
 
 BrowseExecutableForEditor(pathControl, nameControl, *) {
@@ -1646,7 +1693,7 @@ NormalizeSettingsExtensions(raw) {
 }
 
 AcceptApplicationEditor(c, app, isEdit, nameCtrl, pathCtrl,
-    specifiedCtrl, extCtrl, child, *) {
+    enabledCtrl, showOpenCtrl, specifiedCtrl, extCtrl, child, *) {
     name := Trim(nameCtrl.Value)
     path := NormalizePath(pathCtrl.Value)
     if name = ""
@@ -1671,6 +1718,8 @@ AcceptApplicationEditor(c, app, isEdit, nameCtrl, pathCtrl,
     app.Name := name
     app.Icon := path
     app.Extensions := extensions
+    app.Enabled := !!enabledCtrl.Value
+    app.ShowInOpenMenu := !!showOpenCtrl.Value
     if !isEdit {
         app.Id := MakeDraftOpenAppId(c.Draft.Applications, path)
         c.Draft.Applications.Push(app)
@@ -1721,6 +1770,506 @@ MoveSelectedApplication(c, delta, *) {
     c.Draft.Applications.RemoveAt(found.Index)
     c.Draft.Applications.InsertAt(target, found.Value)
     RefreshApplicationList(c, found.Value.Id)
+}
+
+ManageSelectedApplicationActions(c, *) {
+    found := FindDraftApplication(c)
+    if IsObject(found)
+        OpenActionManager(c, found.Value, c.Gui, false)
+}
+
+OpenNestedActionManager(c, app, parent, nameCtrl, pathCtrl, *) {
+    name := Trim(nameCtrl.Value)
+    path := NormalizePath(pathCtrl.Value)
+    if name != ""
+        app.Name := name
+    if path != "" {
+        app.Path := path
+        app.Icon := path
+    }
+    OpenActionManager(c, app, parent, true)
+}
+
+OpenActionManager(c, app, parent, nested := false) {
+    if !nested && IsObject(c.Child)
+        return
+    manager := Gui("+Owner" parent.Hwnd " -MaximizeBox -MinimizeBox",
+        "管理动作 · " (app.Name != "" ? app.Name : "新应用"))
+    state := {
+        Gui: manager,
+        App: app,
+        Parent: parent,
+        Nested: nested,
+        SelectedId: "",
+        Rows: Map()
+    }
+    if !nested
+        c.Child := manager
+    manager.SetFont("s9", "Microsoft YaHei UI")
+    manager.MarginX := 14
+    manager.MarginY := 12
+    try manager.AddPicture("xm ym w32 h32 Icon1", app.Icon)
+    manager.AddText("x58 ym w650", "应用：" (app.Name != "" ? app.Name : "新应用"))
+    manager.AddText("x58 y+4 w650 c666666", "主程序：" app.Path)
+    list := manager.AddListView("xm y+14 w760 h300 Report -Multi NoSortHdr",
+        ["动作名称", "适用对象", "文件类型", "执行模式", "状态"])
+    state.List := list
+    list.ModifyCol(1, 230)
+    list.ModifyCol(2, 100)
+    list.ModifyCol(3, 190)
+    list.ModifyCol(4, 120)
+    list.ModifyCol(5, 95)
+    add := AddUiButton(manager, "xm y+10 w82", "添加动作")
+    edit := AddUiButton(manager, "x+7 yp w72", "编辑")
+    copy := AddUiButton(manager, "x+7 yp w82", "复制动作")
+    remove := AddUiButton(manager, "x+7 yp w72", "移除")
+    up := AddUiButton(manager, "x+7 yp w72", "上移")
+    down := AddUiButton(manager, "x+7 yp w72", "下移")
+    close := AddUiButton(manager, "x704 yp w70 Default", "关闭")
+    list.OnEvent("ItemSelect", ActionManagerSelected.Bind(state))
+    add.OnEvent("Click", OpenActionEditor.Bind(c, state, 0))
+    edit.OnEvent("Click", EditSelectedAction.Bind(c, state))
+    copy.OnEvent("Click", CopySelectedAction.Bind(state))
+    remove.OnEvent("Click", RemoveSelectedAction.Bind(state))
+    up.OnEvent("Click", MoveSelectedAction.Bind(state, -1))
+    down.OnEvent("Click", MoveSelectedAction.Bind(state, 1))
+    close.OnEvent("Click", CloseActionManager.Bind(c, state))
+    manager.OnEvent("Close", CloseActionManager.Bind(c, state))
+    manager.OnEvent("Escape", CloseActionManager.Bind(c, state))
+    RefreshActionManagerList(state)
+    parent.Opt("+Disabled")
+    manager.Show("w788 h410")
+}
+
+CloseActionManager(c, state, *) {
+    try state.Parent.Opt("-Disabled")
+    if !state.Nested
+        c.Child := 0
+    try state.Gui.Destroy()
+    try WinActivate("ahk_id " state.Parent.Hwnd)
+    RefreshApplicationList(c, state.App.Id)
+}
+
+RefreshActionManagerList(state, preferredId := "") {
+    if preferredId = ""
+        preferredId := state.SelectedId
+    state.List.Delete()
+    state.Rows := Map()
+    selectedRow := 0
+    for action in state.App.Actions {
+        extensions := action.Extensions.Length
+            ? JoinArray(action.Extensions, " ") : "所有文件"
+        row := state.List.Add("", action.Name,
+            ActionTargetTypesLabel(action.TargetTypes),
+            extensions,
+            ActionExecutionModeLabel(action.ExecutionMode),
+            ActionDraftStatus(state.App, action))
+        state.Rows[row] := action.Id
+        if action.Id = preferredId
+            selectedRow := row
+    }
+    if selectedRow
+        state.List.Modify(selectedRow, "Select Focus Vis")
+}
+
+ActionManagerSelected(state, list, row, selected) {
+    if selected && state.Rows.Has(row)
+        state.SelectedId := state.Rows[row]
+}
+
+FindDraftAction(state, id := "") {
+    if id = ""
+        id := state.SelectedId
+    for index, action in state.App.Actions {
+        if action.Id = id
+            return {Index: index, Value: action}
+    }
+    return 0
+}
+
+EditSelectedAction(c, state, *) {
+    found := FindDraftAction(state)
+    if IsObject(found)
+        OpenActionEditor(c, state, found.Value)
+}
+
+CopySelectedAction(state, *) {
+    found := FindDraftAction(state)
+    if !IsObject(found)
+        return
+    action := CloneOpenAppAction(found.Value)
+    action.Id := MakeDraftOpenAppActionId(
+        state.App.Actions, action.Name "-copy")
+    action.Name := action.Name " - 副本"
+    state.App.Actions.InsertAt(found.Index + 1, action)
+    state.SelectedId := action.Id
+    RefreshActionManagerList(state, action.Id)
+}
+
+RemoveSelectedAction(state, *) {
+    found := FindDraftAction(state)
+    if !IsObject(found)
+        return
+    state.App.Actions.RemoveAt(found.Index)
+    state.SelectedId := ""
+    RefreshActionManagerList(state)
+}
+
+MoveSelectedAction(state, delta, *) {
+    found := FindDraftAction(state)
+    if !IsObject(found)
+        return
+    target := found.Index + delta
+    if target < 1 || target > state.App.Actions.Length
+        return
+    state.App.Actions.RemoveAt(found.Index)
+    state.App.Actions.InsertAt(target, found.Value)
+    RefreshActionManagerList(state, found.Value.Id)
+}
+
+ActionTargetTypesLabel(value) {
+    global ACTION_TARGET_FILES, ACTION_TARGET_FOLDERS
+    return value = ACTION_TARGET_FILES ? "仅文件"
+        : (value = ACTION_TARGET_FOLDERS ? "仅文件夹" : "文件和文件夹")
+}
+
+ActionExecutionModeLabel(value) {
+    global ACTION_EXECUTION_PER_ITEM
+    return value = ACTION_EXECUTION_PER_ITEM
+        ? "逐个串行" : "一次传入全部"
+}
+
+ActionDraftStatus(app, action) {
+    if !action.Enabled
+        return "已禁用"
+    validation := ValidateOpenAppAction(action, app, false)
+    if !action.Valid || validation.Errors.Length
+        return "参数有误"
+    executable := action.Executable != "" ? action.Executable : app.Path
+    return IsExistingExecutable(executable) ? "正常" : "程序不存在"
+}
+
+MakeDraftOpenAppActionId(actions, seed) {
+    return NewOpenAppActionIdForActions(actions, seed)
+}
+
+OpenActionEditor(c, state, existing, *) {
+    global ACTION_TARGET_FILES, ACTION_TARGET_FOLDERS, ACTION_TARGET_BOTH
+    global ACTION_EXECUTION_PER_ITEM, ACTION_EXECUTION_BATCH
+    global ACTION_WORKDIR_FOLDER, ACTION_WORKDIR_PROGRAM
+    global ACTION_WORKDIR_CUSTOM
+    isEdit := IsObject(existing)
+    action := isEdit ? CloneOpenAppAction(existing) : {
+        Id: "", Name: "", Executable: "",
+        TargetTypes: ACTION_TARGET_FILES,
+        ExecutionMode: ACTION_EXECUTION_PER_ITEM,
+        Extensions: [], RequireCommonFolder: false,
+        WorkingDirectoryMode: ACTION_WORKDIR_FOLDER,
+        WorkingDirectory: "", Confirm: false, Enabled: true,
+        Args: [], Valid: true, ValidationError: ""
+    }
+    editor := Gui("+Owner" state.Gui.Hwnd " -MaximizeBox -MinimizeBox",
+        isEdit ? "编辑动作" : "添加动作")
+    editor.SetFont("s9", "Microsoft YaHei UI")
+    editor.MarginX := 14
+    editor.MarginY := 12
+    controls := {Gui: editor, Action: action, App: state.App}
+
+    editor.AddGroupBox("xm ym w820 h58", "基本信息")
+    editor.AddText("x30 y34 w76", "动作名称：")
+    controls.Name := AddUiEdit(editor, "x112 yp-4 w400", action.Name)
+    controls.Enabled := editor.AddCheckBox("x540 yp+2 Checked"
+        (action.Enabled ? "1" : "0"), "启用此动作")
+    controls.Confirm := editor.AddCheckBox("x660 yp Checked"
+        (action.Confirm ? "1" : "0"), "执行前确认")
+
+    editor.AddGroupBox("xm y78 w820 h134", "显示条件")
+    editor.AddText("x30 y102 w76", "适用对象：")
+    controls.Target := AddUiDropDownList(editor, "x112 yp-5 w190",
+        ["仅文件", "仅文件夹", "文件和文件夹"])
+    controls.Target.Choose(action.TargetTypes = ACTION_TARGET_FOLDERS
+        ? 2 : (action.TargetTypes = ACTION_TARGET_BOTH ? 3 : 1))
+    editor.AddText("x330 yp+5 w76", "执行模式：")
+    controls.ExecutionMode := AddUiDropDownList(
+        editor, "x412 yp-5 w190",
+        ["逐个项目串行执行", "一次传入全部项目"])
+    controls.ExecutionMode.Choose(
+        action.ExecutionMode = ACTION_EXECUTION_BATCH ? 2 : 1)
+    controls.RequireFolder := editor.AddCheckBox("x630 yp+3 Checked"
+        (action.RequireCommonFolder ? "1" : "0"),
+        "必须位于同一文件夹")
+    controls.AllFiles := editor.AddRadio("x30 y138 Group", "所有文件")
+    controls.SpecifiedFiles := editor.AddRadio(
+        "x30 y170", "指定扩展名：")
+    controls.Extensions := AddUiEdit(editor, "x140 yp-4 w630",
+        JoinArray(action.Extensions, ", "))
+    editor.AddText("x140 y+2 w630 c666666",
+        "不区分大小写；自动补全 .；支持 <none> 和 .tar.gz。文件夹不参与扩展名判断。")
+    controls.AllFiles.Value := action.Extensions.Length = 0
+    controls.SpecifiedFiles.Value := action.Extensions.Length > 0
+
+    editor.AddGroupBox("xm y220 w820 h278", "执行设置")
+    editor.AddText("x30 y246 w76", "执行程序：")
+    controls.InheritExe := editor.AddRadio(
+        "x112 yp Group", "跟随应用主程序")
+    controls.OtherExe := editor.AddRadio("x280 yp", "使用其他 EXE")
+    controls.Executable := AddUiEdit(editor, "x410 yp-4 w280",
+        action.Executable)
+    controls.BrowseExe := AddUiButton(editor, "x+8 yp w72", "浏览…")
+    controls.InheritExe.Value := action.Executable = ""
+    controls.OtherExe.Value := action.Executable != ""
+    editor.AddText("x30 y282 w76", "参数模板：")
+    controls.Args := editor.AddEdit(
+        "x112 yp-4 w460 h140 Multi WantTab",
+        JoinArray(action.Args, "`r`n"))
+    controls.ArgsHelp := editor.AddText("x112 y+3 w460 c666666",
+        "每行表示一个参数；{items} 必须单独占一行。")
+    editor.AddText("x590 y282 w100", "插入变量：")
+    controls.VariableButtons := Map()
+    tokens := ["{item}", "{items}", "{folder}", "{parent}",
+        "{name}", "{stem}", "{ext}", "{date}", "{time}",
+        "{datetime}", "{index}", "{count}", "{size}"]
+    for index, token in tokens {
+        column := Mod(index - 1, 3)
+        row := Floor((index - 1) / 3)
+        button := AddUiButton(editor,
+            "x" (590 + column * 76) " y" (306 + row * 30) " w70",
+            token)
+        controls.VariableButtons[token] := button
+        button.OnEvent("Click", InsertActionVariable.Bind(
+            controls.Args, token, () => UpdateActionEditorControls(controls)))
+    }
+    editor.AddText("x30 y464 w76", "工作目录：")
+    controls.WorkingMode := AddUiDropDownList(editor, "x112 yp-5 w190",
+        ["所选项目所在文件夹", "程序所在文件夹", "自定义目录"])
+    controls.WorkingMode.Choose(
+        action.WorkingDirectoryMode = ACTION_WORKDIR_PROGRAM ? 2
+        : (action.WorkingDirectoryMode = ACTION_WORKDIR_CUSTOM ? 3 : 1))
+    controls.WorkingDirectory := AddUiEdit(editor, "x310 yp w380",
+        action.WorkingDirectory)
+    controls.BrowseDirectory := AddUiButton(editor, "x+8 yp w72", "浏览…")
+
+    editor.AddGroupBox("xm y506 w820 h104", "检查与预览")
+    controls.Check := editor.AddText("x30 y528 w760 h22 c666666", "")
+    controls.Preview := editor.AddEdit(
+        "x30 y552 w760 h54 ReadOnly Multi -Wrap", "")
+    ok := AddUiButton(editor, "x646 y614 w72 Default", "确定")
+    cancel := AddUiButton(editor, "x+8 yp w72", "取消")
+
+    refresh := (*) => UpdateActionEditorControls(controls)
+    for control in [controls.Name, controls.Target, controls.ExecutionMode,
+        controls.Extensions, controls.Executable,
+        controls.Args, controls.WorkingMode, controls.WorkingDirectory]
+        control.OnEvent("Change", refresh)
+    for control in [controls.Enabled, controls.Confirm,
+        controls.RequireFolder, controls.AllFiles,
+        controls.SpecifiedFiles, controls.InheritExe, controls.OtherExe]
+        control.OnEvent("Click", refresh)
+    controls.BrowseExe.OnEvent("Click",
+        BrowseActionExecutable.Bind(controls.Executable, controls.OtherExe,
+            refresh))
+    controls.BrowseDirectory.OnEvent("Click",
+        BrowseActionWorkingDirectory.Bind(
+            controls.WorkingDirectory, controls.WorkingMode, refresh))
+    ok.OnEvent("Click", AcceptActionEditor.Bind(
+        c, state, action, isEdit, controls, editor))
+    cancel.OnEvent("Click", CloseActionEditor.Bind(state, editor))
+    editor.OnEvent("Close", CloseActionEditor.Bind(state, editor))
+    editor.OnEvent("Escape", CloseActionEditor.Bind(state, editor))
+    state.Gui.Opt("+Disabled")
+    UpdateActionEditorControls(controls)
+    editor.Show("w848 h650")
+}
+
+InsertActionVariable(control, token, refresh, *) {
+    current := control.Value
+    control.Value := current = "" ? token : current "`r`n" token
+    control.Focus()
+    refresh.Call()
+}
+
+BrowseActionExecutable(control, radio, refresh, *) {
+    selected := SelectPanelFile("1", "", "选择动作执行程序", "程序 (*.exe)")
+    if selected = ""
+        return
+    control.Value := NormalizePath(selected)
+    radio.Value := 1
+    refresh.Call()
+}
+
+BrowseActionWorkingDirectory(control, dropdown, refresh, *) {
+    selected := SelectPanelFile("D1", "", "选择自定义工作目录")
+    if selected = ""
+        return
+    control.Value := NormalizePath(selected)
+    dropdown.Choose(3)
+    refresh.Call()
+}
+
+CaptureActionEditorDraft(controls) {
+    global ACTION_TARGET_FILES, ACTION_TARGET_FOLDERS, ACTION_TARGET_BOTH
+    global ACTION_EXECUTION_PER_ITEM, ACTION_EXECUTION_BATCH
+    global ACTION_WORKDIR_FOLDER, ACTION_WORKDIR_PROGRAM
+    global ACTION_WORKDIR_CUSTOM
+    action := CloneOpenAppAction(controls.Action)
+    action.Name := Trim(controls.Name.Value)
+    action.Enabled := !!controls.Enabled.Value
+    action.Confirm := !!controls.Confirm.Value
+    action.TargetTypes := controls.Target.Value = 2
+        ? ACTION_TARGET_FOLDERS
+        : (controls.Target.Value = 3
+            ? ACTION_TARGET_BOTH : ACTION_TARGET_FILES)
+    action.ExecutionMode := controls.ExecutionMode.Value = 2
+        ? ACTION_EXECUTION_BATCH : ACTION_EXECUTION_PER_ITEM
+    action.Extensions := controls.SpecifiedFiles.Value
+        ? NormalizeActionExtensions(controls.Extensions.Value) : []
+    action.RequireCommonFolder := !!controls.RequireFolder.Value
+    action.Executable := controls.OtherExe.Value
+        ? NormalizePath(controls.Executable.Value) : ""
+    action.Args := ActionArgsFromEditor(controls.Args.Value)
+    action.WorkingDirectoryMode :=
+        controls.WorkingMode.Value = 2
+            ? ACTION_WORKDIR_PROGRAM
+            : (controls.WorkingMode.Value = 3
+                ? ACTION_WORKDIR_CUSTOM : ACTION_WORKDIR_FOLDER)
+    action.WorkingDirectory := action.WorkingDirectoryMode
+        = ACTION_WORKDIR_CUSTOM ? Trim(controls.WorkingDirectory.Value) : ""
+    action.Valid := true
+    action.ValidationError := ""
+    return action
+}
+
+ActionArgsFromEditor(text) {
+    text := StrReplace(text, "`r`n", "`n")
+    text := StrReplace(text, "`r", "`n")
+    return text = "" ? [] : StrSplit(text, "`n")
+}
+
+UpdateActionEditorControls(controls) {
+    global ACTION_EXECUTION_BATCH, ACTION_WORKDIR_CUSTOM
+    controls.Extensions.Enabled := controls.SpecifiedFiles.Value
+    controls.Executable.Enabled := controls.OtherExe.Value
+    controls.BrowseExe.Enabled := controls.OtherExe.Value
+    action := CaptureActionEditorDraft(controls)
+    controls.VariableButtons["{items}"].Enabled :=
+        action.ExecutionMode = ACTION_EXECUTION_BATCH
+    controls.ArgsHelp.Text := action.ExecutionMode = ACTION_EXECUTION_BATCH
+        ? "每行表示一个参数；{items} 必须单独占一行。"
+        : "每行表示一个参数；逐个执行不能使用 {items}。"
+    custom := action.WorkingDirectoryMode = ACTION_WORKDIR_CUSTOM
+    controls.WorkingDirectory.Enabled := custom
+    controls.BrowseDirectory.Enabled := custom
+    validation := ValidateOpenAppAction(action, controls.App, false)
+    if controls.SpecifiedFiles.Value && !action.Extensions.Length
+        validation.Errors.Push("指定扩展名时至少填写一个有效扩展名")
+    if controls.SpecifiedFiles.Value {
+        for item in ValidateActionExtensionInput(controls.Extensions.Value)
+            validation.Errors.Push(item)
+    }
+    if action.Executable != "" && !IsExistingExecutable(action.Executable)
+        validation.Warnings.Push("覆盖执行程序当前不存在")
+    if validation.Errors.Length {
+        controls.Check.Text := "配置有误：" JoinArray(validation.Errors, "；")
+        controls.Check.SetFont("cB00020")
+    } else if validation.Warnings.Length {
+        controls.Check.Text := "需要注意：" JoinArray(validation.Warnings, "；")
+        controls.Check.SetFont("c9A5A00")
+    } else {
+        controls.Check.Text := "配置检查：正常"
+        controls.Check.SetFont("c287A28")
+    }
+    controls.Preview.Value := BuildActionEditorPreview(
+        controls.App, action)
+}
+
+BuildActionEditorPreview(app, action) {
+    global ACTION_EXECUTION_BATCH
+    executable := action.Executable != "" ? action.Executable : app.Path
+    paths := [
+        "C:\示例 文件\压缩包 (1).tar.gz",
+        "C:\示例 文件\资料 & 文档.txt"
+    ]
+    stamp := A_Now
+    if action.ExecutionMode = ACTION_EXECUTION_BATCH {
+        variables := BuildOpenAppActionVariables(
+            paths[1], 1, paths.Length, stamp)
+        variables.Size := "15KB"
+        command := BuildActionEditorPreviewCommand(
+            action, executable, paths, variables)
+        return "[一次传入全部] " command.Command
+            . "`r`n工作目录：" command.WorkingDirectory
+            . "`r`n所选项目：" paths.Length " 个"
+    }
+    lines := []
+    for index, path in paths {
+        variables := BuildOpenAppActionVariables(
+            path, index, paths.Length, stamp)
+        variables.Size := index = 1 ? "15KB" : "2.4MB"
+        command := BuildActionEditorPreviewCommand(
+            action, executable, [path], variables)
+        lines.Push("[" index "/" paths.Length "] " command.Command)
+        lines.Push("    工作目录：" command.WorkingDirectory)
+    }
+    return JoinArray(lines, "`r`n")
+}
+
+BuildActionEditorPreviewCommand(action, executable, paths, variables) {
+    global ACTION_WORKDIR_FOLDER, ACTION_WORKDIR_PROGRAM
+    args := []
+    for template in action.Args {
+        if StrLower(template) = "{items}" {
+            for path in paths
+                args.Push(path)
+        } else
+            args.Push(ReplaceOpenAppActionVariables(template, variables))
+    }
+    preview := QuoteWindowsArgument(executable)
+    parameters := BuildWindowsParameterString(args)
+    if parameters != ""
+        preview .= " " parameters
+    if action.WorkingDirectoryMode = ACTION_WORKDIR_FOLDER
+        workDir := variables.Folder
+    else if action.WorkingDirectoryMode = ACTION_WORKDIR_PROGRAM
+        SplitPath(executable, , &workDir)
+    else
+        workDir := ReplaceOpenAppActionVariables(
+            action.WorkingDirectory, variables)
+    return {Command: preview, WorkingDirectory: workDir}
+}
+
+AcceptActionEditor(c, state, original, isEdit, controls, editor, *) {
+    action := CaptureActionEditorDraft(controls)
+    validation := ValidateOpenAppAction(action, state.App, false)
+    if controls.SpecifiedFiles.Value && !action.Extensions.Length
+        validation.Errors.Push("指定扩展名时至少填写一个有效扩展名")
+    if controls.SpecifiedFiles.Value {
+        for item in ValidateActionExtensionInput(controls.Extensions.Value)
+            validation.Errors.Push(item)
+    }
+    if action.Executable != "" && !IsExistingExecutable(action.Executable)
+        validation.Errors.Push("请选择一个存在的 .exe 覆盖程序")
+    if validation.Errors.Length
+        return SettingsMessage(c, "请修正动作配置：`n`n"
+            JoinArray(validation.Errors, "`n"), "无法保存动作", "Iconx")
+    if !isEdit {
+        action.Id := MakeDraftOpenAppActionId(
+            state.App.Actions, action.Name)
+        state.App.Actions.Push(action)
+    } else {
+        action.Id := original.Id
+        found := FindDraftAction(state, original.Id)
+        if IsObject(found)
+            state.App.Actions[found.Index] := action
+    }
+    state.SelectedId := action.Id
+    CloseActionEditor(state, editor)
+    RefreshActionManagerList(state, action.Id)
+}
+
+CloseActionEditor(state, editor, *) {
+    try state.Gui.Opt("-Disabled")
+    try editor.Destroy()
+    try WinActivate("ahk_id " state.Gui.Hwnd)
 }
 
 RefreshDestinationList(c, preferredId := "") {
@@ -1974,9 +2523,21 @@ SettingsDraftSignature(draft) {
                 JoinNormalizedPaths(s.AllowedExcludedPaths))
         }
     }
-    for app in draft.Applications
+    for app in draft.Applications {
         parts.Push("A", app.Id, app.Name, PathKey(app.Path),
-            JoinArray(app.Extensions, ","), app.Enabled ? "1" : "0")
+            JoinArray(app.Extensions, ","), app.Enabled ? "1" : "0",
+            app.ShowInOpenMenu ? "1" : "0")
+        for action in app.Actions {
+            parts.Push("AA", app.Id, action.Id, action.Name,
+                PathKey(action.Executable), action.TargetTypes,
+                action.ExecutionMode, JoinArray(action.Extensions, ","),
+                action.RequireCommonFolder ? "1" : "0",
+                action.WorkingDirectoryMode, action.WorkingDirectory,
+                action.Confirm ? "1" : "0",
+                action.Enabled ? "1" : "0",
+                JoinArray(action.Args, Chr(29)))
+        }
+    }
     for target in draft.CommonDestinations
         parts.Push("T", target.Id, target.Name, PathKey(target.Path))
     parts.Push("R", JoinNormalizedPaths(draft.RecentDestinations))
@@ -2163,6 +2724,27 @@ ValidateSettingsDraft(c) {
             appPaths[PathKey(app.Path)] := true
         if !IsExistingExecutable(app.Path)
             warnings.Push("软件“" app.Name "”当前不存在：" app.Path)
+        actionIds := Map()
+        for action in app.Actions {
+            if !IsSafeOpenAppActionId(action.Id)
+                errors.Push("应用“" app.Name "”包含无效动作 ID："
+                    action.Id)
+            if actionIds.Has(StrLower(action.Id))
+                errors.Push("应用“" app.Name "”动作 ID 重复："
+                    action.Id)
+            else
+                actionIds[StrLower(action.Id)] := true
+            actionValidation := ValidateOpenAppAction(
+                action, app, false)
+            for item in actionValidation.Errors
+                errors.Push("应用“" app.Name "”的动作“"
+                    action.Name "”：" item)
+            executable := action.Executable != ""
+                ? action.Executable : app.Path
+            if !IsExistingExecutable(executable)
+                warnings.Push("应用“" app.Name "”的动作“"
+                    action.Name "”执行程序不存在：" executable)
+        }
     }
     targetPaths := Map()
     if d.CommonDestinations.Length > 5
@@ -2472,33 +3054,7 @@ WriteSettingsDraft(draft, tempPath) {
         }
     }
 
-    appIds := []
-    activeAppIds := Map()
-    for app in draft.Applications
-        activeAppIds[StrLower(app.Id)] := true
-    oldAppIds := ParseOpenAppOrder(doc.GetValue("OpenApps", "Order", ""))
-    for entry in doc.GetEntries("OpenApps") {
-        if RegExMatch(entry.Key, "i)^App\d+$")
-            && !ArrayContainsTextInsensitive(oldAppIds, entry.Value)
-            oldAppIds.Push(entry.Value)
-    }
-    for id in oldAppIds {
-        if !activeAppIds.Has(StrLower(id))
-            doc.DeleteSection("OpenApp:" id)
-    }
-    for app in draft.Applications {
-        appIds.Push(app.Id)
-        section := "OpenApp:" app.Id
-        doc.ReplaceKnownKeys(section, [
-            {Key: "Path", Value: app.Path},
-            {Key: "Name", Value: app.Name},
-            {Key: "Icon", Value: app.Path},
-            {Key: "Extensions", Value: JoinArray(app.Extensions, ",")},
-            {Key: "Enabled", Value: app.Enabled ? "1" : "0"}
-        ], ["Path", "Name", "Icon", "Extensions", "Enabled"], 4)
-    }
-    doc.ReplaceSection("OpenApps",
-        [{Key: "Order", Value: JoinArray(appIds, ",")}], 4)
+    WriteOpenAppsToDocument(doc, draft.Applications)
 
     favoriteEntries := []
     labelEntries := []

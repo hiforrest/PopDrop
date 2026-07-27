@@ -1,66 +1,47 @@
-# 编译为 EXE
+# PopDrop 构建与验证
+
+PopDrop 主程序使用 AutoHotkey v2；外部内容投放 helper 使用 Windows C++。本次应用
+工具动作功能没有增加第三方运行库，也不需要重新设计 native helper 协议。
+
+## 环境
+
+- Windows 10 或 Windows 11
+- AutoHotkey v2（运行源码与 `--self-test`）
+- Ahk2Exe（仅编译 `PopDrop.exe` 时需要）
+- Visual Studio 2022 Build Tools，“使用 C++ 的桌面开发”工作负载
+  （仅构建 `PopDropTransfer.exe` 时需要）
+
+## 验证源码
+
+在项目目录运行：
 
 ```powershell
-.\build.ps1
+AutoHotkey64.exe .\PopDrop.ahk --self-test
+python -m unittest discover -s tests -v
 ```
 
-脚本会自动检查环境、调用 Ahk2Exe 编译，把详细日志写入 `build_logs/` 目录。
+第一条执行 Windows API、配置文档往返、动作参数转义和现有纯逻辑自检。第二条执行
+跨平台静态与纯逻辑回归测试。
 
----
+## 构建外部投放 helper
 
-## 首次编译前准备
+```powershell
+powershell -ExecutionPolicy Bypass -File .\native\build.ps1
+```
 
-1. 安装 [AutoHotkey v2](https://www.autohotkey.com/)（安装时勾选 Ahk2Exe 编译器）。
-2. 确认编译器路径：`C:\Program Files\AutoHotkey\Compiler\Ahk2Exe.exe`
-3. 确认 v2 Base 路径：`C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe`
+输出位置及 x86/x64 打包规则见 [native/README.md](native/README.md)。源码模式按
+AutoHotkey 位数从 `native\bin\<架构>` 加载；发布包应把对应架构的
+`PopDropTransfer.exe` 放在 `PopDrop.exe` 同目录。
 
-## 编译产物
+## 编译主程序
 
-| 文件 | 说明 |
-|---|---|
-| `PopDrop.exe` | 编译后的程序，可以和 `config.ini`（从 `config.example.ini` 复制）一起分发 |
-| `build_logs/build_yyyyMMdd_HHmmss.log` | 每次编译的完整日志 |
+使用 Ahk2Exe 选择 `PopDrop.ahk` 作为入口。入口文件中的编译指令会设置应用图标、
+托盘资源、产品名和 `0.9.0.0` 文件版本；本次只升级配置架构到 15，不修改应用市场
+版本号。发布前请同时带上：
 
-编译后的 EXE 需要和 `config.ini` 放在同一目录，配置和固定文件才能正常保存。从源码构建时，请先将 `config.example.ini` 复制为 `config.ini`。
+- `config.ini`（UTF-16LE BOM、CRLF）
+- 与目标架构一致的 `PopDropTransfer.exe`
+- README、使用指南和其他发布文档
 
-## 两次编译的意义
-
-编译一次看不出好处。当你改了两周代码，编译出新的 EXE 替换旧的——面板正常、拖拽正常、右键菜单正常——这时候 `build.ps1` 的价值才体现出来：**你知道改动没有破坏编译流程**。
-
----
-
-## 构建经验
-
-建立这个编译脚本时踩了一些坑，写下来供参考：
-
-### 1. 确认 PowerShell 版本再写脚本
-
-系统默认 PowerShell 5.1 很常见，`#Requires -Version 7.0` 会直接拒跑。先查版本再写版本号。
-
-### 2. .ps1 文件必须用 UTF-8 with BOM
-
-PowerShell 5.1 解析 UTF-8 without BOM 脚本时，中文字符串中的 `;` 会被误判为语句分隔符，导致大量解析错误。检查方法：读文件前 3 字节，`0xEF 0xBB 0xBF` 才是 BOM。
-
-### 3. Ahk2Exe 是 GUI 应用，不是控制台应用
-
-`& $compilerPath @arguments 2>&1` 配合 `$LASTEXITCODE` 只对控制台应用有效。Ahk2Exe 1.1.x 是 GUI 应用（`SUBSYSTEM:WINDOWS`），需要用 `Start-Process -Wait -PassThru` 获取退出码，验证结果靠检查输出文件是否存在且大小不为 0。
-
-### 4. 复杂脚本不要通过 Bash 内联编写
-
-在 Bash 中写 `powershell.exe -Command "..."` 时，`$`、`"`、反引号的多层转义极易出错。多行脚本应该直接写 .ps1 文件，然后用 `-File` 执行。
-
-### 5. ICO 文件必须包含多尺寸
-
-不能只有 256×256 的 PNG。Windows 资源管理器、任务栏、文件属性页需要不同尺寸时，没有合适尺寸的条目会导致显示模糊或缩放异常。
-
-- `app.ico`：至少包含 16、32、48、64、256px
-- `tray.ico`：至少包含 16、20、24、32、40、48、64px，**全部 32bpp**（16×16 的 8bpp 在深色托盘上会显示黑底）
-- 用 ImageMagick `-define icon:auto-resize=16,24,32,...` 可以一步生成
-
-### 6. 源文件引用必须与文件系统一致
-
-修改脚本前 grep 检查所有对已删除或重命名文件的引用。CI 脚本也应该验证所有硬编码路径是否实际存在。
-
-### 7. 从简单参数开始测试
-
-先测试 `/in /out /base` 三个参数能否编译成功，再逐步添加 `/compress`、`/silent` 等参数。一步到位遇到失败时，难以判断是哪个参数的问题。
+不要把 x86 helper 与 x64 主程序混用。启动时的 helper 版本握手会明确拒绝不兼容
+组件，而不是继续运行旧二进制。
