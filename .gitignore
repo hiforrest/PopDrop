@@ -2,6 +2,9 @@
 *.tmp
 *.bak
 *.exe
+*.obj
+*.pdb
+*.ilk
 .mcp.json
 .claude/
 tests/
