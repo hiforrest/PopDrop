@@ -4,7 +4,7 @@
 
 ;@Ahk2Exe-SetMainIcon assets\app.ico
 ;@Ahk2Exe-AddResource assets\tray.ico, 555
-;@Ahk2Exe-SetVersion 0.9.0.0
+;@Ahk2Exe-SetVersion 0.10.0.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -15,8 +15,17 @@
 ; ──── 排序模式常量 ────
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
-global APP_VERSION := "0.9.0"
-global CONFIG_VERSION := "16"
+global APP_VERSION := "0.10.0"
+global CONFIG_VERSION := "20"
+
+; ──── 文件管理器适配器 ────
+global FILE_MANAGER_WINDOWS_SHELL := "WindowsShell"
+global FILE_MANAGER_DIRECTORY_OPUS := "DirectoryOpus"
+global FILE_MANAGER_TOTAL_COMMANDER := "TotalCommander"
+global FILE_MANAGER_XYPLORER := "XYplorer"
+global FILE_MANAGER_DOUBLE_COMMANDER := "DoubleCommander"
+global FILE_MANAGER_FILES := "Files"
+global FILE_MANAGER_FREE_COMMANDER := "FreeCommander"
 
 ; ──── 文件夹模式常量 ────
 global MODE_FILES := "Files"
@@ -53,6 +62,16 @@ global NOISE_FILTER_INHERIT := "Inherit"
 global NOISE_FILTER_ENABLED := "Enabled"
 global NOISE_FILTER_DISABLED := "Disabled"
 global NOISE_DIAGNOSTIC_LIMIT := 200
+
+; External-drop adapter constants are needed by --self-test before the
+; included integration module's top-level initialization would run.
+global DROP_ADAPTER_HDROP := "HDrop"
+global DROP_ADAPTER_VIRTUAL := "VirtualFiles"
+global DROP_ADAPTER_PNG := "Png"
+global DROP_ADAPTER_DIBV5 := "DibV5"
+global DROP_ADAPTER_DIB := "Dib"
+global DROP_ADAPTER_URL := "Url"
+global DROP_ADAPTER_UNSUPPORTED := "Unsupported"
 
 if A_Args.Length && A_Args[1] = "--self-test" {
     RunSelfTests()
@@ -96,6 +115,11 @@ global ViewButton := 0
 global RecentButton := 0
 global WindowModeButton := 0
 global PinnedDropButton := 0
+global ToolbarControls := []
+global FolderDropAddSourceButton := 0
+global FolderDropPinnedButton := 0
+global FolderDropUiVisible := false
+global PanelLayoutWidth := 766
 global StatusText := 0
 global TransferStatusText := 0
 global ItemPaths := Map()
@@ -165,6 +189,7 @@ global DropTargetObjects := Map()
 global DropTargetRegisteredHwnds := Map()
 global DropTargetRegistrationErrors := []
 global ActiveDropSession := 0
+global DropLeaveGeneration := 0
 global GroupDropTargets := Map()
 global DropFolderValidationCache := Map()
 global ActiveDropHighlightedGroup := 0
@@ -222,15 +247,21 @@ global OpenAppActionSerialTasks := Map()
 global NextOpenAppActionSerialTaskId := 0
 global GlobalOpenFileMode := OPEN_MODE_DOUBLE
 global DefaultContextMenu := CONTEXT_MENU_POPDROP
+global FileManagerProvider := FILE_MANAGER_WINDOWS_SHELL
+global FileManagerExecutable := ""
 global PendingContextMenuMouseShift := Map()
 global PendingContextMenuKeyboardAlternate := Map()
 global ContextMenuDispatchActive := false
+global SourceMenuDispatchActive := false
+global SourceRemovalDialog := 0
 global SettingsDialog := 0
 global EscapeHidesPanel := true
 
 #Include ConfigDocument.ahk
+#Include FileManager.ahk
 #Include SettingsGui.ahk
 #Include ExternalDrop.ahk
+#Include Preview.ahk
 
 ; ──── 单击激活手势和重复激活抑制 ────
 global FilePointerGesture := 0
@@ -277,10 +308,14 @@ OnMessage(0x020A, FileViewCancelInteraction) ; WM_MOUSEWHEEL
 OnMessage(0x020E, FileViewCancelInteraction) ; WM_MOUSEHWHEEL
 OnMessage(0x0114, FileViewCancelInteraction) ; WM_HSCROLL
 OnMessage(0x0115, FileViewCancelInteraction) ; WM_VSCROLL
+OnMessage(0x02A3, FileViewMouseLeave)        ; WM_MOUSELEAVE
 OnMessage(0x001F, FileViewCancelMode)      ; WM_CANCELMODE
 OnMessage(0x0215, FileViewCaptureChanged)  ; WM_CAPTURECHANGED
 OnMessage(0x0008, FileViewKillFocus)       ; WM_KILLFOCUS
 OnMessage(0x0006, PanelActivationChanged) ; WM_ACTIVATE
+OnMessage(0x0216, PanelMovingOrSizing)      ; WM_MOVING
+OnMessage(0x0214, PanelMovingOrSizing)      ; WM_SIZING
+OnMessage(0x0232, PanelExitMoveSize)        ; WM_EXITSIZEMOVE
 OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 
 ; 用 Owner 模式弹出 MsgBox，确保弹窗保持在置顶主面板之上
@@ -368,6 +403,27 @@ EnsureConfig() {
     "RecentFileCount=12`n"
     "CachePath=`n"
     "ThumbnailPolicy=Full`n"
+    "`n"
+    "[Preview]`n"
+    "; <PopDrop:PreviewHelp>`n"
+    "; 文件内容预览。高级限制仅建议在排查兼容性问题时修改。`n"
+    "Enabled=1`n"
+    "Side=Auto`n"
+    "HoverDelayMs=350`n"
+    "SwitchDelayMs=120`n"
+    "LeaveGraceMs=140`n"
+    "KeyboardDelayMs=250`n"
+    "Width=320`n"
+    "CacheEnabled=1`n"
+    "CacheStartAfterHiddenSeconds=10`n"
+    "CacheMaxMB=256`n"
+    "CacheMaxItems=1000`n"
+    "CacheItemMaxKB=2048`n"
+    "CacheUnreferencedDays=7`n"
+    "DirectImageMaxFileMB=64`n"
+    "DirectImageMaxEdge=65535`n"
+    "DirectImageMaxPixelsMP=160`n"
+    "DirectImageMaxExpandedMB=256`n"
     "; 窗口模式：always_on_top（默认）| temporary（失焦自动隐藏）| normal（普通窗口）`n"
     "WindowMode=temporary`n"
     "; ModifiedDesc（默认，从新到旧）| NameAsc（文件名自然升序）`n"
@@ -404,6 +460,12 @@ EnsureConfig() {
     "; 全局后台并发数，范围 1～6`n"
     "MaxConcurrent=3`n"
     "ShowCompletionNotifications=1`n"
+    "`n"
+    "[FileManager]`n"
+    "; WindowsShell（默认）| DirectoryOpus | TotalCommander | XYplorer | DoubleCommander | Files | FreeCommander`n"
+    "Provider=WindowsShell`n"
+    "; 第三方程序分别使用 dopusrt.exe、TOTALCMD64.EXE/TOTALCMD.EXE、XYplorer.exe、doublecmd.exe、Files 官方启动程序或 FreeCommander.exe`n"
+    "Executable=`n"
     "`n"
     "; <PopDrop:area 2>`n"
     "[Folders]`n"
@@ -722,6 +784,8 @@ NormalizeConfigDocument(tempPath) {
     global CONFIG_VERSION
     doc := OpenPopDropConfig(tempPath)
     EnsureNoiseFilterConfigComments(doc)
+    EnsureFileManagerConfigDefaults(doc)
+    EnsurePreviewConfigDefaults(doc)
     doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
     doc.Save()
 }
@@ -730,8 +794,50 @@ ConfigLayoutNeedsNormalization() {
     global ConfigPath, CONFIG_VERSION
     doc := OpenPopDropConfig(ConfigPath)
     EnsureNoiseFilterConfigComments(doc)
+    EnsureFileManagerConfigDefaults(doc)
+    EnsurePreviewConfigDefaults(doc)
     return doc.Dirty
         || doc.GetValue("General", "ConfigVersion", "") != CONFIG_VERSION
+}
+
+EnsureFileManagerConfigDefaults(doc) {
+    if Trim(doc.GetValue("FileManager", "Provider", "")) = ""
+        doc.SetValue("FileManager", "Provider", "WindowsShell", 1)
+    ; Executable is intentionally blank for Windows Shell, but materializing
+    ; the key makes upgraded configurations explicit and ready for any
+    ; third-party provider selected later in Settings.
+    if !IsObject(GetDocumentEntry(doc, "FileManager", "Executable"))
+        doc.SetValue("FileManager", "Executable", "", 1)
+}
+
+EnsurePreviewConfigDefaults(doc) {
+    doc.EnsureCommentBlock("Preview", "; <PopDrop:PreviewHelp>", [
+        "; 文件内容预览。高级限制仅建议在排查兼容性问题时修改。",
+        "; 图片会尽可能直接生成内容预览；其他文件依赖 Windows 已有真实缩略图。"
+    ], 1)
+    defaults := [
+        {Key: "Enabled", Value: "1"},
+        {Key: "Side", Value: "Auto"},
+        {Key: "HoverDelayMs", Value: "350"},
+        {Key: "SwitchDelayMs", Value: "120"},
+        {Key: "LeaveGraceMs", Value: "140"},
+        {Key: "KeyboardDelayMs", Value: "250"},
+        {Key: "Width", Value: "320"},
+        {Key: "CacheEnabled", Value: "1"},
+        {Key: "CacheStartAfterHiddenSeconds", Value: "10"},
+        {Key: "CacheMaxMB", Value: "256"},
+        {Key: "CacheMaxItems", Value: "1000"},
+        {Key: "CacheItemMaxKB", Value: "2048"},
+        {Key: "CacheUnreferencedDays", Value: "7"},
+        {Key: "DirectImageMaxFileMB", Value: "64"},
+        {Key: "DirectImageMaxEdge", Value: "65535"},
+        {Key: "DirectImageMaxPixelsMP", Value: "160"},
+        {Key: "DirectImageMaxExpandedMB", Value: "256"}
+    ]
+    for entry in defaults {
+        if !IsObject(GetDocumentEntry(doc, "Preview", entry.Key))
+            doc.SetValue("Preview", entry.Key, entry.Value, 1)
+    }
 }
 
 EnsureNoiseFilterConfigComments(doc) {
@@ -792,9 +898,21 @@ LoadSettings(*) {
     global OpenAppsConfigNeedsMigration
     global GlobalOpenFileMode, OPEN_MODE_DOUBLE
     global DefaultContextMenu, CONTEXT_MENU_POPDROP
+    global FileManagerProvider, FileManagerExecutable
+    global FILE_MANAGER_WINDOWS_SHELL
     global GlobalNoiseFilter, NOISE_FILTER_INHERIT
+    global PreviewEnabled, PreviewSide, PreviewCacheEnabled, PreviewSession
 
     settingErrors := []
+    oldPreviewEnabled := PreviewEnabled
+    oldPreviewSide := PreviewSide
+    oldPreviewCacheEnabled := PreviewCacheEnabled
+    LoadPreviewSettings(settingErrors)
+    if IsObject(PreviewSession)
+        && (oldPreviewEnabled != PreviewEnabled
+            || oldPreviewSide != PreviewSide
+            || oldPreviewCacheEnabled != PreviewCacheEnabled)
+        PreviewSettingsChanged()
 
     ConfiguredHotkey := Trim(IniRead(ConfigPath, "General", "Hotkey", "F2"))
     if ConfiguredHotkey = ""
@@ -880,6 +998,19 @@ LoadSettings(*) {
         IniRead(ConfigPath, "General", "LastOpenProgramDir", ""))
     LastTransferTargetDir := NormalizePath(
         IniRead(ConfigPath, "General", "LastTransferTargetDir", ""))
+    rawFileManagerProvider := Trim(IniRead(
+        ConfigPath, "FileManager", "Provider", FILE_MANAGER_WINDOWS_SHELL))
+    FileManagerProvider := ParseFileManagerProvider(rawFileManagerProvider)
+    FileManagerExecutable := Trim(IniRead(
+        ConfigPath, "FileManager", "Executable", ""))
+    if rawFileManagerProvider != ""
+        && !IsRecognizedFileManagerProvider(rawFileManagerProvider) {
+        settingErrors.Push("[FileManager] 中 Provider 值无效："
+            . rawFileManagerProvider
+            . "。已使用 WindowsShell。允许的值：WindowsShell, "
+            . "DirectoryOpus, TotalCommander, XYplorer, "
+            . "DoubleCommander, Files, FreeCommander。")
+    }
 
     ; 读取全局排序模式
     rawSort := StrLower(Trim(IniRead(ConfigPath, "General", "SortMode", "ModifiedDesc")))
@@ -1100,6 +1231,44 @@ IsRecognizedSourceOpenFileMode(raw) {
 IsSafeSourceId(id) {
     id := Trim(id)
     return id != "" && !RegExMatch(id, "[,\[\]=`r`n]")
+}
+
+IsSafeSourceName(name) {
+    name := Trim(name)
+    return name != "" && !RegExMatch(name, "[\[\]=`r`n]")
+}
+
+SanitizeSourceName(name) {
+    name := Trim(RegExReplace(name, "[\[\]=`r`n]", "_"))
+    return name != "" ? name : "文件夹"
+}
+
+DefaultSourceNameForPath(path) {
+    name := GetFileName(path)
+    if name = "" {
+        trimmed := RTrim(path, "\")
+        SplitPath(trimmed, &name)
+        if name = ""
+            name := trimmed
+    }
+    return SanitizeSourceName(name)
+}
+
+MakeUniqueSourceName(baseName, sources) {
+    baseName := SanitizeSourceName(baseName)
+    used := Map()
+    for source in sources {
+        if HasProp(source, "Name")
+            used[StrLower(Trim(source.Name))] := true
+    }
+    if !used.Has(StrLower(baseName))
+        return baseName
+    suffix := 2
+    Loop {
+        candidate := baseName " (" suffix++ ")"
+        if !used.Has(StrLower(candidate))
+            return candidate
+    }
 }
 
 ParseSourceIdOrder(raw) {
@@ -3110,8 +3279,15 @@ IsExistingExecutable(path) {
 }
 
 QuoteWindowsArgument(value) {
-    ; CommandLineToArgvW-compatible quoting for one argument. lpFile and
-    ; lpParameters remain separate SHELLEXECUTEINFO fields.
+    ; Keep simple arguments unquoted. This remains CommandLineToArgvW
+    ; compatible and also supports programs such as dopusrt.exe which inspect
+    ; raw command-line switches instead of relying on the CRT argv parser.
+    ; Empty values and values containing a delimiter or quote still use the
+    ; standard backslash/double-quote escaping rules.
+    value := value ""
+    if value != "" && !InStr(value, " ") && !InStr(value, "`t")
+        && !InStr(value, '"')
+        return value
     result := '"'
     backslashes := 0
     for char in StrSplit(value) {
@@ -3807,6 +3983,7 @@ BuildPanel() {
     global ViewButton, RecentButton, WindowModeButton, PinnedDropButton, StatusText
     global TransferStatusText
     global APP_VERSION, WorkspaceSelector
+    global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
 
     Panel := Gui("+Resize +MinSize760x380", "PopDrop v" APP_VERSION)
     Panel.MarginX := 12
@@ -3817,22 +3994,40 @@ BuildPanel() {
     WorkspaceSelector := AddUiDropDownList(Panel, "x+2 yp-5 w110", [])
     OffsetGuiControlYPhysical(workspaceLabel, -4)
     WorkspaceSelector.OnEvent("Change", MainWorkspaceChanged)
-    AddUiButton(Panel, "x+6 yp w52", "刷新").OnEvent("Click", RefreshPanel)
+    refreshButton := AddUiButton(Panel, "x+6 yp w52", "刷新")
+    refreshButton.OnEvent("Click", RefreshPanel)
     PinnedDropButton := AddUiButton(Panel, "x+4 yp w70", "＋固定项")
     PinnedDropButton.OnEvent("Click", AddPinnedFiles)
-    AddUiButton(Panel, "x+4 yp w70", "－固定项").OnEvent("Click", RemovePinnedFile)
+    removePinnedButton := AddUiButton(Panel, "x+4 yp w70", "－固定项")
+    removePinnedButton.OnEvent("Click", RemovePinnedFile)
     ViewButton := AddUiButton(Panel, "x+4 yp w82", "视图")
     ViewButton.OnEvent("Click", ToggleViewMode)
     RecentButton := AddUiButton(Panel, "x+4 yp w74", "近期栏")
     RecentButton.OnEvent("Click", ToggleRecentSidebar)
-    AddUiButton(Panel, "x+4 yp w52", "设置").OnEvent("Click", OpenConfig)
+    settingsButton := AddUiButton(Panel, "x+4 yp w52", "设置")
+    settingsButton.OnEvent("Click", OpenConfig)
     WindowModeButton := AddUiButton(Panel, "x+4 yp w72", "置顶：关")
     WindowModeButton.OnEvent("Click", ToggleWindowMode)
-    AddUiButton(Panel, "x+4 yp w48", "关闭").OnEvent("Click", HidePanel)
+    closeButton := AddUiButton(Panel, "x+4 yp w48", "关闭")
+    closeButton.OnEvent("Click", HidePanel)
+    ToolbarControls := [workspaceLabel, WorkspaceSelector, refreshButton,
+        PinnedDropButton, removePinnedButton, ViewButton, RecentButton,
+        settingsButton, WindowModeButton, closeButton]
+
+    ; Pre-create the compact folder-only drop surface. It occupies the same
+    ; toolbar band and never changes the ListView geometry.
+    FolderDropAddSourceButton := Panel.AddButton(
+        "x12 y10 w510 h36 Hidden -Tabstop +0x2000",
+        "＋ 添加为来源`n当前工作区")
+    FolderDropPinnedButton := Panel.AddButton(
+        "x530 y10 w224 h36 Hidden -Tabstop +0x2000",
+        "☆ 加入固定项`n不会移动文件夹")
+    FolderDropAddSourceButton.Visible := false
+    FolderDropPinnedButton.Visible := false
 
     ; Multi-select is the native ListView default. In icon view this enables
     ; Ctrl-click, Shift range selection and marquee selection on blank space.
-    FileView := Panel.AddListView("xm y+10 w716 h468 Icon +0x100", ["文件", "修改时间"])
+    FileView := Panel.AddListView("xm y50 w716 h468 Icon +0x100", ["文件", "修改时间"])
     FileView.OnEvent("Click", FileViewClick)
     FileView.OnEvent("DoubleClick", OpenFileViewItem)
     FileView.OnEvent("ContextMenu", FileViewContextMenu)
@@ -3920,6 +4115,7 @@ ActivateWorkspace(workspaceId) {
             "工作区切换失败", "Iconx")
         return false
     }
+    PreviewSuppress("workspace", false)
     LoadSettings()
     StatusKind := "default"
     PopulatePanel()
@@ -3945,6 +4141,7 @@ ApplyWindowMode() {
         default:
             Panel.Opt("+AlwaysOnTop")
     }
+    PreviewApplyWindowMode()
 
     if WindowMode != WINDOW_MODE_TEMPORARY
         CancelAutoHideCheck()
@@ -4136,6 +4333,7 @@ TogglePanel(*) {
 ShowAndRefresh(*) {
     global Panel, PanelVisible, ConfiguredHotkey, ActiveHotkey, WindowWidth, WindowHeight
     global ScanResultLoaded, StatusKind
+    PreviewBeginPanelSession()
     LoadSettings()
     ApplyWindowMode()
     if ConfiguredHotkey != ActiveHotkey {
@@ -4186,9 +4384,15 @@ RefreshPanel(*) {
 }
 
 HidePanel(*) {
-    global Panel, PanelVisible
+    global Panel, PanelVisible, SourceRemovalDialog
+    if IsObject(SourceRemovalDialog) {
+        try WinActivate("ahk_id " SourceRemovalDialog.Hwnd)
+        return
+    }
     CancelFilePointerGesture()
+    PreviewPanelHidden()
     CancelAutoHideCheck()
+    ResetActiveDropSession(true)
     Panel.Hide()
     PanelVisible := false
 }
@@ -4207,9 +4411,12 @@ HandlePanelEscape(*) {
 
 ResizePanel(guiObj, minMax, width, height) {
     global FileView, RecentLabel, RecentView, StatusText, TransferStatusText
-    global ShowRecentSidebar
+    global ShowRecentSidebar, PanelLayoutWidth
     if minMax = -1
         return
+    PreviewSuppress("resize", true)
+    PanelLayoutWidth := width
+    ResizeFolderDropControls(width)
     contentHeight := Max(160, height - 92)
     if ShowRecentSidebar {
         sidebarWidth := Min(280, Max(190, Floor(width * 0.28)))
@@ -4233,6 +4440,51 @@ ResizePanel(guiObj, minMax, width, height) {
         transferWidth, 22)
 }
 
+ResizeFolderDropControls(width) {
+    global FolderDropAddSourceButton, FolderDropPinnedButton
+    if !IsObject(FolderDropAddSourceButton)
+        return
+    gap := 8
+    available := Max(300, width - 24 - gap)
+    primaryWidth := Floor(available * 0.7)
+    secondaryWidth := available - primaryWidth
+    FolderDropAddSourceButton.Move(12, 10, primaryWidth, 36)
+    FolderDropPinnedButton.Move(
+        12 + primaryWidth + gap, 10, secondaryWidth, 36)
+}
+
+ShowFolderDropMode() {
+    global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
+    global FolderDropUiVisible, ActiveWorkspaceName, PanelLayoutWidth
+    if !IsObject(FolderDropAddSourceButton)
+        return
+    FolderDropAddSourceButton.Text := "＋ 添加为来源`n当前工作区："
+        . ActiveWorkspaceName
+    FolderDropPinnedButton.Text := "☆ 加入固定项`n不会移动文件夹"
+    ResizeFolderDropControls(PanelLayoutWidth)
+    if FolderDropUiVisible
+        return
+    for control in ToolbarControls
+        control.Visible := false
+    FolderDropAddSourceButton.Visible := true
+    FolderDropPinnedButton.Visible := true
+    FolderDropUiVisible := true
+}
+
+HideFolderDropMode() {
+    global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
+    global FolderDropUiVisible
+    SetAddSourceDropHover(false)
+    SetPinnedDropHover(false)
+    if IsObject(FolderDropAddSourceButton)
+        FolderDropAddSourceButton.Visible := false
+    if IsObject(FolderDropPinnedButton)
+        FolderDropPinnedButton.Visible := false
+    for control in ToolbarControls
+        control.Visible := true
+    FolderDropUiVisible := false
+}
+
 RequestNativeLayout() {
     global Panel
     ; Gui.OnEvent("Size") receives DPI-adjusted coordinates only when AHK
@@ -4250,6 +4502,7 @@ RequestNativeLayout() {
 
 ToggleViewMode(*) {
     global ViewMode
+    PreviewSuppress("view", true)
     ViewMode := ViewMode = "Thumbnail" ? "List" : "Thumbnail"
     AtomicConfigSetValue("General", "ViewMode", ViewMode)
     ApplyViewMode()
@@ -4258,6 +4511,7 @@ ToggleViewMode(*) {
 
 ToggleRecentSidebar(*) {
     global ShowRecentSidebar
+    PreviewSuppress("recent", true)
     ShowRecentSidebar := !ShowRecentSidebar
     AtomicConfigSetValue("General", "ShowRecentSidebar",
         ShowRecentSidebar ? "1" : "0")
@@ -4458,9 +4712,11 @@ PopulatePanel() {
     global ConfigErrorsShown, MODE_FILES, GroupFolderPaths, GroupDropTargets
     global SCOPE_FILES_ONLY, SCOPE_RECURSIVE_FILES, FOLDER_TIME_MODIFIED
     global PendingFileOperationRefresh, PendingRefresh
+    global ActiveWorkspaceId
     global NOISE_FILTER_INHERIT
 
     CancelFilePointerGesture()
+    PreviewInvalidateList("main")
     SetDropGroupHighlight(0)
     SelectedFilePaths := []
     FileView.Opt("-Redraw")
@@ -4493,7 +4749,8 @@ PopulatePanel() {
         InsertListGroup(groupId, "固定项  (" PinnedPaths.Length ")")
         GroupDropTargets[groupId] := {
             Type: "Pinned", SourceId: "", Name: "固定项",
-            Path: "", Mode: "", GroupId: groupId}
+            Path: "", Mode: "", GroupId: groupId,
+            WorkspaceId: ActiveWorkspaceId}
         for path in PinnedPaths {
             exists := FileExist(path)
             label := GetFileName(path)
@@ -4561,6 +4818,8 @@ PopulatePanel() {
             Path: folder.Path,
             Mode: folder.Mode,
             GroupId: groupId,
+            WorkspaceId: ActiveWorkspaceId,
+            Available: state != "Unavailable",
             BaseHeader: groupHeader
         }
         if state = "Unavailable" {
@@ -4621,8 +4880,9 @@ PopulatePanel() {
 
     if !folderSettings.Length {
         InsertListGroup(groupId, "当前工作区")
-        AddPlaceholderTile("当前工作区还没有文件来源。", groupId)
-        AddPlaceholderTile("前往“设置 → 当前工作区”添加文件来源。", groupId)
+        AddPlaceholderTile("当前工作区还没有来源。", groupId)
+        AddPlaceholderTile(
+            "将文件夹拖到顶部“添加为来源”，或前往设置添加。", groupId)
     }
 
     ApplyViewMode()
@@ -4743,6 +5003,7 @@ AddShellFileIcon(path) {
 
 PopulateRecentSidebar() {
     global RecentView, RecentLabel, RecentItemPaths, ShowRecentSidebar, CurrentScanResult
+    PreviewInvalidateList("recent")
     RecentView.Opt("-Redraw")
     RecentView.Delete()
     RecentItemPaths := Map()
@@ -5146,16 +5407,6 @@ GetDisplayName(originalName, folder) {
         name := originalName
 
     return name
-}
-
-OpenFolderPath(folderPath) {
-    if !DirExist(folderPath) {
-        ShowPanelMsgBox("文件夹不存在或当前无法访问：`n" folderPath, "无法打开", "Icon!")
-        return
-    }
-    try Run(folderPath)
-    catch as err
-        ShowPanelMsgBox("无法打开文件夹：`n" folderPath "`n`n" err.Message, "打开失败", "Iconx")
 }
 
 ; ──── 后台扫描、缓存与 worker IPC ────
@@ -5776,12 +6027,13 @@ OpenFileViewItem(list, row) {
     global ItemPaths, OPEN_MODE_SINGLE
     if !ItemPaths.Has(row)
         return
+    PreviewHide("open", true)
     path := ItemPaths[row]
     if GetPointerModifierMask() != 0
         return
     ; 文件夹始终保持双击激活，不受单击模式影响。
     if IsListItemFolder(list, row, path) {
-        OpenFolderPath(path)
+        OpenFolderInFileManager(path)
         return
     }
     ; 单击模式的第一次合法释放已经打开；忽略随后产生的双击通知。
@@ -5796,6 +6048,7 @@ OpenRecentItem(list, row) {
     global RecentItemPaths, OPEN_MODE_SINGLE
     if !RecentItemPaths.Has(row)
         return
+    PreviewHide("open", true)
     if GetPointerModifierMask() != 0
         return
     effectiveMode := GetEffectiveOpenMode(
@@ -5850,7 +6103,7 @@ IsListItemFolder(list, row, path := "") {
 
 OpenItemWithDefaultApplication(path) {
     if DirExist(path) {
-        OpenFolderPath(path)
+        OpenFolderInFileManager(path)
         return
     }
     if !FileExist(path) {
@@ -5907,6 +6160,7 @@ GetActiveSelectionContext() {
 }
 
 PanelOpenSelection(*) {
+    PreviewHide("open", true)
     context := GetActiveSelectionContext()
     if context.Paths.Length
         OpenSelectedItems(context.Paths)
@@ -5921,7 +6175,7 @@ PanelDeleteSelection(*) {
 PanelRevealSelection(*) {
     context := GetActiveSelectionContext()
     if context.Paths.Length
-        RevealPathsInExplorer(context.Paths)
+        RevealItemsInFileManager(context.Paths)
 }
 
 PanelCopyFileObjects(*) {
@@ -5939,58 +6193,6 @@ PanelCopyPaths(*) {
 OpenSelectedItems(paths, *) {
     for path in paths {
         OpenItemWithDefaultApplication(path)
-    }
-}
-
-CanRevealTogether(paths) {
-    if !paths.Length
-        return false
-    parent := GetParentPath(paths[1])
-    for path in paths {
-        if !FileExist(path) || !PathsEqual(GetParentPath(path), parent)
-            return false
-    }
-    return DirExist(parent) != ""
-}
-
-RevealPathsInExplorer(paths, *) {
-    if !CanRevealTogether(paths) {
-        ShowPanelMsgBox(
-            "只能同时定位位于同一父文件夹中的项目；请缩小选择范围后重试。",
-            "在文件资源管理器中显示", "Iconi")
-        return
-    }
-
-    parentPath := GetParentPath(paths[1])
-    parentPidl := 0
-    fullPidls := []
-    try {
-        if DllCall("shell32\SHParseDisplayName", "wstr", parentPath,
-            "ptr", 0, "ptr*", &parentPidl, "uint", 0, "ptr", 0) != 0
-            throw Error("Windows Shell 无法解析父文件夹。")
-        childArray := Buffer(paths.Length * A_PtrSize, 0)
-        for index, path in paths {
-            fullPidl := 0
-            if DllCall("shell32\SHParseDisplayName", "wstr", path,
-                "ptr", 0, "ptr*", &fullPidl, "uint", 0, "ptr", 0) != 0
-                throw Error("Windows Shell 无法解析所选项目。")
-            fullPidls.Push(fullPidl)
-            childPidl := DllCall("shell32\ILFindLastID", "ptr", fullPidl, "ptr")
-            NumPut("ptr", childPidl, childArray, (index - 1) * A_PtrSize)
-        }
-        hr := DllCall("shell32\SHOpenFolderAndSelectItems", "ptr", parentPidl,
-            "uint", paths.Length, "ptr", childArray.Ptr, "uint", 0, "int")
-        if hr != 0
-            throw Error("资源管理器未接受定位请求（HRESULT "
-                Format("0x{:08X}", hr & 0xFFFFFFFF) "）。")
-    } catch as err {
-        ShowPanelMsgBox("无法在文件资源管理器中显示所选项目：`n"
-            err.Message, "定位失败", "Iconx")
-    } finally {
-        for pidl in fullPidls
-            DllCall("ole32\CoTaskMemFree", "ptr", pidl)
-        if parentPidl
-            DllCall("ole32\CoTaskMemFree", "ptr", parentPidl)
     }
 }
 
@@ -6089,13 +6291,16 @@ RecentItemSelect(list, row, selected) {
 RecentContextMenu(list, row, isRightClick, x, y) {
     global RecentItemPaths
     CancelFilePointerGesture()
+    PreviewSuppress("context-menu", false)
     if !row && !isRightClick {
         row := list.GetNext(0, "F")
         if !row
             row := list.GetNext(0)
     }
-    if !row || !RecentItemPaths.Has(row)
+    if !row || !RecentItemPaths.Has(row) {
+        PreviewRecoverAfterInteraction()
         return
+    }
     if !IsListRowSelected(list.Hwnd, row) {
         list.Modify(0, "-Select -Focus")
         list.Modify(row, "Select Focus Vis")
@@ -6103,11 +6308,13 @@ RecentContextMenu(list, row, isRightClick, x, y) {
     path := RecentItemPaths[row]
     if !FileExist(path) {
         ShowPanelMsgBox("文件不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
+        PreviewRecoverAfterInteraction()
         return
     }
     alternate := ContextMenuGestureIsAlternate(list.Hwnd, isRightClick)
     ShowConfiguredContextMenu(
         [path], path, list.Gui.Hwnd, x, y, alternate)
+    PreviewRecoverAfterInteraction()
 }
 
 FileViewItemSelect(list, row, selected) {
@@ -6672,20 +6879,38 @@ FileViewNotify(wParam, lParam, msg, hwnd) {
     if GroupFolderPaths.Has(groupId) {
         folderPath := GroupFolderPaths[groupId]
         if DirExist(folderPath)
-            SetTimer(() => OpenFolderPath(folderPath), -10)
+            SetTimer(() => OpenFolderInFileManager(folderPath), -10)
     }
 }
 
 FileViewContextMenu(list, row, isRightClick, x, y) {
     global ItemPaths
     CancelFilePointerGesture()
+    PreviewSuppress("context-menu", false)
     if !row && !isRightClick {
         row := list.GetNext(0, "F")
         if !row
             row := list.GetNext(0)
     }
-    if !row || !ItemPaths.Has(row)
+    if !row || !ItemPaths.Has(row) {
+        if isRightClick {
+            ; Consume the captured Shift state, but do not apply the
+            ; PopDrop/System item-menu inversion to the independent source
+            ; management menu.
+            ContextMenuGestureIsAlternate(list.Hwnd, true)
+            point := GuiClientPointToControlClient(
+                list.Gui.Hwnd, list.Hwnd, x, y)
+            if IsObject(point) {
+                descriptor := FindSourceGroupHeaderAtPoint(
+                    list.Hwnd, point.X, point.Y)
+                if IsObject(descriptor)
+                    ShowSourceGroupContextMenu(
+                        descriptor, list.Gui.Hwnd, x, y)
+            }
+        }
+        PreviewRecoverAfterInteraction()
         return
+    }
     if !IsListRowSelected(list.Hwnd, row) {
         list.Modify(0, "-Select -Focus")
         list.Modify(row, "Select Focus Vis")
@@ -6696,6 +6921,7 @@ FileViewContextMenu(list, row, isRightClick, x, y) {
     path := ItemPaths[row]
     if !FileExist(path) {
         ShowPanelMsgBox("项目不存在或当前无法访问：`n" path, "右键菜单", "Icon!")
+        PreviewRecoverAfterInteraction()
         return
     }
     paths := GetSelectedExistingPaths()
@@ -6704,6 +6930,139 @@ FileViewContextMenu(list, row, isRightClick, x, y) {
     alternate := ContextMenuGestureIsAlternate(list.Hwnd, isRightClick)
     ShowConfiguredContextMenu(
         paths, path, list.Gui.Hwnd, x, y, alternate)
+    PreviewRecoverAfterInteraction()
+}
+
+GuiClientPointToControlClient(guiHwnd, controlHwnd, x, y) {
+    if x < 0 || y < 0
+        return 0
+    screen := ClientToScreenPoint(guiHwnd, x, y)
+    return ScreenToClientPoint(controlHwnd, screen.X, screen.Y)
+}
+
+IsSourceManagementDescriptor(descriptor) {
+    return IsObject(descriptor)
+        && HasProp(descriptor, "SourceId")
+        && IsSafeSourceId(descriptor.SourceId)
+        && HasProp(descriptor, "Type")
+        && (descriptor.Type = "Files"
+            || descriptor.Type = "Launcher")
+}
+
+CloneSourceManagementDescriptor(descriptor) {
+    return {
+        Type: descriptor.Type,
+        SourceId: descriptor.SourceId,
+        WorkspaceId: HasProp(descriptor, "WorkspaceId")
+            ? descriptor.WorkspaceId : "",
+        Name: descriptor.Name,
+        Path: descriptor.Path,
+        Mode: HasProp(descriptor, "Mode")
+            ? descriptor.Mode : descriptor.Type,
+        GroupId: descriptor.GroupId,
+        Available: HasProp(descriptor, "Available")
+            ? descriptor.Available : true
+    }
+}
+
+PointInListRect(x, y, rect) {
+    return IsObject(rect)
+        && rect.Right > rect.Left && rect.Bottom > rect.Top
+        && x >= rect.Left && x < rect.Right
+        && y >= rect.Top && y < rect.Bottom
+}
+
+FindSourceGroupHeaderInRects(x, y, descriptors, headerRects) {
+    for groupId, descriptor in descriptors {
+        if !IsSourceManagementDescriptor(descriptor)
+            continue
+        if headerRects.Has(groupId)
+            && PointInListRect(x, y, headerRects[groupId])
+            return CloneSourceManagementDescriptor(descriptor)
+    }
+    return 0
+}
+
+HitTestListGroupHeader(hwnd, x, y) {
+    static LVHT_EX_GROUP_HEADER := 0x10000000
+    hit := Buffer(24, 0)
+    NumPut("int", x, hit, 0)
+    NumPut("int", y, hit, 4)
+    DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1012, "ptr", 0, "ptr", hit.Ptr, "int") ; LVM_HITTEST
+    flags := NumGet(hit, 8, "uint")
+    return flags & LVHT_EX_GROUP_HEADER
+        ? NumGet(hit, 20, "int") : 0
+}
+
+GetListItemRect(hwnd, row) {
+    if row < 1
+        return 0
+    rect := Buffer(16, 0)
+    NumPut("int", 0, rect, 0) ; LVIR_BOUNDS
+    if !DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x100E, "ptr", row - 1, "ptr", rect.Ptr, "ptr")
+        return 0
+    return {
+        Left: NumGet(rect, 0, "int"),
+        Top: NumGet(rect, 4, "int"),
+        Right: NumGet(rect, 8, "int"),
+        Bottom: NumGet(rect, 12, "int")
+    }
+}
+
+GetFallbackListGroupHeaderRect(hwnd, groupId) {
+    global ItemOpenContexts
+    groupRect := GetListGroupRect(hwnd, groupId, 0)
+    if !IsObject(groupRect)
+        return 0
+    firstTop := ""
+    for row, context in ItemOpenContexts {
+        if HasProp(context, "GroupId") && context.GroupId = groupId {
+            itemRect := GetListItemRect(hwnd, row)
+            if IsObject(itemRect)
+                && (firstTop = "" || itemRect.Top < firstTop)
+                firstTop := itemRect.Top
+        }
+    }
+    if firstTop = "" || firstTop <= groupRect.Top
+        return 0
+    return {
+        Left: groupRect.Left,
+        Top: groupRect.Top,
+        Right: groupRect.Right,
+        Bottom: Min(firstTop, groupRect.Bottom)
+    }
+}
+
+GetListGroupHeaderRectRobust(hwnd, groupId) {
+    header := GetListGroupRect(hwnd, groupId, 1) ; LVGGR_HEADER
+    if IsObject(header)
+        && header.Right > header.Left && header.Bottom > header.Top
+        return header
+    return GetFallbackListGroupHeaderRect(hwnd, groupId)
+}
+
+FindSourceGroupHeaderAtPoint(hwnd, x, y) {
+    global GroupDropTargets
+    groupId := HitTestListGroupHeader(hwnd, x, y)
+    if groupId {
+        if GroupDropTargets.Has(groupId)
+            && IsSourceManagementDescriptor(GroupDropTargets[groupId])
+            return CloneSourceManagementDescriptor(
+                GroupDropTargets[groupId])
+        return 0
+    }
+    headerRects := Map()
+    for candidateId, descriptor in GroupDropTargets {
+        if !IsSourceManagementDescriptor(descriptor)
+            continue
+        rect := GetListGroupHeaderRectRobust(hwnd, candidateId)
+        if IsObject(rect)
+            headerRects[candidateId] := rect
+    }
+    return FindSourceGroupHeaderInRects(
+        x, y, GroupDropTargets, headerRects)
 }
 
 IsListRowSelected(hwnd, row) {
@@ -6751,6 +7110,394 @@ ContextMenuGestureIsAlternate(hwnd, isRightClick) {
     return alternate
 }
 
+FindRuntimeSourceDescriptor(workspaceId, sourceId) {
+    global Workspaces
+    workspace := FindWorkspace(workspaceId, Workspaces)
+    if !IsObject(workspace)
+        return 0
+    for source in workspace.Value.Sources {
+        if StrLower(source.SourceId) = StrLower(sourceId) {
+            return {
+                Type: source.Mode,
+                Mode: source.Mode,
+                SourceId: source.SourceId,
+                WorkspaceId: workspace.Value.Id,
+                WorkspaceName: workspace.Value.Name,
+                Name: source.Name,
+                Path: source.Path,
+                GroupId: 0
+            }
+        }
+    }
+    return 0
+}
+
+CanOpenSourceFolder(descriptor) {
+    return IsSourceManagementDescriptor(descriptor)
+        && (HasProp(descriptor, "Available")
+            ? descriptor.Available : DirExist(descriptor.Path))
+}
+
+ShowSourceGroupContextMenu(
+    sourceDescriptor, ownerHwnd, x, y
+) {
+    global SourceMenuDispatchActive
+    if SourceMenuDispatchActive
+        return
+    descriptor := CloneSourceManagementDescriptor(sourceDescriptor)
+    ; AHK identifiers are case-insensitive.  A local named "menu" would
+    ; shadow the built-in Menu class even on the right-hand side.
+    sourceMenu := Menu()
+    openText := "打开来源文件夹"
+    sourceMenu.Add(openText, OpenSourceFolderFromPanel.Bind(descriptor))
+    if !CanOpenSourceFolder(descriptor)
+        sourceMenu.Disable(openText)
+    sourceMenu.Add("刷新此来源", RefreshSourceFromPanel.Bind(descriptor))
+    sourceMenu.Add("设置此来源…", OpenSourceSettingsFromPanel.Bind(descriptor))
+    sourceMenu.Add()
+    sourceMenu.Add("从当前工作区移除…",
+        RequestRemoveSourceFromPanel.Bind(descriptor))
+
+    point := MenuScreenPoint(ownerHwnd, x, y)
+    SourceMenuDispatchActive := true
+    BeginAutoHidePause()
+    try {
+        CoordMode("Menu", "Screen")
+        sourceMenu.Show(point.X, point.Y)
+    } finally {
+        EndAutoHidePause()
+        SourceMenuDispatchActive := false
+    }
+}
+
+OpenSourceFolderFromPanel(descriptor, *) {
+    live := FindRuntimeSourceDescriptor(
+        descriptor.WorkspaceId, descriptor.SourceId)
+    if !IsObject(live) {
+        SetUserStatus("该来源已经不存在")
+        return
+    }
+    OpenFolderInFileManager(live.Path)
+}
+
+RefreshSourceFromPanel(descriptor, *) {
+    global ActiveWorkspaceId
+    live := FindRuntimeSourceDescriptor(
+        descriptor.WorkspaceId, descriptor.SourceId)
+    if !IsObject(live)
+        return SetUserStatus("该来源已经不存在，无法刷新")
+    if StrLower(live.WorkspaceId) != StrLower(ActiveWorkspaceId)
+        return SetUserStatus("当前工作区已经改变，未刷新该来源")
+    ; The worker request is workspace-scoped. Reuse it rather than adding a
+    ; second scan protocol; generation, fingerprint and WorkspaceId validation
+    ; continue to reject stale results.
+    SetUserStatus("正在刷新来源「" live.Name "」")
+    StartBackgroundScan()
+}
+
+OpenSourceSettingsFromPanel(descriptor, *) {
+    OpenSourceSettings(descriptor.WorkspaceId, descriptor.SourceId)
+}
+
+SourceRemovalTransferBlockReason(sourceId, path, batches) {
+    for id, batch in batches {
+        if HasProp(batch, "Completed") && batch.Completed
+            continue
+        targetSourceId := HasProp(batch, "TargetSourceId")
+            ? Trim(batch.TargetSourceId) : ""
+        if targetSourceId != "" {
+            if StrLower(targetSourceId) = StrLower(sourceId)
+                return "该来源正在接收内容，请等待传输完成后再移除。"
+            continue
+        }
+        ; Old/incomplete batch metadata has no stable identity. A matching
+        ; path is enough to block, never enough to guess that removal is safe.
+        if HasProp(batch, "TargetPath")
+            && PathsEqual(batch.TargetPath, path)
+            return "该来源正在接收内容，请等待传输完成后再移除。"
+    }
+    return ""
+}
+
+RequestRemoveSourceFromPanel(descriptor, *) {
+    global ActiveWorkspaceId, TransferBatches
+    try {
+        if StrLower(descriptor.WorkspaceId)
+            != StrLower(ActiveWorkspaceId) {
+            SetUserStatus("当前工作区已经改变，未移除来源")
+            return
+        }
+        live := FindRuntimeSourceDescriptor(
+            descriptor.WorkspaceId, descriptor.SourceId)
+        if !IsObject(live) {
+            SetUserStatus("该来源已经不存在")
+            return
+        }
+        blocked := SourceRemovalTransferBlockReason(
+            live.SourceId, live.Path, TransferBatches)
+        if blocked != "" {
+            ShowPanelMsgBox(blocked, "无法移除来源", "Icon!")
+            return
+        }
+        preparation := PrepareSettingsForExternalSourceRemoval(
+            live.WorkspaceId, live.SourceId)
+        if !preparation.Allowed
+            return
+
+        ; Saving or discarding a settings draft may have changed the source.
+        ; Resolve the stable identities again before asking for confirmation.
+        live := FindRuntimeSourceDescriptor(
+            descriptor.WorkspaceId, descriptor.SourceId)
+        if !IsObject(live) {
+            SetUserStatus("该来源已经不存在")
+            return
+        }
+        blocked := SourceRemovalTransferBlockReason(
+            live.SourceId, live.Path, TransferBatches)
+        if blocked != "" {
+            ShowPanelMsgBox(blocked, "无法移除来源", "Icon!")
+            return
+        }
+        ShowSourceRemovalConfirmation(
+            live, preparation.SyncState)
+    } catch as err {
+        ShowPanelMsgBox("无法准备移除来源：`n" err.Message,
+            "移除来源失败", "Iconx")
+    }
+}
+
+ShowSourceRemovalConfirmation(descriptor, settingsSyncState) {
+    global Panel, SourceRemovalDialog
+    if IsObject(SourceRemovalDialog) {
+        try WinActivate("ahk_id " SourceRemovalDialog.Hwnd)
+        return
+    }
+    dialog := Gui("+Owner" Panel.Hwnd
+        . " -MaximizeBox -MinimizeBox", "移除来源")
+    dialog.SetFont("s9", "Microsoft YaHei UI")
+    dialog.MarginX := 16
+    dialog.MarginY := 14
+    state := {
+        Dialog: dialog,
+        Closed: false,
+        Descriptor: descriptor,
+        SettingsSyncState: settingsSyncState
+    }
+    SourceRemovalDialog := dialog
+    dialog.AddText("xm ym w590",
+        "要从工作区「" descriptor.WorkspaceName
+        . "」移除来源「" descriptor.Name "」吗？")
+    dialog.AddText("xm y+12 w590", "完整路径：")
+    pathText := dialog.AddEdit(
+        "xm y+5 w590 h46 ReadOnly -Tabstop Multi -Wrap",
+        descriptor.Path)
+    dialog.AddText("xm y+12 w590 h58",
+        "这只会移除 PopDrop 中的来源及其专属设置，不会删除、移动或修改"
+        . "该文件夹及其中的文件。属于该文件夹的固定项仍会保留。")
+    removeButton := AddUiButton(dialog,
+        "x430 y188 w88", "移除来源")
+    cancelButton := AddUiButton(dialog,
+        "x+8 yp w78 Default", "取消")
+    removeButton.OnEvent("Click",
+        CloseSourceRemovalConfirmation.Bind(state, true))
+    cancelButton.OnEvent("Click",
+        CloseSourceRemovalConfirmation.Bind(state, false))
+    dialog.OnEvent("Close",
+        CloseSourceRemovalConfirmation.Bind(state, false))
+    dialog.OnEvent("Escape",
+        CloseSourceRemovalConfirmation.Bind(state, false))
+    BeginAutoHidePause()
+    try {
+        Panel.Opt("+Disabled")
+        dialog.Show("w622 h232")
+        try cancelButton.Focus()
+    } catch {
+        SourceRemovalDialog := 0
+        try Panel.Opt("-Disabled")
+        try dialog.Destroy()
+        EndAutoHidePause()
+        throw
+    }
+}
+
+CloseSourceRemovalConfirmation(state, confirmed, *) {
+    global Panel, SourceRemovalDialog
+    if state.Closed
+        return
+    state.Closed := true
+    SourceRemovalDialog := 0
+    try Panel.Opt("-Disabled")
+    try state.Dialog.Destroy()
+    EndAutoHidePause()
+    try WinActivate("ahk_id " Panel.Hwnd)
+    if confirmed {
+        SetTimer(ExecuteSourceRemoval.Bind(
+            state.Descriptor.WorkspaceId,
+            state.Descriptor.SourceId,
+            state.SettingsSyncState), -10)
+    }
+}
+
+RemoveTextInsensitive(values, target) {
+    result := []
+    removed := false
+    for value in values {
+        if StrLower(value) = StrLower(target)
+            removed := true
+        else
+            result.Push(value)
+    }
+    return {Values: result, Removed: removed}
+}
+
+SourceOwnedConfigSections(sourceId) {
+    return [
+        "Source:" sourceId,
+        "SourceIgnore:" sourceId,
+        "SourceExclude:" sourceId,
+        "SourceAllow:" sourceId
+    ]
+}
+
+IsClearlySourceOwnedConfigSection(sectionName, sourceId) {
+    colon := InStr(sectionName, ":")
+    if !colon || InStr(sectionName, ":",, colon + 1)
+        return false
+    prefix := StrLower(SubStr(sectionName, 1, colon - 1))
+    owner := SubStr(sectionName, colon + 1)
+    return SubStr(prefix, 1, 6) = "source"
+        && StrLower(owner) = StrLower(sourceId)
+}
+
+CollectSourceOwnedConfigSections(doc, sourceId) {
+    result := SourceOwnedConfigSections(sourceId)
+    seen := Map()
+    for section in result
+        seen[StrLower(section)] := true
+    for section in doc.GetSectionNames() {
+        folded := StrLower(section)
+        if !seen.Has(folded)
+            && IsClearlySourceOwnedConfigSection(section, sourceId) {
+            seen[folded] := true
+            result.Push(section)
+        }
+    }
+    return result
+}
+
+WriteSourceRemovalConfig(workspaceId, sourceId, result, tempPath) {
+    doc := OpenPopDropConfig(tempPath)
+    workspaceOrder := ParseStableIdOrder(
+        doc.GetValue("Workspaces", "Order", ""))
+    if !ArrayContainsTextInsensitive(workspaceOrder, workspaceId)
+        throw Error("目标工作区已经不存在。")
+    activeId := Trim(doc.GetValue("Workspaces", "Active", ""))
+    if StrLower(activeId) != StrLower(workspaceId)
+        throw Error("当前工作区已经改变，已取消移除。")
+
+    workspaceSection := "Workspace:" workspaceId
+    workspaceName := Trim(doc.GetValue(
+        workspaceSection, "Name", ""))
+    sourceOrder := ParseStableIdOrder(doc.GetValue(
+        workspaceSection, "SourceOrder", ""))
+    removal := RemoveTextInsensitive(sourceOrder, sourceId)
+    if !removal.Removed
+        throw Error("目标来源已经不在当前工作区。")
+
+    for otherWorkspaceId in workspaceOrder {
+        if StrLower(otherWorkspaceId) = StrLower(workspaceId)
+            continue
+        otherOrder := ParseStableIdOrder(doc.GetValue(
+            "Workspace:" otherWorkspaceId, "SourceOrder", ""))
+        if ArrayContainsTextInsensitive(otherOrder, sourceId)
+            throw Error("目标来源 ID 仍被其他工作区引用，无法安全移除。")
+    }
+
+    sourceSection := "Source:" sourceId
+    ownerId := Trim(doc.GetValue(
+        sourceSection, "WorkspaceId", ""))
+    if ownerId != ""
+        && StrLower(ownerId) != StrLower(workspaceId)
+        throw Error("目标来源属于其他工作区，已取消移除。")
+    sourceName := Trim(doc.GetValue(sourceSection, "Name", ""))
+    sourcePath := NormalizePath(
+        doc.GetValue(sourceSection, "Path", ""))
+    if sourceName = "" || sourcePath = ""
+        throw Error("目标来源配置不完整，无法安全移除。")
+
+    doc.SetValue(workspaceSection, "SourceOrder",
+        JoinArray(removal.Values, ","), 3)
+    for section in CollectSourceOwnedConfigSections(doc, sourceId)
+        doc.DeleteSection(section)
+    ValidateWorkspaceDocument(doc, workspaceOrder)
+    doc.Save()
+
+    result.WorkspaceName := workspaceName
+    result.SourceName := sourceName
+    result.SourcePath := sourcePath
+    result.Removed := true
+}
+
+ExecuteSourceRemoval(workspaceId, sourceId, settingsSyncState := 0) {
+    global ActiveWorkspaceId, TransferBatches
+    live := FindRuntimeSourceDescriptor(workspaceId, sourceId)
+    if !IsObject(live) {
+        SetUserStatus("该来源已经不存在")
+        return false
+    }
+    blocked := SourceRemovalTransferBlockReason(
+        sourceId, live.Path, TransferBatches)
+    if blocked != "" {
+        ShowPanelMsgBox(blocked, "无法移除来源", "Icon!")
+        return false
+    }
+    if StrLower(workspaceId) != StrLower(ActiveWorkspaceId) {
+        SetUserStatus("当前工作区已经改变，未移除来源")
+        return false
+    }
+
+    result := {
+        Removed: false,
+        WorkspaceName: live.WorkspaceName,
+        SourceName: live.Name,
+        SourcePath: live.Path
+    }
+    wroteConfig := false
+    try {
+        CreateConfigBackup()
+        AtomicConfigEdit(WriteSourceRemovalConfig.Bind(
+            workspaceId, sourceId, result))
+        wroteConfig := true
+        LoadSettings()
+        PopulatePanel()
+        PopulateRecentSidebar()
+    } catch as err {
+        if wroteConfig {
+            try {
+                AtomicConfigEdit(RestoreConfigBackupToTemp)
+                LoadSettings()
+                PopulatePanel()
+                PopulateRecentSidebar()
+            }
+        }
+        ShowPanelMsgBox("无法移除来源：`n" err.Message
+            . "`n`n本地文件夹未作任何更改。",
+            "移除来源失败", "Iconx")
+        return false
+    }
+    try SyncSettingsAfterExternalSourceRemoval(settingsSyncState)
+    catch as err {
+        ShowPanelMsgBox(
+            "来源已安全移除，但设置窗口刷新失败：`n" err.Message,
+            "设置窗口需要刷新", "Icon!")
+    }
+    StartBackgroundScan()
+    SetUserStatus("已从「" result.WorkspaceName
+        . "」移除来源「" result.SourceName
+        . "」；本地文件夹未更改。")
+    return true
+}
+
 ShowConfiguredContextMenu(
     paths, clickedPath, ownerHwnd, x, y, alternate := false
 ) {
@@ -6781,6 +7528,12 @@ ShowSystemContextMenuForSelection(
     ShowShellContextMenu(shellPaths, ownerHwnd, x, y)
 }
 
+RevealItemsFromPopDropMenu(itemPaths, itemName, itemPos, menuObject) {
+    ; AutoHotkey Menu callbacks always append ItemName, ItemPos and MenuObj.
+    ; Keep those event arguments out of the semantic file-manager API.
+    return RevealItemsInFileManager(itemPaths)
+}
+
 ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
     global PinnedPaths, DefaultContextMenu, CONTEXT_MENU_POPDROP
 
@@ -6792,7 +7545,7 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
     usedMenuLabels[StrLower("选择其他程序…")] := true
     usedMenuLabels[StrLower("更多已配置应用…")] := true
     usedMenuLabels[StrLower("更多工具操作…")] := true
-    usedMenuLabels[StrLower("在文件资源管理器中显示")] := true
+    usedMenuLabels[StrLower("在文件管理器中显示")] := true
     usedMenuLabels[StrLower("复制到…")] := true
     usedMenuLabels[StrLower("移动到…")] := true
     usedMenuLabels[StrLower("复制文件")] := true
@@ -6857,9 +7610,10 @@ ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
         }
         contextMenu.Add()
     }
-    revealText := "在文件资源管理器中显示`tCtrl+Enter"
-    contextMenu.Add(revealText, RevealPathsInExplorer.Bind(paths.Clone()))
-    if !CanRevealTogether(paths)
+    revealText := "在文件管理器中显示`tCtrl+Enter"
+    contextMenu.Add(revealText,
+        RevealItemsFromPopDropMenu.Bind(paths.Clone()))
+    if !CanRevealItemsInFileManager(paths)
         contextMenu.Disable(revealText)
 
     contextMenu.Add()
@@ -7238,6 +7992,8 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
         Marquee: !row,
         Cancelled: false
     }
+    if !row
+        PreviewSuppress("marquee", false)
 
     DragPaths := []
     DragItemContexts := []
@@ -7284,6 +8040,7 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
     global PinnedReorderActive, PinnedReorderPath
     global FilePointerGesture
 
+    PreviewHandleMouseMove(hwnd, lParam)
     if IsObject(FilePointerGesture) && FilePointerGesture.Active
         && hwnd = FilePointerGesture.Hwnd
         && GetKeyState("LButton", "P") {
@@ -7317,6 +8074,7 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
         && ShouldContinuePinnedReorder(reorderDropTarget) {
         if !PinnedReorderActive {
             PinnedReorderActive := true
+            PreviewSuppress("pinned-reorder", false)
             DllCall("user32\SetCapture", "ptr", hwnd, "ptr")
             StatusKind := "user"
             StatusText.Text := "在固定项内拖到另一个项目可调整顺序；拖到来源可复制。"
@@ -7330,6 +8088,7 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
     PinnedReorderPath := ""
 
     DragStarted := true
+    PreviewSuppress("drag", false)
     paths := DragPaths
     itemContexts := DragItemContexts
     DragPaths := []
@@ -7345,6 +8104,7 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
         DllCall("user32\UpdateWindow", "ptr", StatusText.Hwnd)
         BeginShellDrag(existingPaths, DragSourceHwnd,
             NormalizeInternalDragItems(existingPaths, itemContexts))
+        PreviewRecoverAfterInteraction()
     }
     ; OLE 拖拽返回时原始按键释放通常已被拖放循环消费。
     CancelFilePointerGesture()
@@ -7360,6 +8120,7 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
         DragItemContexts := []
         DragStarted := false
         PinnedReorderPath := ""
+        PreviewRecoverAfterInteraction()
         return
     }
 
@@ -7371,6 +8132,7 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
     DragPaths := []
     DragItemContexts := []
     DragStarted := false
+    PreviewRecoverAfterInteraction()
     StatusKind := "default"
     SetBackgroundStatus("固定项顺序未更改", 1500)
 
@@ -7582,6 +8344,7 @@ FileViewRightButtonDown(wParam, lParam, msg, hwnd) {
     global PendingContextMenuMouseShift, PendingContextMenuKeyboardAlternate
     if IsTrackedFileViewHwnd(hwnd) {
         CancelFilePointerGesture()
+        PreviewSuppress("context-menu", false)
         if PendingContextMenuKeyboardAlternate.Has(hwnd)
             PendingContextMenuKeyboardAlternate.Delete(hwnd)
         ; ContextMenu is raised after the button message. Capture Shift now so
@@ -7595,6 +8358,7 @@ FileViewContextMenuKeyDown(wParam, lParam, msg, hwnd) {
     global PendingContextMenuKeyboardAlternate, PendingContextMenuMouseShift
     if !IsTrackedFileViewHwnd(hwnd)
         return
+    PreviewHandleKeyDown(wParam, hwnd)
     static VK_F10 := 0x79
     static VK_APPS := 0x5D
     if PendingContextMenuMouseShift.Has(hwnd)
@@ -7609,8 +8373,10 @@ FileViewContextMenuKeyDown(wParam, lParam, msg, hwnd) {
 }
 
 FileViewCancelInteraction(wParam, lParam, msg, hwnd) {
-    if IsTrackedFileViewHwnd(hwnd)
+    if IsTrackedFileViewHwnd(hwnd) {
         CancelFilePointerGesture()
+        PreviewSuppress("scroll", true)
+    }
 }
 
 FileViewCancelMode(wParam, lParam, msg, hwnd) {
@@ -7627,8 +8393,10 @@ FileViewCaptureChanged(wParam, lParam, msg, hwnd) {
 }
 
 FileViewKillFocus(wParam, lParam, msg, hwnd) {
-    if IsTrackedFileViewHwnd(hwnd)
+    if IsTrackedFileViewHwnd(hwnd) {
         CancelFilePointerGestureForHwnd(hwnd)
+        PreviewHide("focus", true)
+    }
 }
 
 SignedMouseCoordinate(value) {
@@ -7651,6 +8419,32 @@ HitTestListRow(hwnd, x, y) {
     zeroBasedRow := DllCall("user32\SendMessageW", "ptr", hwnd,
         "uint", 0x1012, "ptr", 0, "ptr", hitInfo.Ptr, "int") ; LVM_HITTEST
     return zeroBasedRow >= 0 ? zeroBasedRow + 1 : 0
+}
+
+HitTestListItemBounds(hwnd, x, y) {
+    row := HitTestListRow(hwnd, x, y)
+    if row
+        return row
+    if !PointInsideControl(hwnd, x, y)
+        return 0
+    itemCount := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1004, "ptr", 0, "ptr", 0, "int") ; LVM_GETITEMCOUNT
+    firstVisible := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1027, "ptr", 0, "ptr", 0, "int") + 1 ; LVM_GETTOPINDEX
+    perPage := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1028, "ptr", 0, "ptr", 0, "int") ; LVM_GETCOUNTPERPAGE
+    firstCandidate := Max(1, firstVisible - 12)
+    lastCandidate := Min(itemCount,
+        firstVisible + Max(64, perPage + 48))
+    Loop lastCandidate - firstCandidate + 1 {
+        candidateRow := firstCandidate + A_Index - 1
+        bounds := GetListItemBounds(hwnd, candidateRow)
+        if IsObject(bounds)
+            && x >= bounds.Left && x < bounds.Right
+            && y >= bounds.Top && y < bounds.Bottom
+            return candidateRow
+    }
+    return 0
 }
 
 HitTestPinnedReorderRow(hwnd, x, y) {
@@ -8166,7 +8960,7 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
                     "来源已将 " adoptedPaths.Length
                     . " 个项目直接保存到「" targetName
                     . "」，PopDrop 未重复复制    打开目标文件夹",
-                    OpenFolderPath.Bind(targetPath))
+                    OpenFolderInFileManager.Bind(targetPath))
             return {
                 Success: adoptedPaths.Length,
                 Failed: 0,
@@ -8184,7 +8978,7 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
             : "没有可执行的项目；失效路径或文件夹自身/后代目标已跳过。"
         if !suppressFinalStatus
             SetActionStatus(message "    打开目标文件夹",
-                OpenFolderPath.Bind(targetPath))
+                OpenFolderInFileManager.Bind(targetPath))
         return {
             Success: 0, Failed: 0, Skipped: skipped + noOp,
             Aborted: false, Changed: false, RefreshQueued: false,
@@ -8341,7 +9135,8 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
                 SetActionStatus(message, ShowFileOperationDetails.Bind(
                     state.Details.Clone(), targetPath))
             else
-                SetActionStatus(message, OpenFolderPath.Bind(targetPath))
+                SetActionStatus(message,
+                    OpenFolderInFileManager.Bind(targetPath))
         }
     } else if aborted || HResultSucceeded(performHr) {
         if !suppressFinalStatus
@@ -8396,7 +9191,7 @@ ShowFileOperationDetails(details, targetPath, *) {
     message .= "`n`n目标文件夹：`n" targetPath
         . "`n`n是否打开目标文件夹？"
     if ShowPanelMsgBox(message, "文件操作详情", "YesNo Iconi") = "Yes"
-        OpenFolderPath(targetPath)
+        OpenFolderInFileManager(targetPath)
 }
 
 CreateShellItem(path) {
@@ -8958,6 +9753,19 @@ DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
     global DropFolderValidationCache
     global DROP_ADAPTER_UNSUPPORTED
     try {
+        PreviewSuppress("external-drag", false)
+        CancelDeferredDropLeave()
+        ; Moving between registered child HWNDs can produce a paired
+        ; DragLeave/DragEnter for the same IDataObject. Keep the logical
+        ; session so a safe HDROP preview is never read a second time.
+        if IsObject(ActiveDropSession)
+            && ActiveDropSession.DataObject = dataObject
+            && !ActiveDropSession.Completed {
+            ActiveDropSession.AllowedEffects :=
+                NumGet(effectPtr + 0, "uint") & 0x3
+            return UpdateDropFeedback(
+                keyState, screenX, screenY, effectPtr)
+        }
         ResetActiveDropSession(true)
         DropFolderValidationCache := Map()
         allowedEffects := NumGet(effectPtr + 0, "uint") & 0x3
@@ -8980,13 +9788,21 @@ DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
                 session.Decision.Reason), 0, 0)
             return 0
         }
-        ; DragEnter/DragOver intentionally stop at QueryGetData/EnumFormatEtc.
-        ; GetData, file enumeration and all stream/network work happen after
-        ; Drop. Internal drags are known to be CF_HDROP and retain their
-        ; source context without extracting the payload here.
         session.SourceKind := IsObject(ActiveInternalDragContext)
             ? ClassifyDropSource(ActiveInternalDragContext.Items, true)
             : "External"
+        ; Internal drags already own a trusted path array. External HDROP is
+        ; pre-read only for the narrow stable-local case approved by
+        ; CanPreloadHDropForFolderFeedback(); async/URL/virtual/image objects
+        ; remain zero-extraction until Drop.
+        if IsObject(ActiveInternalDragContext) {
+            CacheDropSessionPaths(
+                session, ActiveInternalDragContext.Paths, false)
+        } else if CanPreloadHDropForFolderFeedback(
+            session.Decision, session.AsyncInfo, session.SourceKind) {
+            try GetDropSessionHDropPaths(session, dataObject)
+        }
+        SyncFolderDropModeForSession(session)
         return UpdateDropFeedback(keyState, screenX, screenY, effectPtr)
     } catch {
         SetDropEffect(effectPtr, 0)
@@ -8999,18 +9815,36 @@ DropTargetDragOverCore(keyState, screenX, screenY, effectPtr) {
     try return UpdateDropFeedback(keyState, screenX, screenY, effectPtr)
     catch {
         SetDropEffect(effectPtr, 0)
+        ResetActiveDropSession(true)
         return 0
     }
 }
 
 DropTargetDragLeave(this) {
-    ResetActiveDropSession(true)
+    global DropLeaveGeneration
+    DropLeaveGeneration += 1
+    token := DropLeaveGeneration
+    ; Child HWND transitions re-enter immediately. Deferring cleanup keeps
+    ; their shared logical session and still restores real leaves promptly.
+    SetTimer(FinalizeDeferredDropLeave.Bind(token), -50)
     return 0
+}
+
+CancelDeferredDropLeave() {
+    global DropLeaveGeneration
+    DropLeaveGeneration += 1
+}
+
+FinalizeDeferredDropLeave(token) {
+    global DropLeaveGeneration
+    if token = DropLeaveGeneration
+        ResetActiveDropSession(true)
 }
 
 DropTargetDropCore(dataObject, keyState, screenX, screenY, effectPtr) {
     global ActiveDropSession, DROP_ADAPTER_HDROP
     try {
+        CancelDeferredDropLeave()
         if !IsObject(ActiveDropSession) || ActiveDropSession.Unsupported {
             SetDropEffect(effectPtr, 0)
             ResetActiveDropSession(true)
@@ -9032,14 +9866,23 @@ DropTargetDropCore(dataObject, keyState, screenX, screenY, effectPtr) {
         ClearDropVisuals()
         try {
             if session.Decision.Adapter = DROP_ADAPTER_HDROP {
-                if HDropShouldUseDirectAsyncTakeover(
+                if target.Type = "AddSource" {
+                    session.Paths := GetDropSessionHDropPaths(
+                        session, dataObject)
+                    session.PathInfo := BuildDropPathInfo(session.Paths)
+                    session.PayloadKind := ClassifyDropPaths(
+                        session.Paths, session.PathInfo)
+                    ExecuteLocalDrop(session.Paths, target, effect,
+                        [], session.SourceKind)
+                } else if HDropShouldUseDirectAsyncTakeover(
                     session.SourceKind, target, session.AsyncInfo) {
                     ; Do not pre-read delayed-render CF_HDROP here. Chromium
                     ; may start one source download per GetData call.
                     CreateExternalTransfer(dataObject,
                         session.Decision.Adapter, target)
                 } else {
-                    session.Paths := ReadHDropPaths(dataObject)
+                    session.Paths := GetDropSessionHDropPaths(
+                        session, dataObject)
                     if !session.Paths.Length
                         throw Error("拖拽数据中没有有效的本地文件系统项目。")
                     if session.SourceKind = "External"
@@ -9071,6 +9914,7 @@ DropTargetDropCore(dataObject, keyState, screenX, screenY, effectPtr) {
             if session.Paused
                 EndAutoHidePause()
             MarkDropSessionFinished(session, "drop")
+            PreviewRecoverAfterInteraction()
         }
         return 0
     } catch {
@@ -9091,6 +9935,11 @@ CreateDropSessionState() {
         Effect: 0,
         SkipCount: 0,
         PathInfo: Map(),
+        PayloadKind: "Unknown",
+        PathsCached: false,
+        HDropReadAttempted: false,
+        HDropReadCount: 0,
+        FolderDropUiShown: false,
         Decision: {Adapter: "Unsupported", Formats: [], Reason: ""},
         AsyncInfo: {Supported: false, Enabled: false},
         Unsupported: false,
@@ -9100,15 +9949,63 @@ CreateDropSessionState() {
     }
 }
 
+CacheDropSessionPaths(session, paths, fromDataObject := false) {
+    session.Paths := IsObject(paths) ? paths.Clone() : []
+    session.PathsCached := true
+    if fromDataObject {
+        session.HDropReadAttempted := true
+        session.HDropReadCount += 1
+    }
+    session.PathInfo := BuildDropPathInfo(session.Paths)
+    session.PayloadKind := ClassifyDropPaths(
+        session.Paths, session.PathInfo)
+    return session.Paths
+}
+
+GetDropSessionHDropPaths(session, dataObject, reader := unset) {
+    if session.PathsCached
+        return session.Paths
+    if session.HDropReadAttempted
+        return session.Paths
+    session.HDropReadAttempted := true
+    session.HDropReadCount += 1
+    session.Paths := []
+    loaded := IsSet(reader)
+        ? reader.Call(dataObject) : ReadHDropPaths(dataObject)
+    session.Paths := IsObject(loaded) ? loaded.Clone() : []
+    session.PathsCached := true
+    session.PathInfo := BuildDropPathInfo(session.Paths)
+    session.PayloadKind := ClassifyDropPaths(
+        session.Paths, session.PathInfo)
+    return session.Paths
+}
+
+SyncFolderDropModeForSession(session) {
+    if IsObject(session) && ShouldShowFolderDropMode(session.PayloadKind) {
+        ShowFolderDropMode()
+        session.FolderDropUiShown := true
+    } else {
+        HideFolderDropMode()
+        if IsObject(session)
+            session.FolderDropUiShown := false
+    }
+}
+
+ShouldShowFolderDropMode(payloadKind) {
+    return payloadKind = "FoldersOnly"
+}
+
 MarkDropSessionFinished(session, outcome) {
     session.Completed := true
     session.Outcome := outcome
     session.Paused := false
+    session.FolderDropUiShown := false
     return session
 }
 
 ResetActiveDropSession(restoreStatus := true) {
     global ActiveDropSession
+    CancelDeferredDropLeave()
     if !IsObject(ActiveDropSession) {
         ClearDropVisuals()
         return
@@ -9123,6 +10020,7 @@ ResetActiveDropSession(restoreStatus := true) {
     if session.Paused
         EndAutoHidePause()
     MarkDropSessionFinished(session, "reset")
+    PreviewRecoverAfterInteraction()
 }
 
 UpdateDropFeedback(keyState, screenX, screenY, effectPtr) {
@@ -9131,6 +10029,7 @@ UpdateDropFeedback(keyState, screenX, screenY, effectPtr) {
         SetDropEffect(effectPtr, 0)
         return 0
     }
+    SyncFolderDropModeForSession(ActiveDropSession)
     target := ResolveDropTarget(screenX, screenY)
     adapter := ActiveDropSession.Decision.Adapter
     if !ExternalAdapterAllowedAtTarget(adapter, target) {
@@ -9282,6 +10181,45 @@ BuildDropPathInfo(paths) {
     return info
 }
 
+ClassifyDropPaths(paths, pathInfo := unset) {
+    if !IsObject(paths) || !paths.Length
+        return "Unknown"
+    info := IsSet(pathInfo) ? pathInfo : BuildDropPathInfo(paths)
+    fileCount := 0
+    folderCount := 0
+    for path in paths {
+        key := PathKey(path)
+        if !info.Has(key) || !info[key].Exists
+            return "Unknown"
+        if info[key].IsDirectory
+            folderCount += 1
+        else
+            fileCount += 1
+    }
+    if folderCount = paths.Length
+        return "FoldersOnly"
+    if fileCount = paths.Length
+        return "FilesOnly"
+    return "Mixed"
+}
+
+IsPersistableFileSystemFolder(path, pathInfo := unset) {
+    normalized := NormalizePath(path)
+    if normalized = ""
+        return false
+    ; Reject parsing names, URI-like values and other Shell namespaces. Only
+    ; drive-rooted and UNC file-system paths can be persisted as a source.
+    if !RegExMatch(normalized, "i)^(?:[A-Z]:\\|\\\\[^\\]+\\[^\\]+(?:\\|$))")
+        return false
+    if IsSet(pathInfo) {
+        key := PathKey(normalized)
+        return pathInfo.Has(key) && pathInfo[key].Exists
+            && pathInfo[key].IsDirectory
+    }
+    attributes := FileExist(normalized)
+    return attributes != "" && InStr(attributes, "D")
+}
+
 GetDropPreviewSkipCount(target, effect, paths, internalItems, pathInfo) {
     if !effect || !IsObject(target) || target.Type != "Files"
         return 0
@@ -9317,6 +10255,7 @@ ResolveDropEffect(target, keyState, allowedEffects, sourceKind) {
     if !IsObject(target) || !target.Available
         return DROPEFFECT_NONE
     if target.Type = "Pinned" || target.Type = "Launcher"
+        || target.Type = "AddSource"
         return (allowedEffects & DROPEFFECT_COPY)
             ? DROPEFFECT_COPY : DROPEFFECT_NONE
     if target.Type != "Files"
@@ -9353,9 +10292,32 @@ ShouldContinuePinnedReorder(target) {
 
 ResolveDropTarget(screenX, screenY) {
     global Panel, FileView, RecentView, PinnedDropButton
+    global FolderDropAddSourceButton, FolderDropPinnedButton
+    global ActiveDropSession, ActiveWorkspaceName, FolderSettings
+    global SettingsController
     global ItemOpenContexts, GroupDropTargets
     if !IsObject(Panel)
         return InvalidDropTarget("PopDrop 面板不可用。")
+
+    if IsObject(FolderDropAddSourceButton)
+        && ScreenPointInWindow(
+            FolderDropAddSourceButton.Hwnd, screenX, screenY) {
+        payloadKind := IsObject(ActiveDropSession)
+            ? ActiveDropSession.PayloadKind : "Unknown"
+        paths := IsObject(ActiveDropSession)
+            ? ActiveDropSession.Paths : []
+        return ResolveAddSourceDropTarget(payloadKind,
+            ActiveWorkspaceName, paths, FolderSettings,
+            IsObject(SettingsController))
+    }
+
+    if IsObject(FolderDropPinnedButton)
+        && ScreenPointInWindow(
+            FolderDropPinnedButton.Hwnd, screenX, screenY)
+        return ResolveDropTargetDescriptor({
+            Type: "Pinned", SourceId: "", Name: "固定项",
+            Path: "", GroupId: 0
+        })
 
     if IsObject(PinnedDropButton)
         && ScreenPointInWindow(PinnedDropButton.Hwnd, screenX, screenY)
@@ -9392,6 +10354,49 @@ ResolveDropTarget(screenX, screenY) {
     if ScreenPointInWindow(Panel.Hwnd, screenX, screenY)
         return InvalidDropTarget("此控件或区域不能接收投放。")
     return InvalidDropTarget("不在 PopDrop 的可投放区域内。")
+}
+
+ResolveAddSourceDropTarget(payloadKind, workspaceName, paths,
+    currentSources, settingsOpen := false) {
+    target := {
+        Type: "AddSource",
+        SourceId: "",
+        Name: workspaceName,
+        Path: "",
+        Available: false,
+        Reason: "",
+        GroupId: 0
+    }
+    if payloadKind != "FoldersOnly" {
+        target.Reason := "只有全部为真实文件夹的选择才能添加为来源。"
+        return target
+    }
+    if settingsOpen {
+        target.Reason := "请先保存或关闭设置窗口，再添加来源。"
+        return target
+    }
+    existingCount := CountExistingSourcePaths(paths, currentSources)
+    if paths.Length && existingCount = paths.Length {
+        target.Reason := paths.Length = 1
+            ? "该文件夹已经是当前工作区的来源"
+            : "这些文件夹已经是当前工作区的来源"
+        return target
+    }
+    target.Available := true
+    return target
+}
+
+CountExistingSourcePaths(paths, sources) {
+    count := 0
+    for path in paths {
+        for source in sources {
+            if HasProp(source, "Path") && PathsEqual(path, source.Path) {
+                count += 1
+                break
+            }
+        }
+    }
+    return count
 }
 
 ResolveDropTargetDescriptor(descriptor, folderAvailable := unset,
@@ -9532,26 +10537,45 @@ RestoreDropStatus(snapshot) {
 }
 
 ShowDropFeedback(target, effect, itemCount, skipCount := 0) {
-    global StatusText, StatusKind, CurrentStatusAction
+    global StatusText, StatusKind, CurrentStatusAction, ActiveDropSession
     SetDropGroupHighlight(HasProp(target, "GroupId")
         ? target.GroupId : 0)
+    SetAddSourceDropHover(target.Type = "AddSource" && target.Available)
     SetPinnedDropHover(target.Type = "Pinned" && target.Available)
     CurrentStatusAction := 0
     StatusKind := "user"
     if !IsObject(StatusText)
         return
+    payloadKind := IsObject(ActiveDropSession)
+        ? ActiveDropSession.PayloadKind : "Unknown"
     if !target.Available {
-        StatusText.Text := target.Reason != ""
-            ? "不能投放：" target.Reason : "此处不能投放。"
+        if target.Type = "AddSource" && target.Reason != ""
+            StatusText.Text := target.Reason
+        else if payloadKind = "FoldersOnly"
+            StatusText.Text := "此处不能接收文件夹；拖到上方添加为来源，"
+                . "或拖到下方来源分组移动或复制文件夹"
+        else if payloadKind = "Mixed"
+            StatusText.Text := "混合选择不能添加为来源；"
+                . "可拖到分栏进行移动或复制。"
+        else if target.Reason != ""
+            StatusText.Text := "不能投放：" target.Reason
+        else
+            StatusText.Text := "此处不能投放。"
         return
     }
     if !effect {
         StatusText.Text := "源程序没有提供可安全执行的复制或移动效果。"
         return
     }
-    countText := itemCount " 个项目"
-    if target.Type = "Pinned"
-        StatusText.Text := "添加 " countText " 到固定项"
+    countText := itemCount " 个"
+        . (payloadKind = "FoldersOnly" ? "文件夹" : "项目")
+    if target.Type = "AddSource"
+        StatusText.Text := "添加 " countText " 为「" target.Name
+            . "」的来源；不会移动文件夹"
+    else if target.Type = "Pinned"
+        StatusText.Text := payloadKind = "FoldersOnly"
+            ? "添加 " countText " 到固定项；不会移动文件夹"
+            : "添加 " countText " 到固定项"
     else if target.Type = "Launcher"
         StatusText.Text := "在「" target.Name "」中为 "
             . countText " 创建快捷方式"
@@ -9562,6 +10586,14 @@ ShowDropFeedback(target, effect, itemCount, skipCount := 0) {
     if skipCount
         StatusText.Text .= "；其中 " skipCount " 个项目将跳过"
     DllCall("user32\UpdateWindow", "ptr", StatusText.Hwnd)
+}
+
+SetAddSourceDropHover(active) {
+    global FolderDropAddSourceButton
+    if IsObject(FolderDropAddSourceButton)
+        DllCall("user32\SendMessageW",
+            "ptr", FolderDropAddSourceButton.Hwnd,
+            "uint", 0x00F3, "ptr", active ? 1 : 0, "ptr", 0, "ptr")
 }
 
 SetPinnedDropDiscovery(active) {
@@ -9578,9 +10610,12 @@ SetPinnedDropDiscovery(active) {
 }
 
 SetPinnedDropHover(active) {
-    global PinnedDropButton
+    global PinnedDropButton, FolderDropPinnedButton
     if IsObject(PinnedDropButton)
         DllCall("user32\SendMessageW", "ptr", PinnedDropButton.Hwnd,
+            "uint", 0x00F3, "ptr", active ? 1 : 0, "ptr", 0, "ptr")
+    if IsObject(FolderDropPinnedButton)
+        DllCall("user32\SendMessageW", "ptr", FolderDropPinnedButton.Hwnd,
             "uint", 0x00F3, "ptr", active ? 1 : 0, "ptr", 0, "ptr")
 }
 
@@ -9621,11 +10656,15 @@ SetListGroupSelected(hwnd, groupId, selected) {
 
 ClearDropVisuals() {
     SetDropGroupHighlight(0)
+    SetAddSourceDropHover(false)
     SetPinnedDropHover(false)
     SetPinnedDropDiscovery(false)
+    HideFolderDropMode()
 }
 
 ExecuteLocalDrop(paths, target, effect, internalItems, sourceKind) {
+    if target.Type = "AddSource"
+        return AddFolderSourcesToCurrentWorkspace(paths)
     validation := target.Type = "Pinned"
         ? {Available: true, Writable: true, Reason: ""}
         : ValidateDropFolder(target.Path, true)
@@ -9650,6 +10689,189 @@ ExecuteLocalDrop(paths, target, effect, internalItems, sourceKind) {
         SourceKind: sourceKind,
         FromDrop: true
     })
+}
+
+GetCurrentSourceDefaults() {
+    global MaxFilesPerFolder
+    return {
+        DefaultDisplayScope: ReadGlobalDisplayScopeForDraft(),
+        DefaultFolderTimeMode: ReadGlobalFolderTimeForDraft(),
+        MaxFilesPerFolder: MaxFilesPerFolder,
+        DefaultFilter: ReadGlobalFilterForDraft()
+    }
+}
+
+ReadWorkspaceSourcesFromDocument(doc, workspaceId) {
+    result := []
+    for sourceId in ParseStableIdOrder(doc.GetValue(
+        "Workspace:" workspaceId, "SourceOrder", "")) {
+        section := "Source:" sourceId
+        name := Trim(doc.GetValue(section, "Name", ""))
+        path := NormalizePath(doc.GetValue(section, "Path", ""))
+        if name != "" && path != ""
+            result.Push({SourceId: sourceId, Name: name, Path: path})
+    }
+    return result
+}
+
+CollectConfiguredSourceIds(doc) {
+    result := Map()
+    for section in doc.GetSectionNames() {
+        if SubStr(StrLower(section), 1, 7) != "source:"
+            continue
+        id := SubStr(section, 8)
+        if IsSafeSourceId(id)
+            result[StrLower(id)] := true
+    }
+    return result
+}
+
+NextUniqueDroppedSourceId(usedIds, idFactory := unset) {
+    Loop 100 {
+        id := IsSet(idFactory)
+            ? idFactory.Call() : NewStableId("source")
+        if IsSafeSourceId(id) && !usedIds.Has(StrLower(id)) {
+            usedIds[StrLower(id)] := true
+            return id
+        }
+    }
+    throw Error("无法生成唯一的来源 ID。")
+}
+
+PlanFolderSourceAdditions(paths, currentSources, usedSourceIds,
+    workspaceId, defaults, pathInfo := unset, idFactory := unset) {
+    info := IsSet(pathInfo) ? pathInfo : BuildDropPathInfo(paths)
+    result := {
+        Sources: [],
+        Existing: 0,
+        Failed: 0,
+        FailedDetails: []
+    }
+    namesAndPaths := []
+    for source in currentSources
+        namesAndPaths.Push(source)
+    pendingPaths := []
+    for rawPath in paths {
+        path := NormalizePath(rawPath)
+        if !IsPersistableFileSystemFolder(path, info) {
+            result.Failed += 1
+            result.FailedDetails.Push(
+                (path != "" ? path : rawPath) . "：不是可访问的真实文件夹")
+            continue
+        }
+        duplicate := ArrayContainsPath(pendingPaths, path)
+        if !duplicate {
+            for source in currentSources {
+                if PathsEqual(source.Path, path) {
+                    duplicate := true
+                    break
+                }
+            }
+        }
+        if duplicate {
+            result.Existing += 1
+            continue
+        }
+        id := IsSet(idFactory)
+            ? NextUniqueDroppedSourceId(usedSourceIds, idFactory)
+            : NextUniqueDroppedSourceId(usedSourceIds)
+        name := MakeUniqueSourceName(
+            DefaultSourceNameForPath(path), namesAndPaths)
+        source := CreateDefaultSourceDraft(
+            name, path, id, defaults)
+        source.WorkspaceId := workspaceId
+        result.Sources.Push(source)
+        namesAndPaths.Push(source)
+        pendingPaths.Push(path)
+    }
+    return result
+}
+
+WriteDroppedFolderSources(workspaceId, paths, defaults, result, tempPath) {
+    global CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    workspaceSection := "Workspace:" workspaceId
+    workspaceName := Trim(doc.GetValue(workspaceSection, "Name", ""))
+    if workspaceName = ""
+        throw Error("当前工作区已不存在，无法添加来源。")
+    sourceOrder := ParseStableIdOrder(
+        doc.GetValue(workspaceSection, "SourceOrder", ""))
+    currentSources := ReadWorkspaceSourcesFromDocument(doc, workspaceId)
+    pathInfo := BuildDropPathInfo(paths)
+    plan := PlanFolderSourceAdditions(paths, currentSources,
+        CollectConfiguredSourceIds(doc), workspaceId, defaults, pathInfo)
+    for source in plan.Sources {
+        doc.ReplaceKnownKeys("Source:" source.SourceId,
+            SourceConfigEntries(source, workspaceId),
+            SourceConfigKnownKeys(), 3)
+        sourceOrder.Push(source.SourceId)
+    }
+    doc.ReplaceKnownKeys(workspaceSection, [
+        {Key: "Name", Value: workspaceName},
+        {Key: "SourceOrder", Value: JoinArray(sourceOrder, ",")}
+    ], ["Name", "SourceOrder"], 3)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
+    result.WorkspaceName := workspaceName
+    result.Added := plan.Sources.Length
+    result.Existing := plan.Existing
+    result.Failed := plan.Failed
+    result.FailedDetails := plan.FailedDetails
+    result.Sources := plan.Sources
+}
+
+FormatAddSourceResult(result) {
+    if result.Added {
+        message := "已添加 " result.Added " 个来源"
+        if result.WorkspaceName != ""
+            message .= "到「" result.WorkspaceName "」"
+    } else
+        message := "没有新增来源"
+    if result.Existing
+        message .= "，" result.Existing " 个已存在"
+    if result.Failed
+        message .= "，" result.Failed " 个失败"
+    return message
+}
+
+AddFolderSourcesToCurrentWorkspace(paths) {
+    global ActiveWorkspaceId, ActiveWorkspaceName, SettingsController
+    if IsObject(SettingsController)
+        throw Error("请先保存或关闭设置窗口，再添加来源。")
+    workspaceId := ActiveWorkspaceId
+    result := {
+        WorkspaceName: ActiveWorkspaceName,
+        Added: 0, Existing: 0, Failed: 0,
+        FailedDetails: [], Sources: []
+    }
+    defaults := GetCurrentSourceDefaults()
+    CreateConfigBackup()
+    AtomicConfigEdit(WriteDroppedFolderSources.Bind(
+        workspaceId, paths.Clone(), defaults, result))
+
+    if result.Added {
+        LoadSettings()
+        PopulatePanel()
+        PopulateRecentSidebar()
+        ; Directory enumeration remains in the existing scan worker.
+        StartBackgroundScan()
+    }
+    message := FormatAddSourceResult(result)
+    SetBackgroundStatus(message, 6000)
+    if result.Failed {
+        details := message
+            . "`n`n以下候选未添加："
+        for item in result.FailedDetails
+            details .= "`n• " item
+        ShowPanelMsgBox(details, "添加来源结果", "Icon!")
+    }
+    return {
+        Success: result.Added,
+        Failed: result.Failed,
+        Skipped: result.Existing,
+        Changed: result.Added > 0,
+        Details: result.FailedDetails
+    }
 }
 
 DropItemMatchesTargetSource(item, targetPath, targetSourceId := "") {
@@ -9727,7 +10949,7 @@ PerformLauncherDrop(paths, target) {
         message .= "；文件已保存到目标文件夹；"
             . "部分项目因当前显示或筛选规则未显示。"
     message .= "    打开目标文件夹"
-    SetActionStatus(message, OpenFolderPath.Bind(target.Path))
+    SetActionStatus(message, OpenFolderInFileManager.Bind(target.Path))
     return {
         Success: success, Failed: failed, Skipped: copyResult.Skipped,
         Aborted: copyResult.Aborted, Changed: changed,
@@ -10134,6 +11356,12 @@ RunSelfTests() {
     global APP_VERSION
     try {
         RunConfigDocumentSelfTests()
+        RunPreviewSelfTests()
+        RunFileManagerSelfTests()
+        RunFolderDropSelfTests()
+        RunFolderSourceConfigSelfTests()
+        RunSourceManagementSelfTests()
+        RunSourceRemovalConfigSelfTests()
         RunNoiseFilterSelfTests()
         RunWorkspaceSelfTests()
         RunOpenAppActionSelfTests()
@@ -10260,6 +11488,9 @@ RunSelfTests() {
         dropPinnedTarget := {
             Type: "Pinned", SourceId: "", Name: "固定项",
             Path: "", Available: true, Reason: "", GroupId: 1}
+        addSourceTarget := {
+            Type: "AddSource", SourceId: "", Name: "测试工作区",
+            Path: "", Available: true, Reason: "", GroupId: 0}
         AssertSelfTest(ClassifyDropSource(
             [{Area: "Source"}], true) = "Source"
             && ClassifyDropSource([{Area: "Pinned"}], true) = "Pinned"
@@ -10294,6 +11525,16 @@ RunSelfTests() {
         AssertSelfTest(ResolveDropEffect(
             dropPinnedTarget, 0x0004, 3, "Source") = 1,
             "固定项语义不受 Shift 改变")
+        AssertSelfTest(ResolveDropEffect(
+            addSourceTarget, 0, 3, "Source") = 1
+            && ResolveDropEffect(
+                addSourceTarget, 0x0008, 3, "Source") = 1
+            && ResolveDropEffect(
+                addSourceTarget, 0x0004, 3, "Source") = 1,
+            "添加来源始终只返回 COPY")
+        AssertSelfTest(ResolveDropEffect(
+            addSourceTarget, 0, 2, "Source") = 0,
+            "添加来源在 COPY 不可用时返回 NONE")
         AssertSelfTest(HDropShouldUseDirectAsyncTakeover(
             "External", dropFilesTarget, {Supported: true}),
             "外部异步 HDROP 不依赖 URL 直接接管")
@@ -10435,6 +11676,566 @@ RunWorkspaceSelfTests() {
     AssertSelfTest(IsSafeStableId("workspace-123")
         && !IsSafeStableId("workspace:123"),
         "稳定工作区 ID 格式")
+}
+
+RunFolderDropSelfTests() {
+    global DROP_ADAPTER_HDROP
+    testRoot := A_Temp "\PopDrop-folder-drop-self-test-"
+        . DllCall("kernel32\GetCurrentProcessId", "uint")
+        . "-" A_TickCount
+    try {
+        firstFolder := testRoot "\文件夹一"
+        secondFolder := testRoot "\文件夹二"
+        filePath := testRoot "\普通文件.txt"
+        missingPath := testRoot "\不存在"
+        DirCreate(firstFolder)
+        DirCreate(secondFolder)
+        FileAppend("test", filePath, "UTF-8")
+        AssertSelfTest(ClassifyDropPaths([]) = "Unknown",
+            "拖拽载荷分类：空路径为 Unknown")
+        AssertSelfTest(ClassifyDropPaths([filePath]) = "FilesOnly",
+            "拖拽载荷分类：全文件")
+        AssertSelfTest(ClassifyDropPaths(
+            [firstFolder, secondFolder]) = "FoldersOnly",
+            "拖拽载荷分类：全文件夹")
+        AssertSelfTest(ClassifyDropPaths(
+            [filePath, firstFolder]) = "Mixed",
+            "拖拽载荷分类：文件和文件夹混合")
+        AssertSelfTest(ClassifyDropPaths([missingPath]) = "Unknown"
+            && !IsPersistableFileSystemFolder(missingPath),
+            "不存在路径不能添加为来源")
+        AssertSelfTest(ShouldShowFolderDropMode("FoldersOnly")
+            && !ShouldShowFolderDropMode("FilesOnly")
+            && !ShouldShowFolderDropMode("Mixed")
+            && !ShouldShowFolderDropMode("Unknown"),
+            "只有 FoldersOnly 显示顶部拖放模式")
+
+        stableDecision := {
+            Adapter: DROP_ADAPTER_HDROP,
+            HasExplicitUrl: false,
+            HasVirtualFiles: false,
+            HasImagePayload: false
+        }
+        AssertSelfTest(CanPreloadHDropForFolderFeedback(
+            stableDecision, {Supported: true}, "Source"),
+            "内部拖拽可以立即分类且不读取 IDataObject")
+        internalSession := CreateDropSessionState()
+        CacheDropSessionPaths(internalSession, [firstFolder], false)
+        AssertSelfTest(internalSession.PayloadKind = "FoldersOnly"
+            && internalSession.HDropReadCount = 0,
+            "内部拖拽直接使用上下文路径分类")
+        AssertSelfTest(!CanPreloadHDropForFolderFeedback(
+            stableDecision, {Supported: true}, "External"),
+            "外部异步 HDROP 不允许预读")
+        urlDecision := {
+            Adapter: DROP_ADAPTER_HDROP,
+            HasExplicitUrl: true,
+            HasVirtualFiles: false,
+            HasImagePayload: false
+        }
+        virtualDecision := {
+            Adapter: DROP_ADAPTER_HDROP,
+            HasExplicitUrl: false,
+            HasVirtualFiles: true,
+            HasImagePayload: false
+        }
+        imageDecision := {
+            Adapter: DROP_ADAPTER_HDROP,
+            HasExplicitUrl: false,
+            HasVirtualFiles: false,
+            HasImagePayload: true
+        }
+        AssertSelfTest(!CanPreloadHDropForFolderFeedback(
+            urlDecision, {Supported: false}, "External")
+            && !CanPreloadHDropForFolderFeedback(
+                virtualDecision, {Supported: false}, "External")
+            && !CanPreloadHDropForFolderFeedback(
+                imageDecision, {Supported: false}, "External"),
+            "URL、虚拟文件和图片载荷不允许预读")
+        AssertSelfTest(CanPreloadHDropForFolderFeedback(
+            stableDecision, {Supported: false}, "External"),
+            "稳定本地 HDROP 允许一次预读")
+
+        readState := {Count: 0, Paths: [firstFolder, secondFolder]}
+        session := CreateDropSessionState()
+        firstRead := GetDropSessionHDropPaths(session, 0,
+            SelfTestHDropReader.Bind(readState))
+        secondRead := GetDropSessionHDropPaths(session, 0,
+            SelfTestHDropReader.Bind(readState))
+        AssertSelfTest(readState.Count = 1
+            && session.HDropReadCount = 1
+            && firstRead.Length = 2 && secondRead.Length = 2,
+            "稳定本地 HDROP 和 Drop 复用同一次读取")
+
+        addTarget := ResolveAddSourceDropTarget(
+            "FoldersOnly", "测试", [firstFolder], [], false)
+        mixedTarget := ResolveAddSourceDropTarget(
+            "Mixed", "测试", [filePath, firstFolder], [], false)
+        duplicateTarget := ResolveAddSourceDropTarget(
+            "FoldersOnly", "测试", [firstFolder],
+            [{Name: "已有", Path: firstFolder}], false)
+        AssertSelfTest(addTarget.Available
+            && !mixedTarget.Available
+            && !duplicateTarget.Available,
+            "AddSource 只接受纯文件夹并识别当前工作区重复路径")
+
+        defaults := {
+            DefaultDisplayScope: "FilesOnly",
+            DefaultFolderTimeMode: "DirectoryModified",
+            MaxFilesPerFolder: 8,
+            DefaultFilter: {Mode: "All", Extensions: []}
+        }
+        idState := {Next: 0}
+        singlePlan := PlanFolderSourceAdditions(
+            [firstFolder], [], Map(), "workspace-test", defaults,
+            BuildDropPathInfo([firstFolder]),
+            SelfTestSourceIdFactory.Bind(idState))
+        AssertSelfTest(singlePlan.Sources.Length = 1
+            && singlePlan.Sources[1].Mode = "Files",
+            "单个文件夹生成默认 Files 来源")
+        plan := PlanFolderSourceAdditions(
+            [firstFolder, secondFolder, missingPath],
+            [], Map(), "workspace-test", defaults,
+            BuildDropPathInfo([firstFolder, secondFolder, missingPath]),
+            SelfTestSourceIdFactory.Bind(idState))
+        AssertSelfTest(plan.Sources.Length = 2
+            && PathsEqual(plan.Sources[1].Path, firstFolder)
+            && PathsEqual(plan.Sources[2].Path, secondFolder)
+            && plan.Failed = 1,
+            "来源计划保持顺序并逐项记录无效候选")
+
+        session.FolderDropUiShown := true
+        MarkDropSessionFinished(session, "leave")
+        AssertSelfTest(!session.FolderDropUiShown
+            && session.Completed && !session.Paused,
+            "拖拽结束状态恢复顶部工具栏")
+    } finally {
+        try DirDelete(testRoot, true)
+    }
+}
+
+SelfTestHDropReader(state, dataObject) {
+    state.Count += 1
+    return state.Paths
+}
+
+SelfTestSourceIdFactory(state) {
+    state.Next += 1
+    return "source-self-test-" state.Next
+}
+
+RunFolderSourceConfigSelfTests() {
+    global ConfigPath
+    testRoot := A_Temp "\PopDrop-source-config-self-test-"
+        . DllCall("kernel32\GetCurrentProcessId", "uint")
+        . "-" A_TickCount
+    testPath := testRoot "\config.ini"
+    hadConfigPath := IsSet(ConfigPath)
+    previousConfigPath := hadConfigPath ? ConfigPath : ""
+    try {
+        existingPath := testRoot "\existing"
+        projectPath := testRoot "\项目"
+        secondPath := testRoot "\第二"
+        crossPath := testRoot "\跨区"
+        missingPath := testRoot "\missing"
+        for path in [existingPath, projectPath, secondPath, crossPath]
+            DirCreate(path)
+        testConfig := "; 保留的人工注释`n"
+            . "; <PopDrop:area 1>`n"
+            . "[General]`n"
+            . "ConfigVersion=16`n"
+            . "UnknownGeneral=保留`n`n"
+            . "; <PopDrop:area 2>`n"
+            . "[Folders]`n`n"
+            . "; <PopDrop:area 3>`n"
+            . "[Workspaces]`n"
+            . "Order=workspace-a,workspace-b`n"
+            . "Active=workspace-a`n"
+            . "PinnedScopeVersion=1`n`n"
+            . "[Workspace:workspace-a]`n"
+            . "Name=测试工作区`n"
+            . "SourceOrder=source-existing`n"
+            . "UnknownWorkspace=保留`n`n"
+            . "[Workspace:workspace-b]`n"
+            . "Name=其他工作区`n"
+            . "SourceOrder=source-cross`n`n"
+            . "[WorkspacePinned:workspace-a]`n`n"
+            . "[WorkspacePinned:workspace-b]`n`n"
+            . "[Sources]`n"
+            . "Order=`n`n"
+            . "[Source:source-existing]`n"
+            . "WorkspaceId=workspace-a`n"
+            . "Name=项目`n"
+            . "Path=" existingPath "`n"
+            . "Mode=Files`n"
+            . "UnknownSource=保留`n`n"
+            . "[Source:source-cross]`n"
+            . "WorkspaceId=workspace-b`n"
+            . "Name=跨区`n"
+            . "Path=" crossPath "`n"
+            . "Mode=Files`n`n"
+            . "; <PopDrop:area 4>`n"
+            . "[OpenApps]`n"
+            . "Order=`n`n"
+            . "; <PopDrop:area 5>`n"
+            . "[TransferFavorites]`n`n"
+            . "[TransferFavoriteLabels]`n`n"
+            . "[RecentTargets]`n`n"
+            . "; <PopDrop:area 6>`n"
+            . "[ExcludedFolderNames]`n"
+        DirCreate(testRoot)
+        FileAppend(testConfig, testPath, "UTF-16")
+        ConfigPath := testPath
+        defaults := {
+            DefaultDisplayScope: "FilesOnly",
+            DefaultFolderTimeMode: "DirectoryModified",
+            MaxFilesPerFolder: 8,
+            DefaultFilter: {Mode: "All", Extensions: []}
+        }
+        result := {
+            WorkspaceName: "", Added: 0, Existing: 0, Failed: 0,
+            FailedDetails: [], Sources: []
+        }
+        AtomicConfigEdit(WriteDroppedFolderSources.Bind(
+            "workspace-a",
+            [projectPath, secondPath, crossPath,
+                existingPath, missingPath],
+            defaults, result))
+        AssertSelfTest(result.Added = 3
+            && result.Existing = 1 && result.Failed = 1,
+            "来源配置事务支持多项、去重、跨工作区路径和部分无效")
+        doc := OpenPopDropConfig(testPath)
+        sources := ReadWorkspaceSourcesFromDocument(doc, "workspace-a")
+        AssertSelfTest(sources.Length = 4
+            && PathsEqual(sources[1].Path, existingPath)
+            && PathsEqual(sources[2].Path, projectPath)
+            && PathsEqual(sources[3].Path, secondPath)
+            && PathsEqual(sources[4].Path, crossPath),
+            "新来源按原始拖拽顺序追加到 SourceOrder")
+        AssertSelfTest(sources[2].Name = "项目 (2)",
+            "同名不同路径生成唯一来源名称")
+        otherSources := ReadWorkspaceSourcesFromDocument(
+            doc, "workspace-b")
+        AssertSelfTest(otherSources.Length = 1
+            && PathsEqual(otherSources[1].Path, crossPath),
+            "跨工作区允许保存相同来源路径")
+
+        raw := FileRead(testPath, "RAW")
+        text := FileRead(testPath, "UTF-16")
+        AssertSelfTest(NumGet(raw, 0, "UShort") = 0xFEFF
+            && InStr(text, "`r`n")
+            && !RegExMatch(text, "(?<!\r)\n"),
+            "添加来源保持 UTF-16LE BOM 和 CRLF")
+        AssertSelfTest(InStr(text, "; 保留的人工注释")
+            && InStr(text, "UnknownGeneral=保留")
+            && InStr(text, "UnknownWorkspace=保留")
+            && InStr(text, "UnknownSource=保留"),
+            "添加来源保留注释和未知键")
+        Loop 6
+            AssertSelfTest(InStr(text,
+                "; <PopDrop:area " A_Index ">"),
+                "添加来源保留布局锚点 " A_Index)
+
+        beforeFailure := FileRead(testPath, "RAW")
+        failed := false
+        try AtomicConfigEdit(FailFolderSourceTransaction)
+        catch
+            failed := true
+        afterFailure := FileRead(testPath, "RAW")
+        AssertSelfTest(failed
+            && BuffersEqual(beforeFailure, afterFailure),
+            "原子保存失败不留下部分来源")
+    } finally {
+        ConfigPath := hadConfigPath ? previousConfigPath : ""
+        try DirDelete(testRoot, true)
+    }
+}
+
+FailFolderSourceTransaction(tempPath) {
+    doc := OpenPopDropConfig(tempPath)
+    doc.SetValue("Workspace:workspace-a",
+        "SourceOrder", "source-partial", 3)
+    doc.Save()
+    throw Error("self-test injected save failure")
+}
+
+RunSourceManagementSelfTests() {
+    descriptors := Map(
+        1, {Type: "Pinned", SourceId: "", Name: "固定项",
+            Path: "", Mode: "", GroupId: 1, WorkspaceId: "workspace-a"},
+        2, {Type: "Files", SourceId: "source-files", Name: "资料",
+            Path: "C:\资料", Mode: "Files", GroupId: 2,
+            WorkspaceId: "workspace-a"},
+        3, {Type: "Launcher", SourceId: "source-launcher", Name: "工具",
+            Path: "C:\工具", Mode: "Launcher", GroupId: 3,
+            WorkspaceId: "workspace-a"})
+    thumbnailRects := Map(
+        1, {Left: 0, Top: 0, Right: 640, Bottom: 28},
+        2, {Left: 0, Top: 84, Right: 640, Bottom: 116},
+        3, {Left: 0, Top: 252, Right: 640, Bottom: 284})
+    hit := FindSourceGroupHeaderInRects(
+        20, 96, descriptors, thumbnailRects)
+    AssertSelfTest(IsObject(hit)
+        && hit.GroupId = 2 && hit.SourceId = "source-files",
+        "缩略图视图按来源标题矩形命中 GroupId")
+
+    listRects := Map(
+        2, {Left: 0, Top: 10, Right: 900, Bottom: 36},
+        3, {Left: 0, Top: 96, Right: 900, Bottom: 122})
+    hit := FindSourceGroupHeaderInRects(
+        450, 110, descriptors, listRects)
+    AssertSelfTest(IsObject(hit)
+        && hit.GroupId = 3 && hit.Type = "Launcher",
+        "列表视图和滚动后命中正确来源标题")
+
+    scaledRects := Map(
+        2, {Left: 0, Top: 160, Right: 1440, Bottom: 224})
+    hit := FindSourceGroupHeaderInRects(
+        1200, 200, descriptors, scaledRects)
+    AssertSelfTest(IsObject(hit) && hit.GroupId = 2,
+        "DPI 缩放命中只使用系统返回矩形")
+    AssertSelfTest(!IsObject(FindSourceGroupHeaderInRects(
+        640, 100, descriptors, thumbnailRects)),
+        "来源标题右边界外不误触")
+    AssertSelfTest(!IsObject(FindSourceGroupHeaderInRects(
+        10, 10, descriptors, thumbnailRects)),
+        "固定项标题不解析为来源管理目标")
+    AssertSelfTest(!IsObject(FindSourceGroupHeaderInRects(
+        10, 10, Map(), Map())),
+        "空工作区占位不解析为来源管理目标")
+    offline := {
+        Type: "Files", SourceId: "source-offline", Name: "离线",
+        Path: A_Temp "\PopDrop-offline-source-self-test", Mode: "Files",
+        GroupId: 4, WorkspaceId: "workspace-a", Available: false}
+    AssertSelfTest(IsSourceManagementDescriptor(offline)
+        && !CanOpenSourceFolder(offline),
+        "离线来源保留管理身份但不能打开文件夹")
+
+    draft := {Workspaces: [
+        {Id: "workspace-a", Name: "同名",
+            Sources: [
+                {SourceId: "source-a", Name: "资料",
+                    Path: "C:\已修改路径"}]},
+        {Id: "workspace-b", Name: "同名",
+            Sources: [
+                {SourceId: "source-b", Name: "资料",
+                    Path: "C:\已修改路径"}]}
+    ]}
+    navigation := ResolveDraftSourceNavigation(
+        draft, "workspace-b", "source-b")
+    AssertSelfTest(navigation.WorkspaceIndex = 2
+        && navigation.SourceIndex = 1,
+        "设置导航只按 WorkspaceId 和 SourceId 定位")
+    missing := ResolveDraftSourceNavigation(
+        draft, "workspace-b", "source-missing")
+    AssertSelfTest(missing.WorkspaceFound && !missing.SourceFound,
+        "目标来源不存在时不选择同名或同路径来源")
+    AssertSelfTest(ResolveSettingsConflictAction("Yes") = "Save"
+        && ResolveSettingsConflictAction("No") = "Discard"
+        && ResolveSettingsConflictAction("Cancel") = "Cancel",
+        "设置导航复用保存、放弃、取消三路径保护")
+
+    batches := Map(
+        "active", {Completed: false,
+            TargetSourceId: "source-files", TargetPath: "C:\资料"},
+        "other", {Completed: false,
+            TargetSourceId: "source-other", TargetPath: "C:\资料"},
+        "done", {Completed: true,
+            TargetSourceId: "source-files", TargetPath: "C:\资料"})
+    AssertSelfTest(SourceRemovalTransferBlockReason(
+        "source-files", "C:\资料", batches) != "",
+        "活动外部传输按 TargetSourceId 阻止移除")
+    safeBatches := Map(
+        "other", {Completed: false,
+            TargetSourceId: "source-other", TargetPath: "C:\资料"})
+    AssertSelfTest(SourceRemovalTransferBlockReason(
+        "source-files", "C:\资料", safeBatches) = "",
+        "可靠的其他 SourceId 不因同路径误判")
+    legacyBatches := Map(
+        "legacy", {Completed: false,
+            TargetSourceId: "", TargetPath: "C:\资料"})
+    AssertSelfTest(SourceRemovalTransferBlockReason(
+        "source-files", "C:\资料", legacyBatches) != "",
+        "缺少稳定身份的同路径活动传输按安全策略阻止移除")
+
+    removal := RemoveTextInsensitive(
+        ["source-a", "SOURCE-B", "source-c"], "source-b")
+    AssertSelfTest(removal.Removed
+        && JoinArray(removal.Values, ",") = "source-a,source-c",
+        "SourceOrder 按稳定 ID 删除且保持其余顺序")
+    sections := SourceOwnedConfigSections("source-a")
+    AssertSelfTest(sections.Length = 4
+        && sections[1] = "Source:source-a"
+        && sections[4] = "SourceAllow:source-a",
+        "来源专属配置清理范围完整")
+}
+
+RunSourceRemovalConfigSelfTests() {
+    global ConfigPath
+    testRoot := A_Temp "\PopDrop-source-removal-self-test-"
+        . DllCall("kernel32\GetCurrentProcessId", "uint")
+        . "-" A_TickCount
+    testPath := testRoot "\config.ini"
+    hadConfigPath := IsSet(ConfigPath)
+    previousConfigPath := hadConfigPath ? ConfigPath : ""
+    try {
+        sharedPath := testRoot "\共享目录"
+        DirCreate(sharedPath)
+        testConfig := "; 来源管理保留注释`n"
+            . "; <PopDrop:area 1>`n"
+            . "[General]`n"
+            . "ConfigVersion=16`n"
+            . "UnknownGeneral=保留`n`n"
+            . "; <PopDrop:area 2>`n"
+            . "[Folders]`n"
+            . "兼容快照=" sharedPath "`n`n"
+            . "; <PopDrop:area 3>`n"
+            . "[Workspaces]`n"
+            . "Order=workspace-a,workspace-b`n"
+            . "Active=workspace-a`n"
+            . "PinnedScopeVersion=1`n`n"
+            . "[Workspace:workspace-a]`n"
+            . "Name=当前工作区`n"
+            . "SourceOrder=source-files,source-launcher,source-offline`n"
+            . "UnknownWorkspace=保留`n`n"
+            . "[Workspace:workspace-b]`n"
+            . "Name=其他工作区`n"
+            . "SourceOrder=source-other`n`n"
+            . "[WorkspacePinned:workspace-a]`n"
+            . "Path001=" sharedPath "\固定.txt`n`n"
+            . "[WorkspacePinned:workspace-b]`n`n"
+            . "[Sources]`n"
+            . "Order=`n`n"
+            . "[Source:source-files]`n"
+            . "WorkspaceId=workspace-a`n"
+            . "Name=资料`n"
+            . "Path=" sharedPath "`n"
+            . "Mode=Files`n"
+            . "UnknownSource=随来源删除`n`n"
+            . "[SourceMetadata:source-files]`n"
+            . "ProviderNote=随来源删除`n`n"
+            . "[Source:source-launcher]`n"
+            . "WorkspaceId=workspace-a`n"
+            . "Name=启动器`n"
+            . "Path=Z:\离线启动器`n"
+            . "Mode=Launcher`n`n"
+            . "[Source:source-offline]`n"
+            . "WorkspaceId=workspace-a`n"
+            . "Name=离线`n"
+            . "Path=Z:\离线来源`n"
+            . "Mode=Files`n`n"
+            . "[Source:source-other]`n"
+            . "WorkspaceId=workspace-b`n"
+            . "Name=其他资料`n"
+            . "Path=" sharedPath "`n"
+            . "Mode=Files`n`n"
+            . "; <PopDrop:area 4>`n"
+            . "[OpenApps]`n"
+            . "Order=`n`n"
+            . "; <PopDrop:area 5>`n"
+            . "[TransferFavorites]`n"
+            . "Path001=" sharedPath "`n`n"
+            . "[RecentTargets]`n"
+            . "Path001=" sharedPath "`n`n"
+            . "; <PopDrop:area 6>`n"
+            . "[ExcludedFolderNames]`n"
+            . "Name001=.git`n`n"
+            . "[SourceIgnore:source-files]`n"
+            . "PatternCount=1`n"
+            . "Pattern001=*.tmp`n`n"
+            . "[SourceExclude:source-files]`n"
+            . "Path001=build`n`n"
+            . "[SourceAllow:source-files]`n"
+            . "Path001=.git`n"
+        DirCreate(testRoot)
+        FileAppend(testConfig, testPath, "UTF-16")
+        ConfigPath := testPath
+
+        result := {Removed: false}
+        AtomicConfigEdit(WriteSourceRemovalConfig.Bind(
+            "workspace-a", "source-files", result))
+        AssertSelfTest(result.Removed
+            && result.SourceName = "资料"
+            && PathsEqual(result.SourcePath, sharedPath),
+            "原子移除普通 Files 来源")
+        doc := OpenPopDropConfig(testPath)
+        AssertSelfTest(doc.GetValue(
+            "Workspace:workspace-a", "SourceOrder", "")
+            = "source-launcher,source-offline",
+            "移除后 SourceOrder 保持正确顺序")
+        for section in SourceOwnedConfigSections("source-files")
+            AssertSelfTest(!ValueInArray(
+                section, doc.GetSectionNames()),
+                "删除来源专属配置节 " section)
+        AssertSelfTest(!ValueInArray(
+            "SourceMetadata:source-files", doc.GetSectionNames()),
+            "删除明确归属于 SourceId 的扩展配置节")
+        AssertSelfTest(doc.GetValue(
+            "Workspace:workspace-b", "SourceOrder", "")
+            = "source-other"
+            && doc.GetValue("Source:source-other", "Path", "")
+                = sharedPath,
+            "其他工作区同路径来源不受影响")
+        AssertSelfTest(doc.GetValue(
+            "WorkspacePinned:workspace-a", "Path001", "") != ""
+            && doc.GetValue("RecentTargets", "Path001", "") = sharedPath
+            && doc.GetValue("TransferFavorites", "Path001", "")
+                = sharedPath,
+            "固定项、最近记录和复制移动目标保持不变")
+        AssertSelfTest(doc.GetValue(
+            "Folders", "兼容快照", "") = sharedPath,
+            "v0.8 兼容快照保持不变")
+
+        beforeFailure := FileRead(testPath, "RAW")
+        failed := false
+        try AtomicConfigEdit(FailSourceRemovalTransaction)
+        catch
+            failed := true
+        afterFailure := FileRead(testPath, "RAW")
+        AssertSelfTest(failed
+            && BuffersEqual(beforeFailure, afterFailure),
+            "移除事务失败时活动配置字节级不变")
+
+        launcherResult := {Removed: false}
+        AtomicConfigEdit(WriteSourceRemovalConfig.Bind(
+            "workspace-a", "source-launcher", launcherResult))
+        offlineResult := {Removed: false}
+        AtomicConfigEdit(WriteSourceRemovalConfig.Bind(
+            "workspace-a", "source-offline", offlineResult))
+        doc := OpenPopDropConfig(testPath)
+        AssertSelfTest(launcherResult.Removed
+            && offlineResult.Removed
+            && doc.GetValue(
+                "Workspace:workspace-a", "SourceOrder", "") = "",
+            "Launcher、离线来源和最后一个来源均可安全移除")
+
+        raw := FileRead(testPath, "RAW")
+        text := FileRead(testPath, "UTF-16")
+        AssertSelfTest(NumGet(raw, 0, "UShort") = 0xFEFF
+            && InStr(text, "`r`n")
+            && !RegExMatch(text, "(?<!\r)\n"),
+            "移除来源保持 UTF-16LE BOM 和 CRLF")
+        AssertSelfTest(InStr(text, "; 来源管理保留注释")
+            && InStr(text, "UnknownGeneral=保留")
+            && InStr(text, "UnknownWorkspace=保留"),
+            "移除来源保留人工注释和无关未知键")
+        Loop 6
+            AssertSelfTest(InStr(text,
+                "; <PopDrop:area " A_Index ">"),
+                "移除来源保留布局锚点 " A_Index)
+    } finally {
+        ConfigPath := hadConfigPath ? previousConfigPath : ""
+        try DirDelete(testRoot, true)
+    }
+}
+
+FailSourceRemovalTransaction(tempPath) {
+    doc := OpenPopDropConfig(tempPath)
+    doc.SetValue("Workspace:workspace-a",
+        "SourceOrder", "source-partial", 3)
+    doc.DeleteSection("Source:source-launcher")
+    doc.Save()
+    throw Error("self-test injected source removal failure")
 }
 
 RunOpenAppActionSelfTests() {
@@ -10812,13 +12613,18 @@ Cleanup(*) {
     global WorkerRunning, WorkerPid, WorkerRequestPath, WorkerReadyPath, PanelIconHandle
     global FileOperationSinkCallbacks, DropTargetCallbacks
     global OpenAppActionSerialTasks
+    global SourceRemovalDialog
     SetTimer(PollWorkerResult, 0)
+    CleanupPreview()
     for taskId, task in OpenAppActionSerialTasks {
         try SetTimer(task.PollCallback, 0)
         if task.ProcessHandle
             try DllCall("kernel32\CloseHandle", "ptr", task.ProcessHandle)
     }
     OpenAppActionSerialTasks.Clear()
+    if IsObject(SourceRemovalDialog)
+        try SourceRemovalDialog.Destroy()
+    SourceRemovalDialog := 0
     CleanupExternalTransfers()
     if WorkerRunning && WorkerPid && ProcessExist(WorkerPid)
         try ProcessClose(WorkerPid)

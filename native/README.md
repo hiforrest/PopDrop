@@ -1,4 +1,4 @@
-# PopDropTransfer 原生 helper
+# PopDrop 原生 helper
 
 `PopDropTransfer.exe` 是 PopDrop 外部内容投放的最小后台组件。它只负责：
 
@@ -15,6 +15,27 @@
 
 它不读取浏览器 Cookie、聊天数据库或应用私有缓存，不注入其他进程，也不执行下载结果。
 
+`PopDropPreview.exe` 是 0.10.0 的文件内容预览组件。它是惰性启动的常驻进程，
+通过当前 PopDrop 进程独占命名的共享内存和事件收发请求。主界面不读取文件，
+也不调用 Shell/WIC。组件严格按以下顺序取内容：
+
+1. `preview-cache-v1` 中身份、时间、尺寸桶和规格版本都匹配的自有缓存；
+2. WIC 对大小与安全边界允许的本地普通图片执行首帧缩放解码；
+3. 仅在原图超限、解码器不可用或非图片格式时，最后使用
+   `SIIGBF_THUMBNAILONLY | SIIGBF_INCACHEONLY` 返回的 Windows 已有真实缩略图。
+
+直接解码会拒绝仅在线云占位、超出配置边界的源文件和无法安全缩小的图像。
+优先使用 `IWICBitmapSourceTransform`；不支持缩放转换的解码器只有在预计展开内存
+不超限时才进入回退路径。预览进程由主程序放入约 256 MiB 的 Job Object，
+单次请求超过 3 秒会被真正终止并惰性重启。
+
+清晰图片缓存仅在面板隐藏期由低优先级 Helper 串行生成。无 Alpha 使用质量约
+82 的 JPEG；有 Alpha 使用真彩压缩 PNG。本版本没有引入调色板量化依赖：
+编码超过 2 MiB 时按 1024、768、512 逐级缩小，仍超限便不落盘。缓存文件使用
+SHA-256 名称，清理只接受 `preview-cache-v1` 下符合格式且非重解析点的普通文件。
+WIC 无法解码的格式会在这一后台阶段调用 Windows Shell 缩略图处理器生成真实
+缩略图；`THUMBNAILONLY` 仍禁止图标回退。即时悬浮阶段继续使用 `INCACHEONLY`。
+
 ## 构建
 
 要求 Windows 10/11、PowerShell 5.1+，以及 Visual Studio 2022 Build Tools 的
@@ -28,9 +49,11 @@ powershell -ExecutionPolicy Bypass -File .\native\build.ps1
 
 - `native\bin\x64\PopDropTransfer.exe`
 - `native\bin\x86\PopDropTransfer.exe`
+- `native\bin\x64\PopDropPreview.exe`
+- `native\bin\x86\PopDropPreview.exe`
 
-AHK 源码运行时根据自身位数选择对应文件。发布编译版时，将对应架构 helper 复制到
-`PopDrop.exe` 同目录。helper 协议版本写在请求和状态文件中；不兼容版本会失败而不会
+AHK 源码运行时根据自身位数选择对应文件。发布编译版时，将对应架构的两个 helper 复制到
+`PopDrop.exe` 同目录。helper 协议版本写在请求或共享内存头中；不兼容版本会失败而不会
 猜测字段。源码模式优先加载 `native\bin\<架构>`，编译版优先加载程序同目录组件；
 握手还会校验 `HelperVersion`，防止根目录残留旧 EXE 掩盖最新构建。
 
@@ -42,3 +65,8 @@ helper 为独立、非提权进程。崩溃不会终止 PopDrop；主程序检�
 由当前 PopDrop 会话的取消文件控制。
 
 `TYMED_ISTORAGE` 目前会明确拒绝；支持 `TYMED_ISTREAM` 和 `TYMED_HGLOBAL`。
+
+## 第三方组件
+
+两个 Helper 只使用 Windows SDK、Shell、WIC、BCrypt 和 MSVC 运行库。没有下载、
+捆绑或链接 pngquant、libimagequant、GPL 或商业授权组件。

@@ -1,0 +1,27 @@
+PopDrop 0.10.0 original-first preview and cache-retry hotfix
+Package revision: original-first-cache-retry-20260730
+Preview helper protocol: 2
+
+Changes verified in this package:
+
+1. Preview acquisition order
+   - PopDrop clear cache
+   - WIC decode from the original local image
+   - Windows Shell cached thumbnail as the final fallback only
+
+2. Final Shell fallback presentation
+   - A small Shell thumbnail is enlarged proportionally to fit the available
+     preview content area.
+
+3. Background clear-cache scheduling
+   - Cache generation still begins after the panel has been hidden for the
+     configured delay.
+   - If scanning, Settings, or a transfer is temporarily active at that time,
+     the cache pass retries every two seconds instead of being abandoned.
+
+4. Stale helper protection
+   - Preview.ahk and PopDropPreview.cpp both use protocol version 2.
+   - Rebuild native/bin/x64/PopDropPreview.exe before running the source.
+
+Expected cache location with the default CachePath:
+cache\preview-cache-v1\

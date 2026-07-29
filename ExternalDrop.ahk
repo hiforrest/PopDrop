@@ -2,14 +2,6 @@
 ; The UI process performs only FORMATETC probing during DragEnter/DragOver.
 ; Actual IDataObject extraction is delegated after Drop to PopDropTransfer.exe.
 
-global DROP_ADAPTER_HDROP := "HDrop"
-global DROP_ADAPTER_VIRTUAL := "VirtualFiles"
-global DROP_ADAPTER_PNG := "Png"
-global DROP_ADAPTER_DIBV5 := "DibV5"
-global DROP_ADAPTER_DIB := "Dib"
-global DROP_ADAPTER_URL := "Url"
-global DROP_ADAPTER_UNSUPPORTED := "Unsupported"
-
 global TransferBatches := Map()
 global TransferHistory := []
 global TransferStatusText := 0
@@ -107,6 +99,10 @@ ClassifyDataObject(dataObject) {
             || DataObjectSupportsFormat(dataObject, formats.UriList, 1, -1))
     decision := ClassifyAvailableDropFormats(available)
     decision.HasExplicitUrl := available["Url"]
+    decision.HasVirtualFiles := available["FileDescriptor"]
+        || available["FileContents"]
+    decision.HasImagePayload := available["Png"]
+        || available["DibV5"] || available["Dib"]
 
     if TransferInspectEnabled {
         decision.Formats := EnumerateDataObjectFormats(dataObject)
@@ -311,6 +307,28 @@ HDropShouldUseDirectAsyncTakeover(sourceKind, target, asyncInfo) {
     return sourceKind = "External"
         && IsObject(target) && target.Type = "Files"
         && IsObject(asyncInfo) && asyncInfo.Supported
+}
+
+CanPreloadHDropForFolderFeedback(decision, asyncInfo, sourceKind) {
+    global DROP_ADAPTER_HDROP
+    if !IsObject(decision) || decision.Adapter != DROP_ADAPTER_HDROP
+        return false
+    ; PopDrop created the internal path list itself, so no IDataObject read is
+    ; needed and classification is always safe.
+    if sourceKind != "External"
+        return true
+    ; External preview is deliberately narrower than the final HDROP support.
+    ; Any async, URL, virtual-file or image signal keeps the payload Unknown
+    ; until Drop, preserving the helper's unique GetData ownership.
+    if !IsObject(asyncInfo) || asyncInfo.Supported
+        return false
+    if HasProp(decision, "HasExplicitUrl") && decision.HasExplicitUrl
+        return false
+    if HasProp(decision, "HasVirtualFiles") && decision.HasVirtualFiles
+        return false
+    if HasProp(decision, "HasImagePayload") && decision.HasImagePayload
+        return false
+    return true
 }
 
 ExternalAdapterAllowedAtTarget(adapter, target) {
@@ -925,7 +943,7 @@ CompleteTransferBatchUi(batch) {
             . batch.TargetName "」"
             . (failed ? "，" failed " 项失败" : "")
             . "    打开目标文件夹",
-            OpenFolderPath.Bind(batch.TargetPath))
+            OpenFolderInFileManager.Bind(batch.TargetPath))
     else if failed
         SetUserStatus("外部内容接收失败：" (batch.Error != ""
             ? batch.Error : "请打开下载任务查看详情。"))
@@ -1237,7 +1255,8 @@ OpenSelectedTransferFolder(*) {
     global TransferBatches
     reference := GetSelectedTransferReference()
     if IsObject(reference) && TransferBatches.Has(reference.Batch)
-        OpenFolderPath(TransferBatches[reference.Batch].TargetPath)
+        OpenFolderInFileManager(
+            TransferBatches[reference.Batch].TargetPath)
 }
 
 ClearCompletedTransfers(*) {

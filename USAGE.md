@@ -16,7 +16,8 @@
 3. 双击 `PopDrop.ahk`
 4. 按 `F2` 试试看
 
-外部内容投放需要同目录的 `PopDropTransfer.exe`。正式发布包应已包含；源码运行时可用
+外部内容投放需要同目录的 `PopDropTransfer.exe`，文件预览需要
+`PopDropPreview.exe`。正式发布包应已包含；源码运行时可用
 Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之外不需要第三方
 运行库。除了右键菜单中的
 “复制到…”和“移动到…”，把项目投放到来源分组也可能操作真实文件；具体安全语义见
@@ -28,7 +29,7 @@ Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之�
 
 ```ini
 [General]
-ConfigVersion=16
+ConfigVersion=20
 Hotkey=F2
 OpenFileMode=DoubleClick
 DefaultContextMenu=PopDrop
@@ -48,6 +49,25 @@ RecentFileCount=12
 CachePath=
 ThumbnailPolicy=Full
 WindowMode=temporary
+
+[Preview]
+Enabled=1
+Side=Auto
+HoverDelayMs=350
+SwitchDelayMs=120
+LeaveGraceMs=140
+KeyboardDelayMs=250
+Width=320
+CacheEnabled=1
+CacheStartAfterHiddenSeconds=10
+CacheMaxMB=256
+CacheMaxItems=1000
+CacheItemMaxKB=2048
+CacheUnreferencedDays=7
+DirectImageMaxFileMB=64
+DirectImageMaxEdge=65535
+DirectImageMaxPixelsMP=160
+DirectImageMaxExpandedMB=256
 
 [Workspaces]
 Order=workspace-default
@@ -102,6 +122,46 @@ Path=%USERPROFILE%\Downloads
 | `EscapeHidesPanel` | 按 Esc 时隐藏面板：`1`=隐藏（默认）| `0`=不隐藏。 |
 | `SortMode` | 排序模式：`ModifiedDesc`（修改时间从新到旧，默认）、`NameAsc`（文件名自然升序）。支持文件夹级覆盖。 |
 | 快捷键语法 | AutoHotkey v2 格式：`^`=Ctrl，`!`=Alt，`+`=Shift，`#`=Win。例如 `^!Space`=Ctrl+Alt+Space。 |
+
+### 文件内容预览（v0.10+）
+
+设置页“显示”中可以打开或关闭文件预览，选择自动、右侧或左侧，并控制是否在后台
+生成清晰图片预览。保存后立即生效。原图允许安全解码时优先使用原图；Windows 已有
+缩略图只作为最后回退，并会等比放大到可用区域。后台缓存从面板隐藏后开始计时；
+到达设定时间后由 IDLE 优先级 Helper 串行生成，不会因长时间扫描而永久跳过；
+WIC 不支持的格式会在后台尝试系统缩略图处理器。其余参数保留在 `[Preview]`：
+
+| 配置项 | 作用 |
+|---|---|
+| `Enabled` | `1` 开启，`0` 关闭；关闭时立即取消当前请求并隐藏窗口。 |
+| `Side` | `Auto`、`Right` 或 `Left`；Auto 在普通文件切换期间锁定侧边，面板移动或缩放结束后按新工作区重算。 |
+| `HoverDelayMs` / `SwitchDelayMs` / `LeaveGraceMs` | 首次悬浮、已显示时切换和离开宽限。 |
+| `KeyboardDelayMs` | 真实键盘导航改变焦点后的延迟。 |
+| `Width` | 最大内容宽度，单位 DIP，范围 180–640。 |
+| `CacheEnabled` | 只控制写入新缓存；关闭后仍可读取已有有效缓存。 |
+| `CacheStartAfterHiddenSeconds` | 面板连续隐藏多久后开始低优先级生成。 |
+| `CacheMaxMB` / `CacheMaxItems` | 自有预览缓存的软容量和项目数上限。 |
+| `CacheItemMaxKB` | 单项硬上限，最大允许值为 2048。 |
+| `DirectImageMaxFileMB` | 图片原文件即时解码的文件大小上限，默认 64 MiB。 |
+| `DirectImageMaxEdge` / `DirectImageMaxPixelsMP` | 源图边长和总像素安全边界。 |
+| `DirectImageMaxExpandedMB` | 解码器无法原生缩小时允许的预计展开内存上限。 |
+
+每次面板隐藏会话最多成功生成 50 项；失败不占成功额度，单轮最多尝试 100 项。
+缓存运行状态写入
+`cache\preview-cache-v1\cache-status.ini`；其中 `Stage`、`Attempted`、
+`Succeeded`、`Failed` 和剩余队列可用于判断缓存是否启动及失败位置。
+
+鼠标可命中整个实际项目边界。单击和 Ctrl/Shift 多选不会改变悬浮候选；拖拽超过
+系统阈值后、固定项排序、框选、滚动、菜单、工作区/视图切换和窗口实时移动缩放会
+立即抑制。滚动、菜单、框选或移动结束后会读取当前屏幕坐标自动恢复。
+
+键盘使用方向键、Home、End、Page Up、Page Down 建立候选；Enter、Esc、列表失焦
+或隐藏面板会立即关闭预览。鼠标静止在 A 上而键盘移到 B 时显示 B，只有鼠标再次
+真实移动才切回鼠标候选。
+
+图片会尽可能直接生成内容预览；PDF、视频、Office 等其他文件在 Windows 已有真实
+缩略图时也可预览。具体格式取决于 Windows 和已安装的图像/缩略图组件。没有真实
+内容缩略图时保持安静，不会用普通文件图标代替。
 
 ---
 
@@ -506,10 +566,73 @@ PopDrop 的设计初衷是「按一下出现，用完就走」。`temporary` 模
 与最终动作保持一致。目标命中使用 ListView 的实时分组矩形，因此缩略图/列表视图、
 滚动、窗口缩放和 DPI 变化都不需要固定坐标。
 
+### 拖拽文件夹快速添加为来源
+
+当一次拖拽中的对象全部是可访问的真实文件系统目录时，普通工具栏会在原位置临时切换
+为两个投放区域：
+
+- **＋ 添加为来源**：约占工具栏 70%，显示当前工作区名称。放下后按拖拽顺序追加为
+  当前工作区的 `Files` 来源，不复制、不移动、不创建也不删除真实文件夹。
+- **☆ 加入固定项**：约占工具栏 30%，只把文件夹路径加入当前工作区固定项。
+
+这两个区域不会改变主列表位置。下方 Files、Launcher 和固定项分组仍可命中，因此也
+可以继续把文件夹拖到 Files 来源进行复制或移动，或拖到 Launcher 创建快捷方式。
+`Ctrl`、`Shift` 不改变“添加为来源”和“加入固定项”的非破坏性语义；“添加为来源”
+只向 OLE 来源返回 `COPY` 或 `NONE`，绝不返回 `MOVE`。
+
+普通文件不会显示新操作区。文件与文件夹混合选择也不会显示，且不会只取出其中的
+文件夹；仍可按原规则拖到 Files、Launcher 或固定项。虚拟文件、URL、网页图片、特殊
+Shell 对象和无法在拖动阶段可靠判断的对象保持 `Unknown`，继续走外部内容接收链路。
+
+放到“添加为来源”后，PopDrop 会在写配置前再次逐项确认路径仍存在且仍是可持久保存的
+文件系统目录：
+
+- 来源名称默认取文件夹名，当前工作区同名时使用 `名称 (2)` 等唯一名称。
+- 当前工作区已存在的相同规范路径会跳过；其他工作区使用相同路径不受影响。
+- 有效候选一次性追加到当前工作区 `SourceOrder`；无效候选计入失败详情。
+- 整批配置使用现有原子事务，保留注释、未知键、UTF-16LE、CRLF 和六个布局锚点；
+  保存失败不会留下部分来源。
+- 成功后只触发一次后台扫描，不在拖放回调中同步枚举新目录。
+
+### 在主面板管理来源
+
+在 Files 或 Launcher 来源的分组标题上右键，会显示独立的来源管理菜单：
+
+- **打开来源文件夹**：在当前设置的文件管理器中打开来源；目录离线或不存在时禁用。
+- **刷新此来源**：通过现有后台扫描 worker 请求刷新。当前扫描协议以工作区为单位，
+  因而内部会安全刷新当前工作区，并继续校验 generation、配置 fingerprint 和
+  WorkspaceId。
+- **设置此来源…**：复用现有“PopDrop 设置”窗口，通过 WorkspaceId 和 SourceId
+  切到“工作区设置 → 当前工作区”，选中正确工作区和来源并滚动到可见位置。
+- **从当前工作区移除…**：删除当前工作区对该 SourceId 的引用和来源专属配置；
+  不访问或修改真实文件夹。
+
+来源标题菜单与文件项目菜单相互独立：右键具体文件仍使用现有 PopDrop/Windows 菜单，
+`Shift` 反转规则不变；左键来源标题仍打开来源文件夹。固定项标题和空工作区占位不会
+显示来源管理菜单，离线来源仍可进入设置或执行安全移除。
+
+如果设置窗口有未保存修改，精确跳转和移除都会先提供“保存并继续、放弃并继续、取消”
+三条路径。取消不会改变原页面、工作区、来源选择或配置。设置窗口已经打开时只恢复并
+置前现有窗口，不会创建第二个。
+
+移除来源前会显示以“取消”为默认按钮的确认窗口，并再次按 SourceId 检查活动外部传输。
+正在接收内容时不会取消传输，而是阻止移除。确认后，PopDrop 在临时配置上更新
+`SourceOrder`，删除 `[Source:<SourceId>]`、`[SourceIgnore:<SourceId>]`、
+`[SourceExclude:<SourceId>]`、`[SourceAllow:<SourceId>]` 及其他明确以该 SourceId
+归属的扩展节，验证所有工作区后原子替换配置。固定项、Windows 最近记录、复制/移动
+常用目标和旧版兼容快照均不会改变。
+
+移除最后一个来源后，主面板会提示：
+
+> 当前工作区还没有来源。
+>
+> 将文件夹拖到顶部“添加为来源”，或前往设置添加。
+
 ### 默认动作与修饰键
 
 | 拖拽来源 | 投放目标 | 默认动作 |
 |---|---|---|
+| 全部为可验证真实文件夹 | 顶部「＋ 添加为来源」 | 追加为当前工作区 Files 来源；不操作真实文件夹 |
 | PopDrop 普通 Files 来源项目 | 另一个 Files 来源 | 移动真实文件 |
 | Windows 资源管理器本地项目 | Files 来源 | 复制真实文件 |
 | PopDrop 固定项或最近文件 | Files 来源 | 复制真实文件 |
@@ -596,7 +719,10 @@ PopDrop 对同一个 Windows `IDataObject` 只选择一条链路：
 
 因此浏览器或聊天软件同时提供文件和 URL 时，文件始终优先；虚拟 JPEG/GIF/WebP
 也会保留原始文件流，不会错误转换成 PNG。普通 `CF_UNICODETEXT` 不会被当成 URL。
-拖动鼠标期间只检测格式和目标，不读取大文件、不访问网络；松开后才创建后台任务。
+拖动鼠标期间默认只检测格式和目标，不读取大文件、不访问网络；唯一例外是为了显示
+“添加为来源”反馈，对同步、纯 `CF_HDROP`、且没有 URL、虚拟文件或图片格式信号的
+稳定本地对象读取一次路径列表。路径缓存在当前拖拽 Session 中，`Drop` 不会再次调用
+`GetData(CF_HDROP)`。任何安全条件不足的对象都保持 `Unknown`，松开后才进入原有链路。
 
 当前 Chrome、Edge、Firefox、网盘网页和聊天软件是否可用，取决于它们是否向 Windows
 提供上述标准格式。页面内部排序、私有格式、网盘目录树、空目录、需要浏览器 Cookie
@@ -614,6 +740,12 @@ PopDrop 普通 Files 来源之间默认移动。
 格式查询暴露该信息。这避免 Chromium 把主程序和 helper 的两次数据读取分别解释为
 两次延迟下载。helper 缺失时会在 marshaling 和读取 HDROP 前失败，不会在传输中心
 之外留下另一份文件。同一次拖放只由一个接收器处理，旧 `DropFiles` 仍未启用。
+
+外部同步 HDROP 也不是一律预读：只有适配器为 HDROP、未声明
+`IDataObjectAsyncCapability`，且格式探测没有发现明确 URL、虚拟文件描述符/流、
+PNG 或 DIB 图片时才允许预读。预读无论成功、返回空值还是抛出异常，本 Session 都不会
+第二次读取同一数据对象。资源管理器、Directory Opus 等稳定本地来源可因此获得文件夹
+操作区；QQ、微信或浏览器若提供了上述不确定信号，则保持原有 Drop 后处理。
 
 浏览器也可能把 HDROP 文件直接生成在自己的下载目录。如果这个目录正好就是投放目标，
 PopDrop 会等待浏览器完成写入并直接认领该文件，不再把它复制回相同目录，因此不会
@@ -737,7 +869,7 @@ ShowCompletionNotifications=1
 `[WorkspacePinned:<WorkspaceId>]`。切换工作区会立即切换固定项；同一路径可以在多个
 工作区分别固定、排序或移除。旧版 `[PinnedFiles]` 会安全迁移到升级时的当前工作区。
 选择固定项后点击「－ 固定项」，只移除当前工作区的面板记录，不会影响原文件、文件夹
-或其他工作区。双击固定文件夹会在资源管理器中打开。
+或其他工作区。双击固定文件夹会在当前设置的文件管理器中打开。
 
 - 新加入的一批固定项会显示在最前面，并保持这批项目拖入时的原始顺序。
 - 拖动单个固定项到另一个固定项上，可以调整前后顺序；顺序会立即保存。
@@ -793,16 +925,67 @@ DefaultContextMenu=PopDrop
 |---|---|
 | 使用默认关联打开 | `Enter` |
 | 移入回收站 | `Delete` |
-| 在文件资源管理器中显示 | `Ctrl + Enter` |
+| 在文件管理器中显示 | `Ctrl + Enter` |
 | 复制文件对象到剪贴板 | `Ctrl + C` |
 | 复制完整路径文本 | `Ctrl + Shift + C` |
 | 打开另一个右键菜单 | 按住 `Shift` 右键或 `Shift + F10` |
 | 打开默认右键菜单 | 右键或键盘菜单键 |
 
-多选定位只支持同一父目录；跨父目录时菜单项禁用，避免一次打开大量资源管理器窗口。
+使用 Windows 系统行为时，同一文件所在文件夹中的多选会保留原有的整体定位与选择；
+跨文件夹多选时菜单项禁用。Directory Opus 对单个项目执行精确定位，多选则按文件所在
+文件夹去重后打开；Total Commander 的定位操作始终按文件所在文件夹去重后打开，不
+尝试自动选中文件；XYplorer 和 Files 对单个项目执行精确定位，Double Commander 与
+FreeCommander XE 对单个文件执行精确定位，多选均按文件所在文件夹去重后打开。
 复制文件使用 `CF_HDROP`，可以直接粘贴到资源管理器或支持文件粘贴的软件；复制路径则
 按当前显示顺序每行一条，不添加引号。“删除”位于“更多系统操作”上方，使用 Windows
 Shell 回收站操作；PopDrop 不会在回收站不可用时改用永久删除。
+
+### 文件管理器
+
+在“PopDrop 设置 → 共享设置 → 打开与文件操作”的“文件管理器”区域中，可以选择：
+
+- **跟随 Windows 系统行为**：默认选项，保持旧版本的文件夹打开方式和 Windows Shell
+  文件定位；也会继续尊重系统级的 Explorer Replacement 配置。
+- **Directory Opus**：程序路径使用 `dopusrt.exe`。手动选择同目录中的 `dopus.exe`
+  时，PopDrop 会尝试转换到 `dopusrt.exe`。单个项目可以打开文件所在文件夹并选中，
+  多选按文件所在文件夹去重后打开。
+- **Total Commander**：程序路径使用 `TOTALCMD64.EXE` 或 `TOTALCMD.EXE`，优先复用
+  已运行实例并在当前源面板打开目录。受其公开命令行接口限制，PopDrop 暂不自动选中
+  普通文件。
+- **XYplorer**：程序路径使用 `XYplorer.exe`。打开文件夹时传入带末尾反斜杠的目录
+  路径；定位单个文件或文件夹时传入完整项目路径，由 XYplorer 打开父目录并选中项目。
+  多选时不注入脚本，而是按项目所在文件夹去重后打开。
+- **Double Commander**：程序路径使用 `doublecmd.exe`。PopDrop 使用 `-C` 优先把
+  请求交给已运行实例；传入完整文件路径时，Double Commander 打开父目录并把光标移到
+  该文件。文件夹路径直接打开，多选按项目所在文件夹去重后打开。
+- **Files**：程序路径使用 `Files.exe`，或 `files-stable.exe`、
+  `files-preview.exe`、`files-dev.exe` 官方启动别名。PopDrop 使用 `-directory`
+  打开文件夹，使用 `-select` 定位单个项目；多选按项目所在文件夹去重后打开。
+- **FreeCommander XE**：程序路径使用 `FreeCommander.exe`。PopDrop 使用 `/C`
+  优先把请求交给已运行实例；传入完整文件路径时，FreeCommander XE 打开父目录并把
+  光标定位到该文件。文件夹路径直接打开，多选按项目所在文件夹去重后打开。
+
+“自动查找”只检查常用安装位置与合理的系统注册信息，不扫描整个磁盘；Directory Opus
+、Total Commander、XYplorer、Double Commander、FreeCommander XE 的便携版都可以
+使用“浏览…”手动选择；Files 会检查 Windows 应用执行别名。两个测试按钮使用设置页中
+尚未保存的选择和路径，取消设置不会写入这些临时修改。
+
+手工配置对应：
+
+```ini
+[FileManager]
+Provider=WindowsShell
+Executable=
+```
+
+`Provider` 允许值为 `WindowsShell`、`DirectoryOpus`、`TotalCommander`、
+`XYplorer`、`DoubleCommander`、`Files` 和 `FreeCommander`。配置版本 19 会为缺少
+该节或键的旧配置补齐 `WindowsShell` 与空程序路径，已有选择和路径保持不变；第三方
+程序路径仅在执行相关操作或点击测试按钮时检查，不会在程序启动时弹窗。
+
+One Commander 未出现在选择列表中：截至本版本调研时，其公开命令行接口只承诺打开
+路径、面板或标签，没有稳定的指定项目选择参数。PopDrop 不会用键盘、鼠标模拟或未公开
+窗口消息补足该能力。
 
 ### 应用与工具操作
 

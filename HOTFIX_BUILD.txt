@@ -1,0 +1,24 @@
+PopDrop file-manager menu callback hotfix
+Build: 2026-07-29-r6
+
+Verification markers:
+
+1. PopDrop.ahk contains:
+   RevealItemsFromPopDropMenu(itemPaths, itemName, itemPos, menuObject)
+
+2. The “在文件管理器中显示” menu item binds:
+   RevealItemsFromPopDropMenu.Bind(paths.Clone())
+
+3. PopDrop.ahk does not bind RevealItemsInFileManager directly to Menu.Add.
+
+4. QuoteWindowsArgument leaves /acmd, Go and other simple control arguments
+   unquoted, while paths containing spaces remain safely quoted.
+
+5. FileManager.ahk contains XYplorerFileManagerAdapter and provider ID
+   XYplorer. A single item is passed as its full path; folder navigation adds
+   a trailing backslash.
+
+6. Double Commander uses -C with a full item path, and Files uses
+   -select with a full item path. FreeCommander XE uses /C with a full item
+   path. One Commander is not registered because its public interface does
+   not support item reveal.

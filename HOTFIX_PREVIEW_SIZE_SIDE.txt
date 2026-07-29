@@ -1,0 +1,19 @@
+PopDrop 0.10.0 preview size/side hotfix package
+Package revision: preview-size-side-hotfix-20260729
+
+This archive uses a new filename, a new top-level folder name, and a distinct
+Library file identity to avoid reusing the earlier download cache.
+
+Included fixes:
+1. When a Shell cached thumbnail is materially smaller than the requested
+   preview area, PopDropPreview tries a WIC decode from the original image
+   before falling back to that cached thumbnail.
+2. When Preview Side is Auto, moving or resizing the PopDrop panel clears the
+   previous side lock before preview recovery, allowing a panel at the right
+   display edge to show its preview on the left.
+
+Key source locations:
+- native/PopDropPreview/PopDropPreview.cpp
+  ShellThumbnailNeedsDirectRefinement()
+- Preview.ahk
+  PanelExitMoveSize()

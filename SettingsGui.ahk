@@ -6,15 +6,127 @@ OpenConfig(*) {
     OpenSettingsGui()
 }
 
+OpenFileManagerSettings() {
+    c := OpenSettingsGui()
+    if !IsObject(c)
+        return false
+    ShowSettingsPage(c, 3)
+    try c.FileManagerProvider.Focus()
+    return true
+}
+
+OpenSourceSettings(workspaceId, sourceId) {
+    c := OpenSettingsGui()
+    if !IsObject(c)
+        return false
+    if IsObject(c.Child) {
+        try WinActivate("ahk_id " c.Child.Hwnd)
+        SettingsMessage(c,
+            "请先完成或关闭当前设置子窗口，然后再定位来源。",
+            "无法定位来源", "Icon!")
+        return false
+    }
+    target := ResolveDraftSourceNavigation(
+        c.Draft, workspaceId, sourceId)
+    if !target.WorkspaceFound {
+        SettingsMessage(c, "目标工作区已经不存在。",
+            "无法定位来源", "Icon!")
+        return false
+    }
+    if SettingsDraftHasChanges(c) {
+        answer := SettingsMessage(c,
+            "设置尚未保存。`n`n"
+            . "“是”：保存草稿后定位来源`n"
+            . "“否”：放弃草稿后定位来源`n"
+            . "“取消”：保持当前页面和选择",
+            "设置此来源", "YesNoCancel Icon!")
+        action := ResolveSettingsConflictAction(answer)
+        if action = "Cancel"
+            return false
+        if action = "Save" {
+            if !SaveSettingsDraftCore(c, false)
+                return false
+        } else {
+            ReloadSettingsDraft(c)
+        }
+        target := ResolveDraftSourceNavigation(
+            c.Draft, workspaceId, sourceId)
+        if !target.WorkspaceFound {
+            SettingsMessage(c, "目标工作区已经不存在。",
+                "无法定位来源", "Icon!")
+            return false
+        }
+    }
+    if StrLower(c.Draft.CurrentWorkspaceId)
+        != StrLower(workspaceId) {
+        if !ActivateWorkspace(workspaceId)
+            return false
+        ReloadSettingsDraft(c)
+    } else {
+        ; Selecting another source is lossless inside the same isolated
+        ; draft. Commit the currently visible controls before changing rows.
+        CommitCurrentSourceControlsToDraft(c)
+    }
+    return NavigateSettingsToSource(c, workspaceId, sourceId)
+}
+
+ResolveDraftSourceNavigation(draft, workspaceId, sourceId) {
+    result := {
+        WorkspaceFound: false,
+        SourceFound: false,
+        WorkspaceIndex: 0,
+        SourceIndex: 0
+    }
+    for workspaceIndex, workspace in draft.Workspaces {
+        if StrLower(workspace.Id) != StrLower(workspaceId)
+            continue
+        result.WorkspaceFound := true
+        result.WorkspaceIndex := workspaceIndex
+        for sourceIndex, source in workspace.Sources {
+            if StrLower(source.SourceId) = StrLower(sourceId) {
+                result.SourceFound := true
+                result.SourceIndex := sourceIndex
+                break
+            }
+        }
+        break
+    }
+    return result
+}
+
+ShowSettingsPage(c, page) {
+    if c.NavItems.Has(page)
+        c.Navigation.Modify(c.NavItems[page], "Select Vis")
+    c.Tab.Choose(page)
+}
+
+NavigateSettingsToSource(c, workspaceId, sourceId) {
+    if StrLower(c.Draft.CurrentWorkspaceId)
+        != StrLower(workspaceId)
+        return false
+    target := ResolveDraftSourceNavigation(
+        c.Draft, workspaceId, sourceId)
+    ShowSettingsPage(c, 2)
+    RefreshSourceList(c, sourceId, false)
+    if !target.SourceFound {
+        c.SourceStatus.Text := "目标来源已经不存在。"
+        SetUserStatus("目标来源已经不存在")
+        return false
+    }
+    try c.SourceList.Focus()
+    return StrLower(c.SelectedSourceId) = StrLower(sourceId)
+}
+
 OpenSettingsGui() {
     global Panel, SettingsDialog, SettingsController
 
     CancelFilePointerGesture()
     if IsObject(SettingsDialog) {
         try {
+            WinRestore("ahk_id " SettingsDialog.Hwnd)
             SettingsDialog.Show()
             WinActivate("ahk_id " SettingsDialog.Hwnd)
-            return
+            return SettingsController
         }
     }
 
@@ -98,6 +210,7 @@ OpenSettingsGui() {
     LoadDisplayControls(controller)
     navigation.Modify(navGeneral, "Select Vis")
     guiObj.Show("w1050 h704")
+    return controller
 }
 
 SettingsNavigationSelected(c, tree, item) {
@@ -116,6 +229,8 @@ LoadSettingsIntoDraft() {
     global GlobalNoiseFilter, Workspaces, ActiveWorkspaceId
     global TransferUrlFallbackEnabled, TransferAllowHttp
     global TransferMaxConcurrent, TransferShowNotifications
+    global FileManagerProvider, FileManagerExecutable
+    global PreviewEnabled, PreviewSide, PreviewCacheEnabled
 
     workspaceDrafts := []
     activeSources := []
@@ -164,6 +279,12 @@ LoadSettingsIntoDraft() {
             AllowHttp: TransferAllowHttp,
             TransferMaxConcurrent: TransferMaxConcurrent,
             ShowCompletionNotifications: TransferShowNotifications,
+            FileManagerProvider: ParseFileManagerProvider(
+                FileManagerProvider),
+            FileManagerExecutable: FileManagerExecutable,
+            PreviewEnabled: PreviewEnabled,
+            PreviewSide: PreviewSide,
+            PreviewCacheEnabled: PreviewCacheEnabled,
             DefaultDisplayScope: ReadGlobalDisplayScopeForDraft(),
             DefaultFolderTimeMode: ReadGlobalFolderTimeForDraft(),
             DefaultFilter: ReadGlobalFilterForDraft(),
@@ -520,9 +641,10 @@ RequestSettingsWorkspaceSwitch(c, workspaceId, origin := "settings") {
             . "“否”：放弃修改并切换`n"
             . "“取消”：留在当前工作区",
             "切换工作区", "YesNoCancel Icon!")
-        if answer = "Cancel"
+        action := ResolveSettingsConflictAction(answer)
+        if action = "Cancel"
             return false
-        if answer = "Yes" {
+        if action = "Save" {
             if !SaveSettingsDraftCore(c, false)
                 return false
         } else {
@@ -533,6 +655,93 @@ RequestSettingsWorkspaceSwitch(c, workspaceId, origin := "settings") {
         return false
     ReloadSettingsDraft(c)
     return true
+}
+
+ResolveSettingsConflictAction(answer) {
+    if answer = "Yes"
+        return "Save"
+    if answer = "No"
+        return "Discard"
+    return "Cancel"
+}
+
+PrepareSettingsForExternalSourceRemoval(workspaceId, sourceId) {
+    global SettingsController
+    if !IsObject(SettingsController)
+        return {Allowed: true, SyncState: 0}
+    c := SettingsController
+    if IsObject(c.Child) {
+        try WinActivate("ahk_id " c.Child.Hwnd)
+        SettingsMessage(c,
+            "请先完成或关闭当前设置子窗口，再移除来源。",
+            "无法移除来源", "Icon!")
+        return {Allowed: false, SyncState: 0}
+    }
+    if SettingsDraftHasChanges(c) {
+        answer := SettingsMessage(c,
+            "设置尚未保存。`n`n"
+            . "“是”：保存草稿后继续移除`n"
+            . "“否”：放弃草稿后继续移除`n"
+            . "“取消”：取消移除来源",
+            "移除来源", "YesNoCancel Icon!")
+        action := ResolveSettingsConflictAction(answer)
+        if action = "Cancel"
+            return {Allowed: false, SyncState: 0}
+        if action = "Save" {
+            if !SaveSettingsDraftCore(c, false)
+                return {Allowed: false, SyncState: 0}
+        } else {
+            ReloadSettingsDraft(c)
+        }
+    }
+    return {
+        Allowed: true,
+        SyncState: CaptureSettingsSourceSyncState(
+            c, workspaceId, sourceId)
+    }
+}
+
+CaptureSettingsSourceSyncState(c, workspaceId, sourceId) {
+    target := ResolveDraftSourceNavigation(
+        c.Draft, workspaceId, sourceId)
+    return {
+        Controller: c,
+        ControllerHwnd: c.Gui.Hwnd,
+        WorkspaceId: workspaceId,
+        RemovedSourceId: sourceId,
+        RemovedIndex: target.SourceIndex,
+        SelectedSourceId: c.SelectedSourceId
+    }
+}
+
+SyncSettingsAfterExternalSourceRemoval(state) {
+    global SettingsController
+    if !IsObject(state) || !IsObject(SettingsController)
+        return
+    c := SettingsController
+    if c.Gui.Hwnd != state.ControllerHwnd
+        return
+    ReloadSettingsDraft(c)
+    if StrLower(c.Draft.CurrentWorkspaceId)
+        != StrLower(state.WorkspaceId)
+        return
+    preferredId := ""
+    if state.SelectedSourceId != ""
+        && StrLower(state.SelectedSourceId)
+            != StrLower(state.RemovedSourceId) {
+        selected := ResolveDraftSourceNavigation(
+            c.Draft, state.WorkspaceId, state.SelectedSourceId)
+        if selected.SourceFound
+            preferredId := state.SelectedSourceId
+    }
+    if preferredId = "" && c.Draft.Sources.Length
+        && state.RemovedIndex {
+        adjacentIndex := Min(state.RemovedIndex, c.Draft.Sources.Length)
+        preferredId := c.Draft.Sources[adjacentIndex].SourceId
+    }
+    RefreshSourceList(c, preferredId, preferredId != "")
+    if !c.Draft.Sources.Length
+        c.SourceStatus.Text := "当前工作区还没有来源。"
 }
 
 ReloadSettingsDraft(c) {
@@ -767,30 +976,60 @@ DeleteWorkspaceFromManager(c, list, *) {
 BuildOperationsSettingsPage(c, tabs) {
     tabs.UseTab(3)
     g := c.Gui
-    g.AddGroupBox("x200 y29 w818 h270",
+    g.AddGroupBox("x200 y29 w818 h190",
+        "文件管理器 · 应用于所有工作区")
+    g.AddText("x220 y57 w120", "默认文件管理器：")
+    c.FileManagerProvider := AddUiDropDownList(
+        g, "x345 yp-4 w270 Choose1",
+        ["跟随 Windows 系统行为", "Directory Opus", "Total Commander",
+            "XYplorer", "Double Commander", "Files", "FreeCommander XE"])
+    c.FileManagerPathLabel := g.AddText(
+        "x220 y94 w120", "程序路径：")
+    c.FileManagerPath := AddUiEdit(g, "x345 yp-4 w430")
+    c.FileManagerBrowse := AddUiButton(
+        g, "x+7 yp w78", "浏览…")
+    c.FileManagerAutoFind := AddUiButton(
+        g, "x+7 yp w92", "自动查找")
+    c.FileManagerPathStatus := g.AddText(
+        "x345 y126 w620 h20 c666666", "")
+    c.FileManagerTestFolder := AddUiButton(
+        g, "x220 y153 w130", "测试打开文件夹")
+    c.FileManagerTestReveal := AddUiButton(
+        g, "x+8 yp w130", "测试定位文件")
+    c.FileManagerCapability := g.AddText(
+        "x510 y147 w480 h38 c7A4E00", "")
+    c.FileManagerTestStatus := g.AddText(
+        "x220 y187 w770 h18 c666666", "")
+    c.FileManagerThirdPartyControls := [
+        c.FileManagerPathLabel, c.FileManagerPath,
+        c.FileManagerBrowse, c.FileManagerAutoFind,
+        c.FileManagerPathStatus
+    ]
+
+    g.AddGroupBox("x200 y230 w818 h185",
         "应用与工具操作 · 应用于所有工作区")
-    c.AppList := g.AddListView("x220 y56 w778 h174 Report -Multi NoSortHdr",
+    c.AppList := g.AddListView("x220 y257 w778 h94 Report -Multi NoSortHdr",
         ["名称", "程序", "打开方式", "动作", "状态"])
     c.AppList.ModifyCol(1, 120)
     c.AppList.ModifyCol(2, 330)
     c.AppList.ModifyCol(3, 145)
     c.AppList.ModifyCol(4, 60)
     c.AppList.ModifyCol(5, 100)
-    c.AppAdd := AddUiButton(g, "x220 y240 w88", "添加应用")
+    c.AppAdd := AddUiButton(g, "x220 y361 w88", "添加应用")
     c.AppEdit := AddUiButton(g, "x+7 yp w78", "编辑应用")
     c.AppActions := AddUiButton(g, "x+7 yp w92", "管理动作…")
     c.AppRemove := AddUiButton(g, "x+7 yp w72", "移除")
     c.AppUp := AddUiButton(g, "x+7 yp w72", "上移")
     c.AppDown := AddUiButton(g, "x+7 yp w72", "下移")
 
-    g.AddGroupBox("x200 y312 w818 h272",
+    g.AddGroupBox("x200 y426 w818 h200",
         "复制和移动的常用位置 · 应用于所有工作区")
-    c.TargetList := g.AddListView("x220 y339 w778 h153 Report -Multi NoSortHdr",
+    c.TargetList := g.AddListView("x220 y453 w778 h105 Report -Multi NoSortHdr",
         ["名称", "路径", "状态"])
     c.TargetList.ModifyCol(1, 165)
     c.TargetList.ModifyCol(2, 505)
     c.TargetList.ModifyCol(3, 105)
-    c.TargetAdd := AddUiButton(g, "x220 y502 w88", "添加位置")
+    c.TargetAdd := AddUiButton(g, "x220 y568 w88", "添加位置")
     c.TargetEdit := AddUiButton(g, "x+7 yp w72", "编辑")
     c.TargetRemove := AddUiButton(g, "x+7 yp w72", "移除")
     c.TargetUp := AddUiButton(g, "x+7 yp w72", "上移")
@@ -799,6 +1038,18 @@ BuildOperationsSettingsPage(c, tabs) {
         "最近目标：0 个")
     c.ClearRecentTargets := AddUiButton(g, "x875 yp w98", "清空记录")
 
+    c.FileManagerProvider.OnEvent(
+        "Change", FileManagerControlChanged.Bind(c))
+    c.FileManagerPath.OnEvent(
+        "Change", FileManagerControlChanged.Bind(c))
+    c.FileManagerBrowse.OnEvent(
+        "Click", BrowseFileManagerExecutable.Bind(c))
+    c.FileManagerAutoFind.OnEvent(
+        "Click", AutoFindFileManagerExecutable.Bind(c))
+    c.FileManagerTestFolder.OnEvent(
+        "Click", TestFileManagerOpenFolder.Bind(c))
+    c.FileManagerTestReveal.OnEvent(
+        "Click", TestFileManagerRevealItem.Bind(c))
     c.AppList.OnEvent("ItemSelect", ApplicationSelected.Bind(c))
     c.AppAdd.OnEvent("Click", OpenApplicationEditor.Bind(c, 0))
     c.AppEdit.OnEvent("Click", EditSelectedApplication.Bind(c))
@@ -813,6 +1064,189 @@ BuildOperationsSettingsPage(c, tabs) {
     c.TargetUp.OnEvent("Click", MoveSelectedDestination.Bind(c, -1))
     c.TargetDown.OnEvent("Click", MoveSelectedDestination.Bind(c, 1))
     c.ClearRecentTargets.OnEvent("Click", ClearRecentTargetsDraft.Bind(c))
+}
+
+FileManagerProviderToIndex(provider) {
+    global FILE_MANAGER_DIRECTORY_OPUS, FILE_MANAGER_TOTAL_COMMANDER
+    global FILE_MANAGER_XYPLORER
+    global FILE_MANAGER_DOUBLE_COMMANDER, FILE_MANAGER_FILES
+    global FILE_MANAGER_FREE_COMMANDER
+    provider := ParseFileManagerProvider(provider)
+    if provider = FILE_MANAGER_DIRECTORY_OPUS
+        return 2
+    if provider = FILE_MANAGER_TOTAL_COMMANDER
+        return 3
+    if provider = FILE_MANAGER_XYPLORER
+        return 4
+    if provider = FILE_MANAGER_DOUBLE_COMMANDER
+        return 5
+    if provider = FILE_MANAGER_FILES
+        return 6
+    if provider = FILE_MANAGER_FREE_COMMANDER
+        return 7
+    return 1
+}
+
+FileManagerIndexToProvider(index) {
+    global FILE_MANAGER_WINDOWS_SHELL, FILE_MANAGER_DIRECTORY_OPUS
+    global FILE_MANAGER_TOTAL_COMMANDER, FILE_MANAGER_XYPLORER
+    global FILE_MANAGER_DOUBLE_COMMANDER, FILE_MANAGER_FILES
+    global FILE_MANAGER_FREE_COMMANDER
+    if index = 2
+        return FILE_MANAGER_DIRECTORY_OPUS
+    if index = 3
+        return FILE_MANAGER_TOTAL_COMMANDER
+    if index = 4
+        return FILE_MANAGER_XYPLORER
+    if index = 5
+        return FILE_MANAGER_DOUBLE_COMMANDER
+    if index = 6
+        return FILE_MANAGER_FILES
+    if index = 7
+        return FILE_MANAGER_FREE_COMMANDER
+    return FILE_MANAGER_WINDOWS_SHELL
+}
+
+LoadFileManagerControls(c) {
+    d := c.Draft.General
+    c.FileManagerProvider.Choose(
+        FileManagerProviderToIndex(d.FileManagerProvider))
+    c.FileManagerPath.Value := d.FileManagerExecutable
+    UpdateFileManagerControlState(c)
+}
+
+FileManagerSettingsFromControls(c) {
+    return {
+        Provider: FileManagerIndexToProvider(
+            Max(1, c.FileManagerProvider.Value)),
+        Executable: Trim(c.FileManagerPath.Value)
+    }
+}
+
+FileManagerControlChanged(c, *) {
+    if c.Loading
+        return
+    settings := FileManagerSettingsFromControls(c)
+    c.Draft.General.FileManagerProvider := settings.Provider
+    c.Draft.General.FileManagerExecutable := settings.Executable
+    c.FileManagerTestStatus.Text := ""
+    UpdateFileManagerControlState(c)
+}
+
+UpdateFileManagerControlState(c) {
+    global FILE_MANAGER_WINDOWS_SHELL, FILE_MANAGER_TOTAL_COMMANDER
+    global FILE_MANAGER_XYPLORER
+    global FILE_MANAGER_DOUBLE_COMMANDER, FILE_MANAGER_FILES
+    global FILE_MANAGER_FREE_COMMANDER
+    settings := FileManagerSettingsFromControls(c)
+    thirdParty := settings.Provider != FILE_MANAGER_WINDOWS_SHELL
+    for ctrl in c.FileManagerThirdPartyControls {
+        ctrl.Visible := thirdParty
+        ctrl.Enabled := thirdParty
+    }
+    c.FileManagerCapability.Text :=
+        settings.Provider = FILE_MANAGER_TOTAL_COMMANDER
+        ? "受 Total Commander 对外接口限制，PopDrop 暂不支持在其中自动选中文件；"
+            . "“在文件管理器中显示”将改为打开文件所在文件夹。"
+        : settings.Provider = FILE_MANAGER_XYPLORER
+            || settings.Provider = FILE_MANAGER_FILES
+        ? FileManagerProviderDisplayName(settings.Provider)
+            . " 支持精确定位单个项目；多选时将按文件所在文件夹去重后打开。"
+        : settings.Provider = FILE_MANAGER_DOUBLE_COMMANDER
+            || settings.Provider = FILE_MANAGER_FREE_COMMANDER
+        ? FileManagerProviderDisplayName(settings.Provider)
+            . " 支持精确定位单个文件；文件夹将直接打开，"
+            . "多选时按文件所在文件夹去重后打开。"
+        : ""
+    if !thirdParty
+        return
+    executable := settings.Provider = "DirectoryOpus"
+        ? ResolveDirectoryOpusRuntimePath(settings.Executable)
+        : NormalizePath(settings.Executable)
+    validation := ValidateFileManagerExecutable(
+        settings.Provider, executable)
+    c.FileManagerPathStatus.Text := "路径检测："
+        . validation.Message
+}
+
+BrowseFileManagerExecutable(c, *) {
+    settings := FileManagerSettingsFromControls(c)
+    if settings.Provider = "WindowsShell"
+        return
+    root := settings.Executable
+    if root != "" {
+        SplitPath(NormalizePath(root), , &root)
+    }
+    title := settings.Provider = "DirectoryOpus"
+        ? "选择 dopusrt.exe 或 dopus.exe"
+        : settings.Provider = "TotalCommander"
+        ? "选择 TOTALCMD64.EXE 或 TOTALCMD.EXE"
+        : settings.Provider = "XYplorer"
+        ? "选择 XYplorer.exe"
+        : settings.Provider = "DoubleCommander"
+        ? "选择 doublecmd.exe"
+        : settings.Provider = "Files"
+        ? "选择 Files 启动程序或官方启动别名"
+        : "选择 FreeCommander.exe"
+    selected := SelectPanelFile(
+        "1", root, title, "程序 (*.exe)")
+    if selected = ""
+        return
+    selected := NormalizeFileManagerExecutableForSave(
+        settings.Provider, selected)
+    c.FileManagerPath.Value := selected
+    FileManagerControlChanged(c)
+}
+
+AutoFindFileManagerExecutable(c, *) {
+    settings := FileManagerSettingsFromControls(c)
+    if settings.Provider = "WindowsShell"
+        return
+    found := FindFileManagerExecutable(settings.Provider)
+    if found = "" {
+        c.FileManagerPathStatus.Text :=
+            "路径检测：自动查找未发现程序，可使用“浏览…”选择便携版。"
+        SettingsMessage(c,
+            "未在常用安装位置或系统注册信息中找到 "
+                . FileManagerProviderDisplayName(settings.Provider)
+                . "。`n`n可以使用“浏览…”手动选择程序；"
+                . "PopDrop 不会扫描整个磁盘。",
+            "自动查找", "Iconi")
+        return
+    }
+    c.FileManagerPath.Value := found
+    FileManagerControlChanged(c)
+}
+
+TestFileManagerOpenFolder(c, *) {
+    settings := FileManagerSettingsFromControls(c)
+    FileManagerControlChanged(c)
+    c.FileManagerTestStatus.Text := "正在测试打开文件夹…"
+    result := FileManagerRouter.OpenFolder(A_Temp, settings)
+    HandleFileManagerTestResult(
+        c, result, "已发送打开测试文件夹的命令。")
+}
+
+TestFileManagerRevealItem(c, *) {
+    settings := FileManagerSettingsFromControls(c)
+    FileManagerControlChanged(c)
+    c.FileManagerTestStatus.Text := "正在测试定位文件…"
+    result := FileManagerRouter.RevealItems(
+        [A_ScriptFullPath], settings)
+    HandleFileManagerTestResult(
+        c, result, "测试定位文件命令已发送。")
+}
+
+HandleFileManagerTestResult(c, result, successText) {
+    if result.Success {
+        c.FileManagerTestStatus.Text := successText
+        SetUserStatus(successText)
+        return true
+    }
+    c.FileManagerTestStatus.Text := "测试失败；请查看错误详情并检查程序路径。"
+    SettingsMessage(c, result.Message,
+        "文件管理器测试失败", "Iconx")
+    return false
 }
 
 BuildDisplaySettingsPage(c, tabs) {
@@ -849,6 +1283,15 @@ BuildDisplaySettingsPage(c, tabs) {
     c.HiddenNoiseCount := g.AddText("x800 y556 w130 c666666 Right", "本次共隐藏 0 个")
     c.ViewHiddenNoise := AddUiButton(g, "x940 y549 w55", "查看…")
 
+    g.AddGroupBox("x200 y588 w818 h68",
+        "文件内容预览 · 应用于所有工作区")
+    c.PreviewEnabled := g.AddCheckBox("x220 y615", "文件预览")
+    g.AddText("x365 yp+3 w76", "预览位置：")
+    c.PreviewSide := AddUiDropDownList(g, "x445 yp-4 w150",
+        ["自动", "右侧", "左侧"])
+    c.PreviewCacheEnabled := g.AddCheckBox("x630 yp",
+        "后台生成清晰图片预览")
+
     c.ExcludedNameAdd.OnEvent("Click", AddExcludedName.Bind(c))
     c.ExcludedNameRemove.OnEvent("Click", RemoveExcludedName.Bind(c))
     c.ExcludedNameRestore.OnEvent("Click", RestoreExcludedNames.Bind(c))
@@ -859,6 +1302,9 @@ BuildDisplaySettingsPage(c, tabs) {
     c.NoiseFilterEnabled.OnEvent("Click", DisplayControlChanged.Bind(c))
     c.ManageNoiseRules.OnEvent("Click", OpenNoiseFilterManager.Bind(c))
     c.ViewHiddenNoise.OnEvent("Click", OpenHiddenNoiseItems.Bind(c))
+    c.PreviewEnabled.OnEvent("Click", DisplayControlChanged.Bind(c))
+    c.PreviewSide.OnEvent("Change", DisplayControlChanged.Bind(c))
+    c.PreviewCacheEnabled.OnEvent("Click", DisplayControlChanged.Bind(c))
 }
 
 LoadGeneralControls(c) {
@@ -881,6 +1327,7 @@ LoadGeneralControls(c) {
         c.AllowHttp.Value := d.AllowHttp
         c.TransferMax.Value := d.TransferMaxConcurrent
         c.TransferNotify.Value := d.ShowCompletionNotifications
+        LoadFileManagerControls(c)
     } finally c.Loading := false
 }
 
@@ -942,6 +1389,11 @@ LoadDisplayControls(c) {
         c.RecentCount.Value := d.RecentFileCount
         c.RecentCount.Enabled := !!d.ShowRecentSidebar
         c.NoiseFilterEnabled.Value := d.NoiseFilter.Enabled
+        c.PreviewEnabled.Value := d.PreviewEnabled
+        sideIndex := StrLower(d.PreviewSide) = "right" ? 2
+            : StrLower(d.PreviewSide) = "left" ? 3 : 1
+        c.PreviewSide.Choose(sideIndex)
+        c.PreviewCacheEnabled.Value := d.PreviewCacheEnabled
         hiddenCount := IsObject(CurrentScanResult) && HasProp(CurrentScanResult, "HiddenCount")
             ? CurrentScanResult.HiddenCount : 0
         c.HiddenNoiseCount.Text := "本次共隐藏 " hiddenCount " 个"
@@ -962,9 +1414,12 @@ DisplayControlChanged(c, *) {
     d.RecentFileCount := Trim(c.RecentCount.Value)
     c.RecentCount.Enabled := d.ShowRecentSidebar
     d.NoiseFilter.Enabled := !!c.NoiseFilterEnabled.Value
+    d.PreviewEnabled := !!c.PreviewEnabled.Value
+    d.PreviewSide := ["Auto", "Right", "Left"][Max(1, c.PreviewSide.Value)]
+    d.PreviewCacheEnabled := !!c.PreviewCacheEnabled.Value
 }
 
-RefreshSourceList(c, preferredId := "") {
+RefreshSourceList(c, preferredId := "", selectFirst := true) {
     if preferredId = ""
         preferredId := c.SelectedSourceId
     c.Loading := true
@@ -977,11 +1432,12 @@ RefreshSourceList(c, preferredId := "") {
             row := c.SourceList.Add("", source.Name, source.Path,
                 GetSourceDraftStatus(source, c.Draft.Sources))
             c.SourceRows[row] := source.SourceId
-            if source.SourceId = preferredId
+            if preferredId != ""
+                && StrLower(source.SourceId) = StrLower(preferredId)
                 selectRow := row
         }
         c.SourceList.Opt("+Redraw")
-        if !selectRow && c.Draft.Sources.Length
+        if !selectRow && selectFirst && c.Draft.Sources.Length
             selectRow := 1
         if selectRow {
             c.SourceList.Modify(selectRow, "Select Focus Vis")
@@ -1024,7 +1480,7 @@ FindDraftSource(c, sourceId := "") {
     if sourceId = ""
         sourceId := c.SelectedSourceId
     for index, source in c.Draft.Sources {
-        if source.SourceId = sourceId
+        if StrLower(source.SourceId) = StrLower(sourceId)
             return {Index: index, Value: source}
     }
     return 0
@@ -1200,9 +1656,6 @@ RefreshSourceListRow(c) {
 }
 
 AddSourceToDraft(c, *) {
-    global MODE_FILES, SCOPE_RECURSIVE_FILES
-    global SORT_MODIFIED_DESC, SOURCE_OPEN_MODE_INHERIT
-    global NOISE_FILTER_INHERIT
     path := SelectPanelFile("D3", "", "选择监控来源")
     if path = ""
         return
@@ -1222,28 +1675,76 @@ AddSourceToDraft(c, *) {
         if answer != "Yes"
             return
     }
-    name := GetFileName(path)
-    if name = ""
-        name := path
+    name := MakeUniqueSourceName(DefaultSourceNameForPath(path),
+        c.Draft.Sources)
     id := NewStableId("source")
-    c.Draft.Sources.Push({
-        Name: name, OriginalName: name, Path: path, Mode: MODE_FILES,
+    c.Draft.Sources.Push(CreateDefaultSourceDraft(
+        name, path, id, c.Draft.General))
+    RefreshSourceList(c, id)
+}
+
+CreateDefaultSourceDraft(name, path, id, general) {
+    global MODE_FILES, SCOPE_RECURSIVE_FILES
+    global SORT_MODIFIED_DESC, SOURCE_OPEN_MODE_INHERIT
+    global NOISE_FILTER_INHERIT
+    return {
+        Name: SanitizeSourceName(name),
+        OriginalName: SanitizeSourceName(name),
+        Path: NormalizePath(path),
+        Mode: MODE_FILES,
         IncludeSubfolders:
-            c.Draft.General.DefaultDisplayScope = SCOPE_RECURSIVE_FILES,
-        DisplayScope: c.Draft.General.DefaultDisplayScope,
-        FolderTimeMode: c.Draft.General.DefaultFolderTimeMode,
-        MaxFilesPerFolder: c.Draft.General.MaxFilesPerFolder,
+            general.DefaultDisplayScope = SCOPE_RECURSIVE_FILES,
+        DisplayScope: general.DefaultDisplayScope,
+        FolderTimeMode: general.DefaultFolderTimeMode,
+        MaxFilesPerFolder: general.MaxFilesPerFolder,
         SortMode: SORT_MODIFIED_DESC,
         Filter: {
-            Mode: c.Draft.General.DefaultFilter.Mode,
-            Extensions: c.Draft.General.DefaultFilter.Extensions.Clone()
+            Mode: general.DefaultFilter.Mode,
+            Extensions: general.DefaultFilter.Extensions.Clone()
         },
-        StripOrderPrefix: 0, HideExtensions: 0,
-        SourceId: id, OpenFileMode: SOURCE_OPEN_MODE_INHERIT,
-        NoiseFilterMode: NOISE_FILTER_INHERIT, SourceCustomPatternTexts: [],
-        ExcludedPaths: [], AllowedExcludedPaths: []
-    })
-    RefreshSourceList(c, id)
+        StripOrderPrefix: 0,
+        HideExtensions: 0,
+        SourceId: id,
+        OpenFileMode: SOURCE_OPEN_MODE_INHERIT,
+        NoiseFilterMode: NOISE_FILTER_INHERIT,
+        SourceCustomPatternTexts: [],
+        ExcludedPaths: [],
+        AllowedExcludedPaths: []
+    }
+}
+
+SourceConfigEntries(source, workspaceId) {
+    return [
+        {Key: "WorkspaceId", Value: workspaceId},
+        {Key: "Name", Value: source.Name},
+        {Key: "Path", Value: source.Path},
+        {Key: "Mode", Value: source.Mode},
+        {Key: "MaxFilesPerFolder", Value: source.MaxFilesPerFolder},
+        {Key: "IncludeSubfolders",
+            Value: source.DisplayScope = "RecursiveFiles" ? "1" : "0"},
+        {Key: "DisplayScope", Value: source.DisplayScope},
+        {Key: "FolderTimeMode", Value: source.FolderTimeMode},
+        {Key: "SortMode", Value: source.SortMode},
+        {Key: "FilterMode", Value: source.Filter.Mode},
+        {Key: "FileExtensions",
+            Value: JoinArray(source.Filter.Extensions, ",")},
+        {Key: "StripOrderPrefix",
+            Value: source.StripOrderPrefix ? "1" : "0"},
+        {Key: "HideExtensions",
+            Value: source.HideExtensions ? "1" : "0"},
+        {Key: "OpenFileMode",
+            Value: ParseSourceOpenFileMode(source.OpenFileMode)},
+        {Key: "NoiseFilterMode",
+            Value: ParseNoiseFilterMode(source.NoiseFilterMode)}
+    ]
+}
+
+SourceConfigKnownKeys() {
+    return ["WorkspaceId", "Name", "Path", "Mode",
+        "MaxFilesPerFolder", "IncludeSubfolders", "DisplayScope",
+        "FolderTimeMode", "SortMode", "FilterMode",
+        "FileExtensions", "StripOrderPrefix", "HideExtensions",
+        "OpenFileMode", "NoiseFilterMode"]
 }
 
 MakeUniqueDraftSourceId(sources, base) {
@@ -1324,10 +1825,7 @@ OpenSelectedSourcePath(c, *) {
             . found.Value.Path, "无法打开", "Icon!")
         return
     }
-    try Run(found.Value.Path)
-    catch as err
-        SettingsMessage(c, "无法打开文件夹：`n" err.Message,
-            "打开失败", "Iconx")
+    OpenFolderInFileManager(found.Value.Path)
 }
 
 OpenSourcePathManager(c, field, *) {
@@ -2497,9 +2995,13 @@ SettingsDraftSignature(draft) {
         g.EscapeHidesPanel ? "1" : "0",
         g.ShowRecentSidebar ? "1" : "0",
         g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode,
+        ParseFileManagerProvider(g.FileManagerProvider),
+        PathKey(g.FileManagerExecutable),
         g.EnablePublicUrlFallback ? "1" : "0",
         g.AllowHttp ? "1" : "0", g.TransferMaxConcurrent "",
-        g.ShowCompletionNotifications ? "1" : "0")
+        g.ShowCompletionNotifications ? "1" : "0",
+        g.PreviewEnabled ? "1" : "0", g.PreviewSide,
+        g.PreviewCacheEnabled ? "1" : "0")
     n := g.NoiseFilter
     parts.Push("N", n.Enabled ? "1" : "0", n.HideHidden ? "1" : "0",
         n.HideSystem ? "1" : "0", n.HideTemporary ? "1" : "0",
@@ -2559,6 +3061,7 @@ SettingsDraftHasChanges(c) {
     CommitCurrentSourceControlsToDraft(c)
     GeneralControlChanged(c)
     DisplayControlChanged(c)
+    FileManagerControlChanged(c)
     return SettingsDraftSignature(c.Draft) != c.OriginalSignature
 }
 
@@ -2592,6 +3095,10 @@ ValidateSettingsDraft(c) {
     global SORT_MODIFIED_DESC, SORT_NAME_ASC
     global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
     global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
+    global FILE_MANAGER_WINDOWS_SHELL, FILE_MANAGER_DIRECTORY_OPUS
+    global FILE_MANAGER_TOTAL_COMMANDER, FILE_MANAGER_XYPLORER
+    global FILE_MANAGER_DOUBLE_COMMANDER, FILE_MANAGER_FILES
+    global FILE_MANAGER_FREE_COMMANDER
     errors := []
     warnings := []
     d := c.Draft
@@ -2601,6 +3108,48 @@ ValidateSettingsDraft(c) {
     if d.General.DefaultContextMenu != CONTEXT_MENU_POPDROP
         && d.General.DefaultContextMenu != CONTEXT_MENU_SYSTEM
         errors.Push("默认右键菜单设置无效。")
+    provider := d.General.FileManagerProvider
+    if !IsRecognizedFileManagerProvider(provider)
+        errors.Push("默认文件管理器设置无效。")
+    else if provider != FILE_MANAGER_WINDOWS_SHELL {
+        executable := NormalizeFileManagerExecutableForSave(
+            provider, d.General.FileManagerExecutable)
+        if executable = "" {
+            errors.Push(FileManagerProviderDisplayName(provider)
+                . " 的程序路径不能为空。")
+        } else {
+            SplitPath(executable, &fileName)
+            fileName := StrLower(fileName)
+            if provider = FILE_MANAGER_DIRECTORY_OPUS
+                && fileName != "dopusrt.exe"
+                errors.Push("Directory Opus 的程序路径必须指向 dopusrt.exe；"
+                    . "也可以选择同目录中的 dopus.exe 自动转换。")
+            else if provider = FILE_MANAGER_TOTAL_COMMANDER
+                && fileName != "totalcmd64.exe"
+                && fileName != "totalcmd.exe"
+                errors.Push("Total Commander 的程序路径必须指向 "
+                    . "TOTALCMD64.EXE 或 TOTALCMD.EXE。")
+            else if provider = FILE_MANAGER_XYPLORER
+                && fileName != "xyplorer.exe"
+                errors.Push("XYplorer 的程序路径必须指向 XYplorer.exe。")
+            else if provider = FILE_MANAGER_DOUBLE_COMMANDER
+                && fileName != "doublecmd.exe"
+                errors.Push("Double Commander 的程序路径必须指向 "
+                    . "doublecmd.exe。")
+            else if provider = FILE_MANAGER_FILES
+                && !IsFilesExecutableName(fileName)
+                errors.Push("Files 的程序路径必须指向 Files.exe，或 "
+                    . "files-stable.exe、files-preview.exe、"
+                    . "files-dev.exe 官方启动别名。")
+            else if provider = FILE_MANAGER_FREE_COMMANDER
+                && fileName != "freecommander.exe"
+                errors.Push("FreeCommander XE 的程序路径必须指向 "
+                    . "FreeCommander.exe。")
+            else if !IsExistingExecutable(executable)
+                warnings.Push(FileManagerProviderDisplayName(provider)
+                    . " 的程序当前不存在：" executable)
+        }
+    }
     if Trim(d.General.Hotkey) = ""
         errors.Push("呼出/隐藏快捷键不能为空。")
     if !IsIntegerText(d.General.MaxFilesPerFolder, 1, 100)
@@ -2647,7 +3196,7 @@ ValidateSettingsDraft(c) {
             allSourceIds[StrLower(s.SourceId)] := true
         if Trim(s.Name) = ""
             errors.Push("存在名称为空的监控来源。")
-        if RegExMatch(s.Name, "[\[\]=`r`n]")
+        else if !IsSafeSourceName(s.Name)
             errors.Push("来源名称包含 INI 不支持的字符：“" s.Name "”。")
         nameKey := StrLower(Trim(s.Name))
         if names.Has(nameKey)
@@ -2807,6 +3356,14 @@ SaveSettingsDraftCore(c, closeAfter) {
     CommitCurrentSourceControlsToDraft(c)
     GeneralControlChanged(c)
     DisplayControlChanged(c)
+    FileManagerControlChanged(c)
+    c.Draft.General.FileManagerExecutable :=
+        NormalizeFileManagerExecutableForSave(
+            c.Draft.General.FileManagerProvider,
+            c.Draft.General.FileManagerExecutable)
+    c.FileManagerPath.Value :=
+        c.Draft.General.FileManagerExecutable
+    UpdateFileManagerControlState(c)
     validation := ValidateSettingsDraft(c)
     if validation.Errors.Length {
         message := "请先修正以下问题：`n`n"
@@ -2945,6 +3502,16 @@ WriteSettingsDraft(draft, tempPath) {
         g.TransferMaxConcurrent, 1)
     doc.SetValue("ExternalTransfer", "ShowCompletionNotifications",
         g.ShowCompletionNotifications ? "1" : "0", 1)
+    doc.SetValue("FileManager", "Provider",
+        ParseFileManagerProvider(g.FileManagerProvider), 1)
+    doc.SetValue("FileManager", "Executable",
+        NormalizeFileManagerExecutableForSave(
+            g.FileManagerProvider, g.FileManagerExecutable), 1)
+    doc.SetValue("Preview", "Enabled",
+        g.PreviewEnabled ? "1" : "0", 1)
+    doc.SetValue("Preview", "Side", g.PreviewSide, 1)
+    doc.SetValue("Preview", "CacheEnabled",
+        g.PreviewCacheEnabled ? "1" : "0", 1)
     noise := g.NoiseFilter
     EnsureNoiseFilterConfigComments(doc)
     noiseEntries := [{Key: "Enabled", Value: noise.Enabled ? "1" : "0"},
@@ -2986,37 +3553,9 @@ WriteSettingsDraft(draft, tempPath) {
             sourceIds.Push(source.SourceId)
             activeSourceIds[StrLower(source.SourceId)] := true
             sourceSection := "Source:" source.SourceId
-            sourceEntries := [
-                {Key: "WorkspaceId", Value: workspace.Id},
-                {Key: "Name", Value: source.Name},
-                {Key: "Path", Value: source.Path},
-                {Key: "Mode", Value: source.Mode},
-                {Key: "MaxFilesPerFolder",
-                    Value: source.MaxFilesPerFolder},
-                {Key: "IncludeSubfolders",
-                    Value: source.DisplayScope = "RecursiveFiles" ? "1" : "0"},
-                {Key: "DisplayScope", Value: source.DisplayScope},
-                {Key: "FolderTimeMode", Value: source.FolderTimeMode},
-                {Key: "SortMode", Value: source.SortMode},
-                {Key: "FilterMode", Value: source.Filter.Mode},
-                {Key: "FileExtensions",
-                    Value: JoinArray(source.Filter.Extensions, ",")},
-                {Key: "StripOrderPrefix",
-                    Value: source.StripOrderPrefix ? "1" : "0"},
-                {Key: "HideExtensions",
-                    Value: source.HideExtensions ? "1" : "0"},
-                {Key: "OpenFileMode",
-                    Value: ParseSourceOpenFileMode(source.OpenFileMode)},
-                {Key: "NoiseFilterMode",
-                    Value: ParseNoiseFilterMode(source.NoiseFilterMode)}
-            ]
-            sourceKnown := ["WorkspaceId", "Name", "Path", "Mode",
-                "MaxFilesPerFolder", "IncludeSubfolders", "DisplayScope",
-                "FolderTimeMode", "SortMode", "FilterMode",
-                "FileExtensions", "StripOrderPrefix", "HideExtensions",
-                "OpenFileMode", "NoiseFilterMode"]
-            doc.ReplaceKnownKeys(sourceSection, sourceEntries,
-                sourceKnown, 3)
+            doc.ReplaceKnownKeys(sourceSection,
+                SourceConfigEntries(source, workspace.Id),
+                SourceConfigKnownKeys(), 3)
             WriteIgnorePatternSection(doc,
                 "SourceIgnore:" source.SourceId,
                 source.SourceCustomPatternTexts)

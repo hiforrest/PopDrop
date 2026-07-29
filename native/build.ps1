@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $PSScriptRoot "PopDropTransfer\PopDropTransfer.cpp"
+$previewSource = Join-Path $PSScriptRoot "PopDropPreview\PopDropPreview.cpp"
 $outRoot = Join-Path $PSScriptRoot "bin"
 
 function Build-Architecture([string]$Architecture, [string]$HostArchitecture) {
@@ -32,6 +33,18 @@ function Build-Architecture([string]$Architecture, [string]$HostArchitecture) {
         throw "PopDropTransfer $Architecture 构建失败。"
     }
     Write-Host "Built $exe"
+
+    $previewExe = Join-Path $out "PopDropPreview.exe"
+    & cl.exe /nologo /std:c++17 /utf-8 /O2 /GL /EHsc `
+        /DUNICODE /D_UNICODE /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 `
+        /W4 /permissive- /guard:cf /DYNAMICBASE /NXCOMPAT `
+        $previewSource /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF `
+        windowscodecs.lib ole32.lib shell32.lib bcrypt.lib `
+        /OUT:$previewExe
+    if ($LASTEXITCODE -ne 0) {
+        throw "PopDropPreview $Architecture 构建失败。"
+    }
+    Write-Host "Built $previewExe"
     if ($Architecture -eq "x64") {
         $testSource = Join-Path $PSScriptRoot "tests\SyntheticDataObjectTest.cpp"
         $testOut = Join-Path $out "SyntheticDataObjectTest.exe"
@@ -50,4 +63,4 @@ Build-Architecture "x86" "x64"
 
 Write-Host ""
 Write-Host "构建完成。源码版会自动从 native\bin\<架构> 选择 helper。"
-Write-Host "发布 EXE 时，请将对应架构的 PopDropTransfer.exe 放到 PopDrop.exe 同目录。"
+Write-Host "发布 EXE 时，请将对应架构的 PopDropTransfer.exe 与 PopDropPreview.exe 放到 PopDrop.exe 同目录。"
