@@ -286,6 +286,12 @@ QuickPreviewEnsureAbovePanel() {
     hwnd := QuickPreviewFindProviderWindow()
     if !hwnd || hwnd = Panel.Hwnd
         return false
+    ; Do not repeatedly move an already-correct viewer to the front of the
+    ; topmost band. QuickLook's toolbar menus are separate popup windows; a
+    ; periodic HWND_TOPMOST call on the main window can otherwise put that
+    ; main window back above the popup and make the menu appear to vanish.
+    if QuickPreviewIsWindowAbove(hwnd, Panel.Hwnd)
+        return true
     if !QuickPreviewRaisedWindows.Has(hwnd) {
         style := A_PtrSize = 8
             ? DllCall("user32\GetWindowLongPtrW",
@@ -302,6 +308,25 @@ QuickPreviewEnsureAbovePanel() {
         "ptr", hwnd, "ptr", -1,
         "int", 0, "int", 0, "int", 0, "int", 0,
         "uint", 0x0001 | 0x0002 | 0x0010 | 0x0200, "int") != 0
+}
+
+QuickPreviewIsWindowAbove(hwnd, otherHwnd) {
+    if !hwnd || !otherHwnd
+        return false
+    current := DllCall("user32\GetTopWindow", "ptr", 0, "ptr")
+    ; A defensive bound also prevents a corrupt window chain from hanging
+    ; PopDrop's health timer.
+    Loop 4096 {
+        if !current
+            break
+        if current = hwnd
+            return true
+        if current = otherHwnd
+            return false
+        current := DllCall("user32\GetWindow",
+            "ptr", current, "uint", 2, "ptr") ; GW_HWNDNEXT
+    }
+    return false
 }
 
 QuickPreviewRestoreWindowLevels() {

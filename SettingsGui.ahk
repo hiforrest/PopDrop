@@ -427,6 +427,9 @@ CloneSettingsSource(source) {
         DisplayScope: source.DisplayScope,
         FolderTimeMode: source.FolderTimeMode,
         MaxFilesPerFolder: source.MaxFilesPerFolder,
+        MaxFilesPerFolderInherited:
+            HasProp(source, "MaxFilesPerFolderInherited")
+                ? source.MaxFilesPerFolderInherited : false,
         SortMode: source.SortMode,
         Filter: {
             Mode: source.Filter.Mode,
@@ -560,8 +563,10 @@ BuildSourcesSettingsPage(c, tabs) {
     c.SourceFolderTimeHint := g.AddText("x590 yp+4 w330 c666666",
         "仅在直接显示子文件夹时生效")
     g.AddText("x220 y489 w100", "显示数量：")
-    c.SourceMax := AddUiEdit(g, "x324 yp-4 w90 Number")
-    g.AddText("x420 yp+4 w190 c666666", "0 表示显示全部")
+    c.SourceMaxMode := AddUiDropDownList(g, "x324 yp-4 w210",
+        ["继承全局（当前：" c.Draft.General.MaxFilesPerFolder "）",
+         "自定义数量", "显示全部"])
+    c.SourceMax := AddUiEdit(g, "x544 yp w72 Number")
     g.AddText("x630 yp+4 w70", "排序：")
     c.SourceSort := AddUiDropDownList(g, "x700 yp-4 w220",
         ["修改时间（最新在前）", "名称（升序）"])
@@ -594,7 +599,8 @@ BuildSourcesSettingsPage(c, tabs) {
     c.SourceNoiseRules.OnEvent("Click", OpenSourceIgnoreRules.Bind(c))
     c.SourceType.OnEvent("Change", SourceTypeChanged.Bind(c))
     for ctrl in [c.SourceName, c.SourcePath, c.SourceScope,
-        c.SourceOpenMode, c.SourceFolderTime, c.SourceMax, c.SourceSort,
+        c.SourceOpenMode, c.SourceFolderTime, c.SourceMaxMode,
+        c.SourceMax, c.SourceSort,
         c.SourceNoiseMode]
         ctrl.OnEvent("Change", SourceControlChanged.Bind(c))
     RefreshSettingsWorkspaceControls(c)
@@ -1468,6 +1474,7 @@ DisplayControlChanged(c, *) {
         return
     d := c.Draft.General
     d.MaxFilesPerFolder := Trim(c.GlobalMax.Value)
+    RefreshInheritedSourceMaximums(c)
     d.SortMode := c.GlobalSort.Value = 2 ? SORT_NAME_ASC : SORT_MODIFIED_DESC
     d.ShowRecentSidebar := !!c.ShowRecent.Value
     d.RecentFileCount := Trim(c.RecentCount.Value)
@@ -1481,8 +1488,31 @@ DisplayControlChanged(c, *) {
     d.QuickPreviewProvider := ["Off", "Seer", "QuickLook"][
         Max(1, c.QuickPreviewProvider.Value)]
     d.SeerIntegrationEnabled := d.QuickPreviewProvider = "Seer"
-    d.QuickLookPath := Trim(c.QuickLookPath.Value)
+    if d.QuickPreviewProvider = "QuickLook" {
+        if c.QuickLookPath.Value = "无需配置，保持 Seer 运行即可"
+            c.QuickLookPath.Value := d.QuickLookPath
+        d.QuickLookPath := Trim(c.QuickLookPath.Value)
+    }
     UpdateQuickPreviewControlState(c)
+}
+
+RefreshInheritedSourceMaximums(c) {
+    for workspace in c.Draft.Workspaces {
+        for source in workspace.Sources {
+            if HasProp(source, "MaxFilesPerFolderInherited")
+                && source.MaxFilesPerFolderInherited
+                source.MaxFilesPerFolder := c.Draft.General.MaxFilesPerFolder
+        }
+    }
+    if HasProp(c, "SourceMaxMode") {
+        selected := c.SourceMaxMode.Value
+        if selected = 1
+            c.SourceMax.Value := c.Draft.General.MaxFilesPerFolder
+        ReplaceUiDropDownItems(c.SourceMaxMode,
+            ["继承全局（当前：" c.Draft.General.MaxFilesPerFolder "）",
+             "自定义数量", "显示全部"])
+        c.SourceMaxMode.Choose(selected ? selected : 1)
+    }
 }
 
 PdfiumComponentArchitecture() {
@@ -1605,6 +1635,14 @@ PollPdfiumComponentInstall(c, pid) {
 
 UpdateQuickPreviewControlState(c) {
     quickLook := c.QuickPreviewProvider.Value = 3
+    if c.QuickPreviewProvider.Value = 2 {
+        if c.QuickLookPath.Value != "无需配置，保持 Seer 运行即可"
+            c.Draft.General.QuickLookPath := Trim(c.QuickLookPath.Value)
+        c.QuickLookPath.Value := "无需配置，保持 Seer 运行即可"
+    } else if quickLook
+        c.QuickLookPath.Value := c.Draft.General.QuickLookPath
+    else
+        c.QuickLookPath.Value := c.Draft.General.QuickLookPath
     c.QuickLookPath.Enabled := quickLook
     c.QuickLookBrowse.Enabled := quickLook
 }
@@ -1714,6 +1752,8 @@ LoadSelectedSourceToControls(c) {
         c.SourceOpenMode.Choose(s.OpenFileMode = OPEN_MODE_SINGLE ? 2
             : s.OpenFileMode = OPEN_MODE_DOUBLE ? 3 : 1)
         c.SourceFolderTime.Choose(s.FolderTimeMode = FOLDER_TIME_MODIFIED ? 1 : 2)
+        c.SourceMaxMode.Choose(s.MaxFilesPerFolderInherited ? 1
+            : s.MaxFilesPerFolder = 0 ? 3 : 2)
         c.SourceMax.Value := s.MaxFilesPerFolder
         c.SourceSort.Choose(s.SortMode = SORT_MODIFIED_DESC ? 1 : 2)
         c.SourceNoiseMode.Choose(s.NoiseFilterMode = NOISE_FILTER_ENABLED ? 2
@@ -1728,7 +1768,8 @@ LoadSelectedSourceToControls(c) {
 
 SetSourceControlsEnabled(c, enabled) {
     for ctrl in [c.SourceName, c.SourceType, c.SourcePath, c.SourceBrowse, c.SourceOpen,
-        c.SourceScope, c.SourceOpenMode, c.SourceFolderTime, c.SourceMax,
+        c.SourceScope, c.SourceOpenMode, c.SourceFolderTime,
+        c.SourceMaxMode, c.SourceMax,
         c.SourceSort, c.SourceNoiseMode, c.SourceNoiseRules,
         c.ManageExcluded, c.ManageAllowed]
         ctrl.Enabled := enabled
@@ -1757,6 +1798,8 @@ UpdateSourceControlState(c) {
     scope := c.SourceScope.Value
     c.SourceFolderTime.Enabled := scope = 2
     c.SourceFolderTimeHint.Enabled := scope = 2
+    maxMode := c.SourceMaxMode.Value
+    c.SourceMax.Enabled := maxMode = 2
     found := FindDraftSource(c)
     if IsObject(found)
         c.SourceStatus.Text := GetSourceDraftStatus(
@@ -1839,7 +1882,10 @@ CommitCurrentSourceControlsToDraft(c) {
     s.OpenFileMode := modes[Max(1, c.SourceOpenMode.Value)]
     s.FolderTimeMode := c.SourceFolderTime.Value = 2
         ? FOLDER_TIME_LATEST_CONTENT : FOLDER_TIME_MODIFIED
-    s.MaxFilesPerFolder := Trim(c.SourceMax.Value)
+    s.MaxFilesPerFolderInherited := c.SourceMaxMode.Value = 1
+    s.MaxFilesPerFolder := s.MaxFilesPerFolderInherited
+        ? c.Draft.General.MaxFilesPerFolder
+        : c.SourceMaxMode.Value = 3 ? 0 : Trim(c.SourceMax.Value)
     s.SortMode := c.SourceSort.Value = 2 ? SORT_NAME_ASC : SORT_MODIFIED_DESC
     noiseModes := [NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED]
     s.NoiseFilterMode := noiseModes[Max(1, c.SourceNoiseMode.Value)]
@@ -1901,6 +1947,7 @@ CreateDefaultSourceDraft(name, path, id, general) {
         DisplayScope: general.DefaultDisplayScope,
         FolderTimeMode: general.DefaultFolderTimeMode,
         MaxFilesPerFolder: general.MaxFilesPerFolder,
+        MaxFilesPerFolderInherited: true,
         SortMode: SORT_MODIFIED_DESC,
         Filter: {
             Mode: general.DefaultFilter.Mode,
@@ -1923,7 +1970,9 @@ SourceConfigEntries(source, workspaceId) {
         {Key: "Name", Value: source.Name},
         {Key: "Path", Value: source.Path},
         {Key: "Mode", Value: source.Mode},
-        {Key: "MaxFilesPerFolder", Value: source.MaxFilesPerFolder},
+        {Key: "MaxFilesPerFolder", Value:
+            source.MaxFilesPerFolderInherited
+                ? "Inherit" : source.MaxFilesPerFolder},
         {Key: "IncludeSubfolders",
             Value: source.DisplayScope = "RecursiveFiles" ? "1" : "0"},
         {Key: "DisplayScope", Value: source.DisplayScope},
@@ -2730,7 +2779,7 @@ OpenActionEditor(c, state, existing, *) {
     controls.VariableButtons := Map()
     tokens := ["{item}", "{items}", "{folder}", "{parent}",
         "{name}", "{stem}", "{ext}", "{date}", "{time}",
-        "{datetime}", "{index}", "{count}", "{size}"]
+        "{index}", "{count}", "{size}"]
     for index, token in tokens {
         column := Mod(index - 1, 3)
         row := Floor((index - 1) / 3)
@@ -2888,8 +2937,8 @@ BuildActionEditorPreview(app, action) {
     global ACTION_EXECUTION_BATCH
     executable := action.Executable != "" ? action.Executable : app.Path
     paths := [
-        "C:\示例 文件\压缩包 (1).tar.gz",
-        "C:\示例 文件\资料 & 文档.txt"
+        "C:\示例 图片\旅行照片 (1).jpg",
+        "C:\示例 图片\海报 & 插图.png"
     ]
     stamp := A_Now
     if action.ExecutionMode = ACTION_EXECUTION_BATCH {
@@ -3225,6 +3274,8 @@ SettingsDraftSignature(draft) {
             parts.Push("S", workspace.Id, s.SourceId, s.Name,
                 PathKey(s.Path), s.Mode, s.DisplayScope,
                 s.FolderTimeMode, s.MaxFilesPerFolder "",
+                HasProp(s, "MaxFilesPerFolderInherited")
+                    && s.MaxFilesPerFolderInherited ? "1" : "0",
                 s.SortMode, s.Filter.Mode,
                 JoinArray(s.Filter.Extensions, ","),
                 s.StripOrderPrefix "", s.HideExtensions "",
@@ -3445,7 +3496,9 @@ ValidateSettingsDraft(c) {
             errors.Push("来源“" s.Name "”的文件夹排序设置无效。")
         if !ValueInArray(s.SortMode, [SORT_MODIFIED_DESC, SORT_NAME_ASC])
             errors.Push("来源“" s.Name "”的排序设置无效。")
-        if !IsIntegerText(s.MaxFilesPerFolder, 0, 999999)
+        if !(HasProp(s, "MaxFilesPerFolderInherited")
+            && s.MaxFilesPerFolderInherited)
+            && !IsIntegerText(s.MaxFilesPerFolder, 0, 999999)
             errors.Push("来源“" s.Name "”的显示数量必须是非负整数。")
         for path in s.ExcludedPaths {
             if PathsEqual(path, s.Path)

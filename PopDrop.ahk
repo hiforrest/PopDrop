@@ -16,7 +16,7 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global APP_VERSION := "0.10.0"
-global CONFIG_VERSION := "22"
+global CONFIG_VERSION := "23"
 
 ; ──── 文件管理器适配器 ────
 global FILE_MANAGER_WINDOWS_SHELL := "WindowsShell"
@@ -152,6 +152,8 @@ global RecentFileCount := 12
 ; inner field must be shorter to produce the same outer height.
 global UI_SINGLE_LINE_HEIGHT := 26
 global UI_DROPDOWN_FIELD_HEIGHT := 22
+global PANEL_TOOLBAR_HEIGHT := 42
+global PANEL_FOOTER_HEIGHT := 42
 ; Physical-pixel correction applied to every DropDownList after creation.
 ; Positive values move it down; negative values move it up.
 global UI_DROPDOWN_Y_OFFSET_PX := 1
@@ -367,7 +369,11 @@ EnsureConfig() {
     defaultDesktop := GetKnownFolderPath(
         "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}")
     if defaultDesktop = ""
-        defaultDesktop := "%USERPROFILE%\Desktop"
+        defaultDesktop := A_Desktop
+    defaultDocuments := GetKnownFolderPath(
+        "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}")
+    if defaultDocuments = ""
+        defaultDocuments := A_MyDocuments
     defaultDownloads := GetKnownFolderPath(
         "{374DE290-123F-4565-9164-39C4925E467B}")
     if defaultDownloads = ""
@@ -500,7 +506,7 @@ EnsureConfig() {
     "[Source:source-documents]`n"
     "WorkspaceId=workspace-default`n"
     "Name=文档`n"
-    "Path=%USERPROFILE%\Documents`n"
+    "Path=" defaultDocuments "`n"
     "`n"
     "[Source:source-downloads]`n"
     "WorkspaceId=workspace-default`n"
@@ -794,6 +800,7 @@ NewStableId(prefix) {
 NormalizeConfigDocument(tempPath) {
     global CONFIG_VERSION
     doc := OpenPopDropConfig(tempPath)
+    EnsureKnownFolderDefaults(doc)
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
     EnsurePreviewConfigDefaults(doc)
@@ -805,12 +812,77 @@ NormalizeConfigDocument(tempPath) {
 ConfigLayoutNeedsNormalization() {
     global ConfigPath, CONFIG_VERSION
     doc := OpenPopDropConfig(ConfigPath)
+    EnsureKnownFolderDefaults(doc)
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
     EnsurePreviewConfigDefaults(doc)
     EnsureQuickPreviewConfigDefaults(doc)
     return doc.Dirty
         || doc.GetValue("General", "ConfigVersion", "") != CONFIG_VERSION
+}
+
+EnsureKnownFolderDefaults(doc) {
+    ; Only replace paths that exactly match PopDrop's historical defaults.
+    ; User-selected paths, including other folders under the profile, remain
+    ; untouched. This also repairs config.example.ini copies and old configs
+    ; created before redirected Known Folders were respected.
+    known := [
+        {
+            SourceId: "source-documents",
+            SourceName: "文档",
+            LegacyLeaf: "Documents",
+            Guid: "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}"
+        },
+        {
+            SourceId: "source-downloads",
+            SourceName: "下载",
+            LegacyLeaf: "Downloads",
+            Guid: "{374DE290-123F-4565-9164-39C4925E467B}"
+        }
+    ]
+    for item in known {
+        resolved := GetKnownFolderPath(item.Guid)
+        if resolved = ""
+            continue
+        section := "Source:" item.SourceId
+        raw := doc.GetValue(section, "Path", "")
+        name := Trim(doc.GetValue(section, "Name", ""))
+        if name = item.SourceName
+            && IsLegacyUserProfileDefault(raw, item.LegacyLeaf)
+            doc.SetValue(section, "Path", resolved, 3)
+
+        ; v0.8 and earlier stored the same defaults in [Folders].
+        legacyRaw := doc.GetValue("Folders", item.SourceName, "")
+        if IsLegacyUserProfileDefault(legacyRaw, item.LegacyLeaf)
+            doc.SetValue("Folders", item.SourceName, resolved, 2)
+    }
+
+    desktop := GetKnownFolderPath(
+        "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}")
+    downloads := GetKnownFolderPath(
+        "{374DE290-123F-4565-9164-39C4925E467B}")
+    if desktop != "" {
+        raw := doc.GetValue("TransferFavorites", "Path001", "")
+        if IsLegacyUserProfileDefault(raw, "Desktop")
+            doc.SetValue("TransferFavorites", "Path001", desktop, 5)
+    }
+    if downloads != "" {
+        raw := doc.GetValue("TransferFavorites", "Path002", "")
+        if IsLegacyUserProfileDefault(raw, "Downloads")
+            doc.SetValue("TransferFavorites", "Path002", downloads, 5)
+    }
+}
+
+IsLegacyUserProfileDefault(rawPath, leafName) {
+    rawPath := Trim(rawPath, " `t`r`n`"")
+    if rawPath = ""
+        return false
+    portable := "%USERPROFILE%\" leafName
+    if StrLower(StrReplace(rawPath, "/", "\")) = StrLower(portable)
+        return true
+    userProfile := EnvGet("USERPROFILE")
+    return userProfile != ""
+        && PathsEqual(rawPath, userProfile "\" leafName)
 }
 
 EnsureFileManagerConfigDefaults(doc) {
@@ -1483,6 +1555,7 @@ ValidateConfig() {
 
         ; 读取该文件夹的独立配置节
         folderMax := tempGlobalMaxFiles
+        folderMaxInherited := true
         folderRecursive := tempGlobalIncludeSubfolders
         folderDisplayScope := tempGlobalDisplayScope
         folderTimeMode := tempGlobalFolderTimeMode
@@ -1521,6 +1594,7 @@ ValidateConfig() {
                 folderRecursive := false
                 folderDisplayScope := SCOPE_FILES_ONLY
                 folderMax := 0  ; 0 = 无限
+                folderMaxInherited := false
                 folderSortMode := SORT_NAME_ASC
                 folderFilter := {Mode: "Include", Extensions: [".lnk", ".url", ".exe"]}
                 folderStripOrderPrefix := 1
@@ -1533,10 +1607,15 @@ ValidateConfig() {
                 val := Trim(IniRead(ConfigPath, sectionName, "MaxFilesPerFolder", ""))
                 if val != "" {
                     rawVal := val
-                    if StrLower(val) = "all" || val = "0" {
+                    if StrLower(val) = "inherit" {
+                        folderMax := tempGlobalMaxFiles
+                        folderMaxInherited := true
+                    } else if StrLower(val) = "all" || val = "0" {
                         folderMax := 0
+                        folderMaxInherited := false
                     } else {
                         folderMax := Integer(val)
+                        folderMaxInherited := false
                         if folderMax < 1
                             folderMax := 1
                     }
@@ -1698,6 +1777,7 @@ ValidateConfig() {
             DisplayScope: folderDisplayScope,
             FolderTimeMode: folderTimeMode,
             MaxFilesPerFolder: folderMax,
+            MaxFilesPerFolderInherited: folderMaxInherited,
             SortMode: folderSortMode,
             Filter: folderFilter,
             StripOrderPrefix: folderStripOrderPrefix,
@@ -3870,7 +3950,11 @@ CenterUiEditText(control) {
 
 DrawUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
     global UI_DROPDOWN_TEXT_Y_OFFSET_PX, UiDropDownTextItems
-    if !lParam || NumGet(lParam, 0, "uint") != 3 ; ODT_COMBOBOX
+    if !lParam
+        return
+    if NumGet(lParam, 0, "uint") = 5 ; ODT_STATIC
+        return DrawFooterTextItem(lParam)
+    if NumGet(lParam, 0, "uint") != 3 ; ODT_COMBOBOX
         return
 
     itemId := NumGet(lParam, 8, "uint")
@@ -3978,6 +4062,75 @@ DrawUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
     return 1
 }
 
+DrawFooterTextItem(drawItemPtr) {
+    global StatusText, TransferStatusText
+    handleOffset := A_PtrSize = 8 ? 24 : 20
+    controlHwnd := NumGet(drawItemPtr, handleOffset, "ptr")
+    if (!IsObject(StatusText) || controlHwnd != StatusText.Hwnd)
+        && (!IsObject(TransferStatusText)
+            || controlHwnd != TransferStatusText.Hwnd)
+        return
+    hdc := NumGet(drawItemPtr, handleOffset + A_PtrSize, "ptr")
+    if !hdc
+        return
+    rectOffset := handleOffset + A_PtrSize * 2
+    drawRect := Buffer(16, 0)
+    Loop 4
+        NumPut("int",
+            NumGet(drawItemPtr, rectOffset + (A_Index - 1) * 4, "int"),
+            drawRect, (A_Index - 1) * 4)
+
+    brush := DllCall("user32\GetSysColorBrush", "int", 15, "ptr")
+    DllCall("user32\FillRect", "ptr", hdc, "ptr", drawRect.Ptr,
+        "ptr", brush, "int")
+
+    textLength := DllCall("user32\GetWindowTextLengthW",
+        "ptr", controlHwnd, "int")
+    textBuffer := Buffer((Max(0, textLength) + 1) * 2, 0)
+    if textLength > 0
+        DllCall("user32\GetWindowTextW", "ptr", controlHwnd,
+            "ptr", textBuffer.Ptr, "int", textLength + 1, "int")
+    text := textLength > 0
+        ? StrGet(textBuffer.Ptr, textLength, "UTF-16") : ""
+
+    hFont := DllCall("user32\SendMessageW", "ptr", controlHwnd,
+        "uint", 0x0031, "ptr", 0, "ptr", 0, "ptr") ; WM_GETFONT
+    oldFont := hFont
+        ? DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", hFont, "ptr")
+        : 0
+    metrics := Buffer(64, 0)
+    lineHeight := DllCall("gdi32\GetTextMetricsW",
+        "ptr", hdc, "ptr", metrics.Ptr, "int")
+        ? Max(1, NumGet(metrics, 0, "int"))
+        : Max(1, Round(15 * A_ScreenDPI / 96))
+
+    top := NumGet(drawRect, 4, "int")
+    bottom := NumGet(drawRect, 12, "int")
+    bandHeight := Max(1, bottom - top)
+    twoLineHeight := Min(bandHeight, lineHeight * 2)
+    textTop := top + Floor((bandHeight - twoLineHeight) / 2)
+    NumPut("int", textTop, drawRect, 4)
+    NumPut("int", textTop + twoLineHeight, drawRect, 12)
+
+    oldTextColor := DllCall("gdi32\SetTextColor", "ptr", hdc,
+        "uint", DllCall("user32\GetSysColor", "int", 8, "uint"), "uint")
+    oldBkMode := DllCall("gdi32\SetBkMode", "ptr", hdc,
+        "int", 1, "int") ; TRANSPARENT
+    if IsObject(TransferStatusText)
+        && controlHwnd = TransferStatusText.Hwnd
+        flags := 0x0002 | 0x0020 | 0x0800 ; RIGHT|SINGLELINE|NOPREFIX
+    else
+        ; DT_EDITCONTROL prevents a partially visible third line.
+        flags := 0x0010 | 0x2000 | 0x0800 ; WORDBREAK|EDITCONTROL|NOPREFIX
+    DllCall("user32\DrawTextW", "ptr", hdc, "wstr", text, "int", -1,
+        "ptr", drawRect.Ptr, "uint", flags, "int")
+    DllCall("gdi32\SetBkMode", "ptr", hdc, "int", oldBkMode)
+    DllCall("gdi32\SetTextColor", "ptr", hdc, "uint", oldTextColor)
+    if oldFont
+        DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", oldFont, "ptr")
+    return 1
+}
+
 MeasureUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
     global UI_DROPDOWN_FIELD_HEIGHT
     if !lParam || NumGet(lParam, 0, "uint") != 3 ; ODT_COMBOBOX
@@ -4011,7 +4164,9 @@ BuildPanel() {
 
     Panel := Gui("+Resize +MinSize760x380", "PopDrop v" APP_VERSION)
     Panel.MarginX := 12
-    Panel.MarginY := 10
+    ; The toolbar is a fixed 42-DIP band. Keep the tuned control row one DIP
+    ; below the previous centered position, without changing the list boundary.
+    Panel.MarginY := 7
     Panel.SetFont("s9", "Microsoft YaHei UI")
 
     workspaceLabel := Panel.AddText("xm ym+6 w52 h22 +0x200", "工作区：")
@@ -4040,17 +4195,17 @@ BuildPanel() {
     ; Pre-create the compact folder-only drop surface. It occupies the same
     ; toolbar band and never changes the ListView geometry.
     FolderDropAddSourceButton := Panel.AddButton(
-        "x12 y10 w510 h36 Hidden -Tabstop +0x2000",
+        "x12 y4 w510 h36 Hidden -Tabstop +0x2000",
         "＋ 添加为来源`n当前工作区")
     FolderDropPinnedButton := Panel.AddButton(
-        "x530 y10 w224 h36 Hidden -Tabstop +0x2000",
+        "x530 y4 w224 h36 Hidden -Tabstop +0x2000",
         "☆ 加入固定项`n不会移动文件夹")
     FolderDropAddSourceButton.Visible := false
     FolderDropPinnedButton.Visible := false
 
     ; Multi-select is the native ListView default. In icon view this enables
     ; Ctrl-click, Shift range selection and marquee selection on blank space.
-    FileView := Panel.AddListView("xm y50 w716 h468 Icon +0x100", ["文件", "修改时间"])
+    FileView := Panel.AddListView("xm y42 w716 h492 Icon +0x100", ["文件", "修改时间"])
     FileView.OnEvent("Click", FileViewClick)
     FileView.OnEvent("DoubleClick", OpenFileViewItem)
     FileView.OnEvent("ContextMenu", FileViewContextMenu)
@@ -4060,18 +4215,18 @@ BuildPanel() {
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1036,
         "ptr", 0x410000, "ptr", 0x410000, "ptr")
     
-    RecentLabel := Panel.AddText("x740 y50 w220 h22 +0x200", "最近打开")
+    RecentLabel := Panel.AddText("x740 y42 w220 h22 +0x200", "最近打开")
     RecentLabel.SetFont("s10 Bold")
-    RecentView := Panel.AddListView("x740 y76 w220 h442 Report -Hdr -Multi", ["文件"])
+    RecentView := Panel.AddListView("x740 y68 w220 h466 Report -Hdr -Multi", ["文件"])
     RecentView.OnEvent("Click", FileViewClick)
     RecentView.OnEvent("DoubleClick", OpenRecentItem)
     RecentView.OnEvent("ContextMenu", RecentContextMenu)
     RecentView.OnEvent("ItemSelect", RecentItemSelect)
 
-    StatusText := Panel.AddText("xm y+6 w500 h22 +0x200 +0x100", "就绪")
+    StatusText := Panel.AddText("xm y+0 w500 h42 +0xD +0x100", "就绪")
     StatusText.OnEvent("Click", HandleStatusAction)
     TransferStatusText := Panel.AddText(
-        "x+8 yp w208 h22 Right +0x200 +0x100", "↓ 下载")
+        "x+8 yp w208 h42 +0xD +0x100", "↓ 下载")
     TransferStatusText.OnEvent("Click", OpenTransferCenter)
     Panel.OnEvent("Close", HandlePanelClose)
     Panel.OnEvent("Escape", HandlePanelEscape)
@@ -4440,32 +4595,44 @@ HandlePanelEscape(*) {
 ResizePanel(guiObj, minMax, width, height) {
     global FileView, RecentLabel, RecentView, StatusText, TransferStatusText
     global ShowRecentSidebar, PanelLayoutWidth
+    global PANEL_TOOLBAR_HEIGHT, PANEL_FOOTER_HEIGHT
     if minMax = -1
         return
     PreviewSuppress("resize", true)
     PanelLayoutWidth := width
     ResizeFolderDropControls(width)
-    contentHeight := Max(160, height - 92)
+    ; Reserve exactly 42 DIPs at each edge. The list owns every DIP between
+    ; those bands, which keeps the file-manager content area as large as
+    ; possible without making either control band feel cramped.
+    contentHeight := Max(160,
+        height - PANEL_TOOLBAR_HEIGHT - PANEL_FOOTER_HEIGHT)
     if ShowRecentSidebar {
         sidebarWidth := Min(280, Max(190, Floor(width * 0.28)))
         mainWidth := Max(280, width - sidebarWidth - 36)
         sidebarX := 24 + mainWidth
-        FileView.Move(12, 50, mainWidth, contentHeight)
-        RecentLabel.Move(sidebarX, 50, sidebarWidth, 22)
-        RecentView.Move(sidebarX, 76, sidebarWidth, Max(154, contentHeight - 26))
+        FileView.Move(12, PANEL_TOOLBAR_HEIGHT, mainWidth, contentHeight)
+        RecentLabel.Move(sidebarX, PANEL_TOOLBAR_HEIGHT, sidebarWidth, 22)
+        RecentView.Move(sidebarX, PANEL_TOOLBAR_HEIGHT + 26,
+            sidebarWidth, Max(154, contentHeight - 26))
         RecentView.ModifyCol(1, Max(120, sidebarWidth - 8))
         RecentLabel.Visible := true
         RecentView.Visible := true
     } else {
-        FileView.Move(12, 50, Max(200, width - 24), contentHeight)
+        FileView.Move(12, PANEL_TOOLBAR_HEIGHT,
+            Max(200, width - 24), contentHeight)
         RecentLabel.Visible := false
         RecentView.Visible := false
     }
-    transferWidth := Min(360, Max(150, Floor(width * 0.38)))
+    ; Keep the transfer affordance compact so long selected paths get most of
+    ; the footer. Both controls occupy the same 42-DIP band and start at the
+    ; same Y coordinate. Their shared owner-draw path centers a two-line text
+    ; block and uses DT_EDITCONTROL to suppress a partially visible third line.
+    transferWidth := Min(220, Max(140, Floor(width * 0.22)))
     statusWidth := Max(100, width - transferWidth - 32)
-    StatusText.Move(12, height - 27, statusWidth, 22)
-    TransferStatusText.Move(20 + statusWidth, height - 27,
-        transferWidth, 22)
+    footerTop := height - PANEL_FOOTER_HEIGHT
+    StatusText.Move(12, footerTop, statusWidth, PANEL_FOOTER_HEIGHT)
+    TransferStatusText.Move(20 + statusWidth, footerTop,
+        transferWidth, PANEL_FOOTER_HEIGHT)
 }
 
 ResizeFolderDropControls(width) {
@@ -4476,9 +4643,9 @@ ResizeFolderDropControls(width) {
     available := Max(300, width - 24 - gap)
     primaryWidth := Floor(available * 0.7)
     secondaryWidth := available - primaryWidth
-    FolderDropAddSourceButton.Move(12, 10, primaryWidth, 36)
+    FolderDropAddSourceButton.Move(12, 4, primaryWidth, 36)
     FolderDropPinnedButton.Move(
-        12 + primaryWidth + gap, 10, secondaryWidth, 36)
+        12 + primaryWidth + gap, 4, secondaryWidth, 36)
 }
 
 ShowFolderDropMode() {

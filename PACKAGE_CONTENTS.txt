@@ -13,3 +13,7 @@ powershell -ExecutionPolicy Bypass -File .\native\build.ps1
 powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
 
 The source archive intentionally does not contain pdfium.dll.
+
+This revision also includes the QuickLook menu, action editor, long-path footer,
+source inheritance, and Seer settings fixes plus their cross-platform contract
+test.
