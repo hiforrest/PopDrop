@@ -16,7 +16,7 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global APP_VERSION := "0.10.0"
-global CONFIG_VERSION := "20"
+global CONFIG_VERSION := "22"
 
 ; ──── 文件管理器适配器 ────
 global FILE_MANAGER_WINDOWS_SHELL := "WindowsShell"
@@ -111,8 +111,8 @@ global Panel := 0
 global FileView := 0
 global RecentLabel := 0
 global RecentView := 0
-global ViewButton := 0
-global RecentButton := 0
+global DisplayButton := 0
+global DisplayMenu := 0
 global WindowModeButton := 0
 global PinnedDropButton := 0
 global ToolbarControls := []
@@ -262,6 +262,7 @@ global EscapeHidesPanel := true
 #Include SettingsGui.ahk
 #Include ExternalDrop.ahk
 #Include Preview.ahk
+#Include QuickPreview.ahk
 
 ; ──── 单击激活手势和重复激活抑制 ────
 global FilePointerGesture := 0
@@ -298,6 +299,7 @@ InitDropTarget()
 InitFileOperationProgressSink()
 InitExternalDrop()
 InstallPanelHotkeys()
+OnMessage(0x004A, QuickPreviewCopyData) ; WM_COPYDATA (Seer)
 OnMessage(0x0201, FileViewLeftButtonDown) ; WM_LBUTTONDOWN
 OnMessage(0x0200, FileViewMouseMove)      ; WM_MOUSEMOVE
 OnMessage(0x0202, FileViewLeftButtonUp)   ; WM_LBUTTONUP
@@ -403,27 +405,6 @@ EnsureConfig() {
     "RecentFileCount=12`n"
     "CachePath=`n"
     "ThumbnailPolicy=Full`n"
-    "`n"
-    "[Preview]`n"
-    "; <PopDrop:PreviewHelp>`n"
-    "; 文件内容预览。高级限制仅建议在排查兼容性问题时修改。`n"
-    "Enabled=1`n"
-    "Side=Auto`n"
-    "HoverDelayMs=350`n"
-    "SwitchDelayMs=120`n"
-    "LeaveGraceMs=140`n"
-    "KeyboardDelayMs=250`n"
-    "Width=320`n"
-    "CacheEnabled=1`n"
-    "CacheStartAfterHiddenSeconds=10`n"
-    "CacheMaxMB=256`n"
-    "CacheMaxItems=1000`n"
-    "CacheItemMaxKB=2048`n"
-    "CacheUnreferencedDays=7`n"
-    "DirectImageMaxFileMB=64`n"
-    "DirectImageMaxEdge=65535`n"
-    "DirectImageMaxPixelsMP=160`n"
-    "DirectImageMaxExpandedMB=256`n"
     "; 窗口模式：always_on_top（默认）| temporary（失焦自动隐藏）| normal（普通窗口）`n"
     "WindowMode=temporary`n"
     "; ModifiedDesc（默认，从新到旧）| NameAsc（文件名自然升序）`n"
@@ -435,6 +416,36 @@ EnsureConfig() {
     "LastTransferTargetDir=`n"
     "TransferFavoritesInitialized=1`n"
     "GlobalExcludedNamesInitialized=1`n"
+    "`n"
+    "[Preview]`n"
+    "; <PopDrop:PreviewHelp>`n"
+    "; 文件内容预览。高级限制仅建议在排查兼容性问题时修改。`n"
+    "Enabled=1`n"
+    "Side=Auto`n"
+    "HoverDelayMs=350`n"
+    "SwitchDelayMs=120`n"
+    "LeaveGraceMs=140`n"
+    "KeyboardDelayMs=250`n"
+    "Width=400`n"
+    "CacheEnabled=1`n"
+    "CacheStartAfterHiddenSeconds=10`n"
+    "CacheMaxMB=256`n"
+    "CacheMaxItems=1000`n"
+    "CacheItemMaxKB=2048`n"
+    "CacheUnreferencedDays=7`n"
+    "DirectImageMaxFileMB=64`n"
+    "DirectImageMaxEdge=65535`n"
+    "DirectImageMaxPixelsMP=160`n"
+    "DirectImageMaxExpandedMB=256`n"
+    "DocumentEnabled=1`n"
+    "PdfEnabled=0`n"
+    "`n"
+    "[QuickPreview]`n"
+    "; 可选外部空格键预览；默认关闭，不自动安装或探测 Store 应用。`n"
+    "; Off | Seer | QuickLook`n"
+    "ExternalQuickPreviewProvider=Off`n"
+    "SeerIntegrationEnabled=0`n"
+    "QuickLookPath=`n"
     "`n"
     "[NoiseFilter]`n"
     "; <PopDrop:NoiseFilterHelp>`n"
@@ -786,6 +797,7 @@ NormalizeConfigDocument(tempPath) {
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
     EnsurePreviewConfigDefaults(doc)
+    EnsureQuickPreviewConfigDefaults(doc)
     doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
     doc.Save()
 }
@@ -796,6 +808,7 @@ ConfigLayoutNeedsNormalization() {
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
     EnsurePreviewConfigDefaults(doc)
+    EnsureQuickPreviewConfigDefaults(doc)
     return doc.Dirty
         || doc.GetValue("General", "ConfigVersion", "") != CONFIG_VERSION
 }
@@ -822,7 +835,7 @@ EnsurePreviewConfigDefaults(doc) {
         {Key: "SwitchDelayMs", Value: "120"},
         {Key: "LeaveGraceMs", Value: "140"},
         {Key: "KeyboardDelayMs", Value: "250"},
-        {Key: "Width", Value: "320"},
+        {Key: "Width", Value: "400"},
         {Key: "CacheEnabled", Value: "1"},
         {Key: "CacheStartAfterHiddenSeconds", Value: "10"},
         {Key: "CacheMaxMB", Value: "256"},
@@ -832,11 +845,29 @@ EnsurePreviewConfigDefaults(doc) {
         {Key: "DirectImageMaxFileMB", Value: "64"},
         {Key: "DirectImageMaxEdge", Value: "65535"},
         {Key: "DirectImageMaxPixelsMP", Value: "160"},
-        {Key: "DirectImageMaxExpandedMB", Value: "256"}
+        {Key: "DirectImageMaxExpandedMB", Value: "256"},
+        {Key: "DocumentEnabled", Value: "1"},
+        {Key: "PdfEnabled", Value: "0"}
     ]
     for entry in defaults {
         if !IsObject(GetDocumentEntry(doc, "Preview", entry.Key))
             doc.SetValue("Preview", entry.Key, entry.Value, 1)
+    }
+}
+
+EnsureQuickPreviewConfigDefaults(doc) {
+    doc.EnsureCommentBlock("QuickPreview", "; <PopDrop:QuickPreviewHelp>", [
+        "; 可选外部空格键预览。默认关闭，不自动安装外部程序。",
+        "; QuickLookPath 只接受桌面版或便携版 QuickLook.exe 的绝对路径。"
+    ], 1)
+    defaults := [
+        {Key: "ExternalQuickPreviewProvider", Value: "Off"},
+        {Key: "SeerIntegrationEnabled", Value: "0"},
+        {Key: "QuickLookPath", Value: ""}
+    ]
+    for entry in defaults {
+        if !IsObject(GetDocumentEntry(doc, "QuickPreview", entry.Key))
+            doc.SetValue("QuickPreview", entry.Key, entry.Value, 1)
     }
 }
 
@@ -883,7 +914,7 @@ LoadSettings(*) {
     global ThumbnailTextLines
     global FolderSettings, PinnedPaths, Workspaces
     global ActiveWorkspaceId, ActiveWorkspaceName, LastValidWorkspaceId
-    global WindowWidth, WindowHeight, ViewMode, ShowRecentSidebar, RecentFileCount
+    global WindowWidth, WindowHeight, RecentFileCount
     global ThumbnailPolicy, CachePathSetting, CacheDir, CacheFilePath, CacheWritable
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
     global ConfigErrors, LastValidFolderSettings
@@ -901,18 +932,9 @@ LoadSettings(*) {
     global FileManagerProvider, FileManagerExecutable
     global FILE_MANAGER_WINDOWS_SHELL
     global GlobalNoiseFilter, NOISE_FILTER_INHERIT
-    global PreviewEnabled, PreviewSide, PreviewCacheEnabled, PreviewSession
-
     settingErrors := []
-    oldPreviewEnabled := PreviewEnabled
-    oldPreviewSide := PreviewSide
-    oldPreviewCacheEnabled := PreviewCacheEnabled
     LoadPreviewSettings(settingErrors)
-    if IsObject(PreviewSession)
-        && (oldPreviewEnabled != PreviewEnabled
-            || oldPreviewSide != PreviewSide
-            || oldPreviewCacheEnabled != PreviewCacheEnabled)
-        PreviewSettingsChanged()
+    LoadQuickPreviewSettings(settingErrors)
 
     ConfiguredHotkey := Trim(IniRead(ConfigPath, "General", "Hotkey", "F2"))
     if ConfiguredHotkey = ""
@@ -983,8 +1005,10 @@ LoadSettings(*) {
     WindowHeight := Max(380, Min(WindowHeight, 2000))
 
     configuredView := StrLower(Trim(IniRead(ConfigPath, "General", "ViewMode", "Thumbnail")))
-    ViewMode := configuredView = "list" ? "List" : "Thumbnail"
-    ShowRecentSidebar := IniRead(ConfigPath, "General", "ShowRecentSidebar", "0") = "1"
+    SetViewMode(configuredView = "list" ? "List" : "Thumbnail", false)
+    SetRecentSidebarVisible(
+        IniRead(ConfigPath, "General", "ShowRecentSidebar", "0") = "1",
+        false)
     try RecentFileCount := Integer(IniRead(ConfigPath, "General", "RecentFileCount", "12"))
     catch
         RecentFileCount := 12
@@ -3980,7 +4004,7 @@ OffsetGuiControlYPhysical(control, offsetPx) {
 
 BuildPanel() {
     global Panel, FileView, RecentLabel, RecentView
-    global ViewButton, RecentButton, WindowModeButton, PinnedDropButton, StatusText
+    global DisplayButton, WindowModeButton, PinnedDropButton, StatusText
     global TransferStatusText
     global APP_VERSION, WorkspaceSelector
     global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
@@ -4000,10 +4024,9 @@ BuildPanel() {
     PinnedDropButton.OnEvent("Click", AddPinnedFiles)
     removePinnedButton := AddUiButton(Panel, "x+4 yp w70", "－固定项")
     removePinnedButton.OnEvent("Click", RemovePinnedFile)
-    ViewButton := AddUiButton(Panel, "x+4 yp w82", "视图")
-    ViewButton.OnEvent("Click", ToggleViewMode)
-    RecentButton := AddUiButton(Panel, "x+4 yp w74", "近期栏")
-    RecentButton.OnEvent("Click", ToggleRecentSidebar)
+    DisplayButton := AddUiButton(Panel, "x+4 yp w72", "显示 ▾")
+    DisplayButton.OnEvent("Click", ShowDisplayMenu)
+    BuildDisplayMenu()
     settingsButton := AddUiButton(Panel, "x+4 yp w52", "设置")
     settingsButton.OnEvent("Click", OpenConfig)
     WindowModeButton := AddUiButton(Panel, "x+4 yp w72", "置顶：关")
@@ -4011,7 +4034,7 @@ BuildPanel() {
     closeButton := AddUiButton(Panel, "x+4 yp w48", "关闭")
     closeButton.OnEvent("Click", HidePanel)
     ToolbarControls := [workspaceLabel, WorkspaceSelector, refreshButton,
-        PinnedDropButton, removePinnedButton, ViewButton, RecentButton,
+        PinnedDropButton, removePinnedButton, DisplayButton,
         settingsButton, WindowModeButton, closeButton]
 
     ; Pre-create the compact folder-only drop surface. It occupies the same
@@ -4055,7 +4078,7 @@ BuildPanel() {
     Panel.OnEvent("Size", ResizePanel)
     ; OLE IDropTarget is registered after the panel is built. Do not also
     ; enable WM_DROPFILES: one physical drop must have exactly one owner.
-    UpdateViewButtons()
+    UpdateWindowModeButton()
     SyncWorkspaceControls()
 }
 
@@ -4184,7 +4207,7 @@ CancelAutoHideCheck() {
 
 TryAutoHidePanel() {
     global Panel, PanelVisible, WindowMode, AutoHidePauseDepth
-    global WINDOW_MODE_TEMPORARY
+    global WINDOW_MODE_TEMPORARY, QuickViewActive
 
     if WindowMode != WINDOW_MODE_TEMPORARY
         return
@@ -4193,6 +4216,8 @@ TryAutoHidePanel() {
         return
 
     if AutoHidePauseDepth > 0
+        return
+    if QuickViewActive
         return
 
     ; 焦点已经回到主面板
@@ -4353,7 +4378,7 @@ ShowAndRefresh(*) {
     SetTimer(UpdateSelectionStatus, 0)
     StatusKind := "default"
     StatusText.Text := "正在加载…"
-    UpdateViewButtons()
+    UpdateWindowModeButton()
     StartBackgroundScan()
 }
 
@@ -4390,6 +4415,7 @@ HidePanel(*) {
         return
     }
     CancelFilePointerGesture()
+    CloseExternalQuickPreview()
     PreviewPanelHidden()
     CancelAutoHideCheck()
     ResetActiveDropSession(true)
@@ -4404,6 +4430,8 @@ HandlePanelClose(*) {
 
 HandlePanelEscape(*) {
     global EscapeHidesPanel
+    if CloseExternalQuickPreview()
+        return true
     if EscapeHidesPanel
         HidePanel()
     return true
@@ -4500,25 +4528,168 @@ RequestNativeLayout() {
         "uptr", 0, "uptr", packedSize) ; WM_SIZE
 }
 
-ToggleViewMode(*) {
-    global ViewMode
-    PreviewSuppress("view", true)
-    ViewMode := ViewMode = "Thumbnail" ? "List" : "Thumbnail"
-    AtomicConfigSetValue("General", "ViewMode", ViewMode)
-    ApplyViewMode()
-    UpdateViewButtons()
+BuildDisplayMenu() {
+    global DisplayMenu
+    DisplayMenu := Menu()
+    DisplayMenu.Add("缩略图", SetDisplayViewFromMenu.Bind("Thumbnail"), "Radio")
+    DisplayMenu.Add("列表", SetDisplayViewFromMenu.Bind("List"), "Radio")
+    DisplayMenu.Add()
+    DisplayMenu.Add("文件预览", ToggleFilePreviewFromMenu)
+    DisplayMenu.Add("近期栏", ToggleRecentSidebarFromMenu)
 }
 
-ToggleRecentSidebar(*) {
+SetMenuChecked(menuObj, itemName, isChecked) {
+    if isChecked
+        menuObj.Check(itemName)
+    else
+        menuObj.Uncheck(itemName)
+}
+
+SyncDisplayMenuState() {
+    global DisplayMenu, ViewMode, PreviewEnabled, ShowRecentSidebar
+    if !IsObject(DisplayMenu)
+        return
+    SetMenuChecked(DisplayMenu, "缩略图", ViewMode = "Thumbnail")
+    SetMenuChecked(DisplayMenu, "列表", ViewMode = "List")
+    SetMenuChecked(DisplayMenu, "文件预览", PreviewEnabled)
+    SetMenuChecked(DisplayMenu, "近期栏", ShowRecentSidebar)
+}
+
+ShowDisplayMenu(*) {
+    global DisplayButton, DisplayMenu
+    if !IsObject(DisplayButton) || !IsObject(DisplayMenu)
+        return
+
+    SyncDisplayMenuState()
+    buttonRect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", DisplayButton.Hwnd,
+        "ptr", buttonRect.Ptr)
+        return
+    menuX := NumGet(buttonRect, 0, "int")
+    menuY := NumGet(buttonRect, 12, "int")
+    previousMenuCoordMode := A_CoordModeMenu
+    BeginAutoHidePause()
+    PreviewSuppress("display-menu", false)
+    try {
+        ; GetWindowRect and Menu Screen coordinates are both physical screen
+        ; pixels in this per-monitor-DPI-aware process. Using client values
+        ; here would make AutoHotkey scale the horizontal offset a second time.
+        CoordMode("Menu", "Screen")
+        ; Native menus automatically keep themselves inside the active
+        ; monitor's work area, including negative-coordinate monitors.
+        DisplayMenu.Show(menuX, menuY)
+    } catch as err {
+        ShowPanelMsgBox(
+            "无法打开显示菜单：`n" err.Message,
+            "显示菜单",
+            "Iconx"
+        )
+    } finally {
+        CoordMode("Menu", previousMenuCoordMode)
+        PreviewRecoverAfterInteraction()
+        EndAutoHidePause()
+    }
+}
+
+SetDisplayViewFromMenu(mode, *) {
+    try SetViewMode(mode)
+    catch as err
+        ShowPanelMsgBox("无法切换视图：`n" err.Message, "显示菜单", "Iconx")
+}
+
+ToggleFilePreviewFromMenu(*) {
+    global PreviewEnabled
+    try SetFilePreviewEnabled(!PreviewEnabled)
+    catch as err
+        ShowPanelMsgBox("无法切换文件预览：`n" err.Message, "显示菜单", "Iconx")
+}
+
+ToggleRecentSidebarFromMenu(*) {
     global ShowRecentSidebar
-    PreviewSuppress("recent", true)
-    ShowRecentSidebar := !ShowRecentSidebar
-    AtomicConfigSetValue("General", "ShowRecentSidebar",
-        ShowRecentSidebar ? "1" : "0")
-    if ShowRecentSidebar
-        PopulateRecentSidebar()
-    UpdateViewButtons()
-    RequestNativeLayout()
+    try SetRecentSidebarVisible(!ShowRecentSidebar)
+    catch as err
+        ShowPanelMsgBox("无法切换近期栏：`n" err.Message, "显示菜单", "Iconx")
+}
+
+SetViewMode(mode, persist := true) {
+    global ViewMode, FileView
+    normalized := StrLower(Trim(mode)) = "list" ? "List" : "Thumbnail"
+    if normalized = ViewMode
+        return false
+
+    previous := ViewMode
+    if persist
+        AtomicConfigSetValue("General", "ViewMode", normalized)
+    try {
+        PreviewSuppress("view", true)
+        ViewMode := normalized
+        if IsObject(FileView)
+            ApplyViewMode()
+    } catch {
+        ViewMode := previous
+        if persist
+            try AtomicConfigSetValue("General", "ViewMode", previous)
+        if IsObject(FileView)
+            try ApplyViewMode()
+        throw
+    }
+    return true
+}
+
+SetFilePreviewEnabled(enabled, persist := true) {
+    global PreviewEnabled
+    enabled := !!enabled
+    if enabled = PreviewEnabled
+        return false
+
+    previous := PreviewEnabled
+    if persist
+        AtomicConfigSetValue("Preview", "Enabled", enabled ? "1" : "0")
+    try {
+        PreviewEnabled := enabled
+        ; This is the existing central shutdown/restart path. Disabling
+        ; invalidates the generation, cancels pending work and hides the GUI.
+        PreviewSettingsChanged()
+    } catch {
+        PreviewEnabled := previous
+        if persist
+            try AtomicConfigSetValue("Preview", "Enabled", previous ? "1" : "0")
+        try PreviewSettingsChanged()
+        throw
+    }
+    try SyncSettingsDisplayStateFromRuntime()
+    return true
+}
+
+SetRecentSidebarVisible(enabled, persist := true) {
+    global ShowRecentSidebar, RecentView, Panel
+    enabled := !!enabled
+    if enabled = ShowRecentSidebar
+        return false
+
+    previous := ShowRecentSidebar
+    if persist
+        AtomicConfigSetValue("General", "ShowRecentSidebar", enabled ? "1" : "0")
+    try {
+        PreviewSuppress("recent", true)
+        ShowRecentSidebar := enabled
+        if enabled && IsObject(RecentView)
+            PopulateRecentSidebar()
+        if IsObject(Panel)
+            RequestNativeLayout()
+    } catch {
+        ShowRecentSidebar := previous
+        if persist
+            try AtomicConfigSetValue("General", "ShowRecentSidebar",
+                previous ? "1" : "0")
+        if previous && IsObject(RecentView)
+            try PopulateRecentSidebar()
+        if IsObject(Panel)
+            try RequestNativeLayout()
+        throw
+    }
+    try SyncSettingsDisplayStateFromRuntime()
+    return true
 }
 
 ToggleWindowMode(*) {
@@ -4542,16 +4713,12 @@ ToggleWindowMode(*) {
     }
 
     ApplyWindowMode()
-    UpdateViewButtons()
+    UpdateWindowModeButton()
 }
 
-UpdateViewButtons() {
-    global ViewButton, RecentButton, WindowModeButton
-    global ViewMode, ShowRecentSidebar, WindowMode, WINDOW_MODE_ALWAYS_ON_TOP
-    if IsObject(ViewButton)
-        ViewButton.Text := ViewMode = "Thumbnail" ? "缩略图：开" : "缩略图：关"
-    if IsObject(RecentButton)
-        RecentButton.Text := ShowRecentSidebar ? "近期栏：开" : "近期栏：关"
+UpdateWindowModeButton() {
+    global WindowModeButton
+    global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP
     if IsObject(WindowModeButton)
         WindowModeButton.Text := WindowMode = WINDOW_MODE_ALWAYS_ON_TOP
             ? "置顶：开"
@@ -6102,6 +6269,7 @@ IsListItemFolder(list, row, path := "") {
 }
 
 OpenItemWithDefaultApplication(path) {
+    CloseExternalQuickPreview()
     if DirExist(path) {
         OpenFolderInFileManager(path)
         return
@@ -6128,6 +6296,13 @@ InstallPanelHotkeys() {
     Hotkey("^Enter", PanelRevealSelection)
     Hotkey("^c", PanelCopyFileObjects)
     Hotkey("^+c", PanelCopyPaths)
+    HotIf(IsPanelQuickPreviewAvailable)
+    Hotkey("Space", ToggleExternalQuickPreview)
+    HotIf(IsPanelQuickPreviewActive)
+    Hotkey("Esc", QuickPreviewEscape)
+    HotIf(IsExternalQuickPreviewFocused)
+    Hotkey("Space", ToggleExternalQuickPreview)
+    Hotkey("Esc", QuickPreviewEscape)
     HotIf()
 }
 
@@ -6285,6 +6460,7 @@ RecentItemSelect(list, row, selected) {
     if selected && RecentItemPaths.Has(row) {
         StatusKind := "user"
         StatusText.Text := RecentItemPaths[row]
+        QuickPreviewScheduleUpdate()
     }
 }
 
@@ -6321,6 +6497,7 @@ FileViewItemSelect(list, row, selected) {
     ; A range or marquee selection emits several ItemSelect events. Defer the
     ; summary until the control has finished updating the full selection.
     SetTimer(UpdateSelectionStatus, -1)
+    QuickPreviewScheduleUpdate()
 }
 
 UpdateSelectionStatus() {
@@ -12615,6 +12792,7 @@ Cleanup(*) {
     global OpenAppActionSerialTasks
     global SourceRemovalDialog
     SetTimer(PollWorkerResult, 0)
+    CleanupQuickPreview()
     CleanupPreview()
     for taskId, task in OpenAppActionSerialTasks {
         try SetTimer(task.PollCallback, 0)

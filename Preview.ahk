@@ -3,7 +3,7 @@
 ; bounded shared-memory copies and GDI presentation. Shell, WIC, file
 ; identity, hashing and cache I/O live in PopDropPreview.exe.
 
-global PREVIEW_PROTOCOL_VERSION := 4
+global PREVIEW_PROTOCOL_VERSION := 5
 global PREVIEW_MAP_BYTES := 4268288
 global PREVIEW_PATH_OFFSET := 256
 global PREVIEW_PATH_CHARS := 32768
@@ -18,7 +18,7 @@ global PreviewHoverDelayMs := 350
 global PreviewSwitchDelayMs := 120
 global PreviewLeaveGraceMs := 140
 global PreviewKeyboardDelayMs := 250
-global PreviewWidthDip := 320
+global PreviewWidthDip := 400
 global PreviewCacheEnabled := true
 global PreviewCacheStartAfterHiddenSeconds := 10
 global PreviewCacheMaxMB := 256
@@ -29,6 +29,12 @@ global PreviewDirectImageMaxFileMB := 64
 global PreviewDirectImageMaxEdge := 65535
 global PreviewDirectImageMaxPixelsMP := 160
 global PreviewDirectImageMaxExpandedMB := 256
+global PreviewDocumentEnabled := true
+global PreviewPdfEnabled := false
+global PreviewDocumentStatusDelayMs := 120
+global PreviewDocumentLongStatusMs := 5000
+global PreviewDocumentHardTimeoutMs := 12000
+global PreviewDocumentThemeVersion := 1
 
 global PreviewGeneration := 0
 global PreviewListInstance := 0
@@ -39,11 +45,11 @@ global PreviewSession := {
     State: "Hidden", Path: "", Hwnd: 0, Row: 0,
     Generation: 0, ListInstance: 0, PanelSession: 0,
     RequestId: 0, RequestStarted: 0, VisiblePath: "",
-    Side: "", Suppression: "", CacheCommand: false
+    Side: "", Suppression: "", CacheCommand: false,
+    DocumentGeneration: false, StatusKind: "", StatusFrame: 0
 }
 global PreviewNegativeCache := Map()
 global PreviewHoverCacheQueue := []
-global PreviewVisibleCacheQueue := []
 global PreviewCacheCompletedThisHiddenSession := 0
 global PreviewCacheSucceededThisHiddenSession := 0
 global PreviewCacheFailedThisHiddenSession := 0
@@ -66,6 +72,52 @@ global PreviewCanvasBitmap := 0
 global PreviewCanvasOldBitmap := 0
 global PreviewCanvasWidth := 0
 global PreviewCanvasHeight := 0
+global PreviewStatusRect := 0
+
+PreviewDocumentExtensions() {
+    static extensions := Map(
+        "md", "markdown", "markdown", "markdown",
+        "txt", "text", "log", "text", "ini", "text", "cfg", "text",
+        "conf", "text", "json", "code", "jsonc", "code",
+        "yaml", "code", "yml", "code", "xml", "code", "ahk", "code",
+        "c", "code", "cc", "code", "cpp", "code", "cxx", "code",
+        "h", "code", "hh", "code", "hpp", "code", "cs", "code",
+        "java", "code", "kt", "code", "kts", "code", "go", "code",
+        "rs", "code", "swift", "code", "py", "code", "pyw", "code",
+        "js", "code", "jsx", "code", "ts", "code", "tsx", "code",
+        "html", "code", "htm", "code", "css", "code", "scss", "code",
+        "less", "code", "sql", "code", "ps1", "code", "psm1", "code",
+        "bat", "code", "cmd", "code", "sh", "code", "zsh", "code",
+        "toml", "code", "properties", "code", "gradle", "code",
+        "cmake", "code", "dockerfile", "code", "vue", "code",
+        "svelte", "code", "rb", "code", "php", "code", "lua", "code",
+        "r", "code", "dart", "code", "ex", "code", "exs", "code",
+        "csv", "table", "tsv", "table",
+        "pdf", "pdf", "docx", "docx")
+    return extensions
+}
+
+PreviewDocumentKind(path) {
+    global PreviewDocumentEnabled, PreviewPdfEnabled
+    if !PreviewDocumentEnabled
+        return ""
+    SplitPath(path, , , &extension)
+    extensions := PreviewDocumentExtensions()
+    key := StrLower(extension)
+    if !extensions.Has(key)
+        return ""
+    kind := extensions[key]
+    return kind = "pdf" && !PreviewPdfEnabled ? "" : kind
+}
+
+PreviewIsSupportedDocumentPath(path) {
+    SplitPath(path, , , &extension)
+    return PreviewDocumentExtensions().Has(StrLower(extension))
+}
+
+PreviewLooksLikeDocument(path) {
+    return PreviewDocumentKind(path) != ""
+}
 
 LoadPreviewSettings(settingErrors := 0) {
     global ConfigPath
@@ -76,9 +128,14 @@ LoadPreviewSettings(settingErrors := 0) {
     global PreviewCacheMaxItems, PreviewCacheItemMaxKB
     global PreviewCacheUnreferencedDays, PreviewDirectImageMaxFileMB
     global PreviewDirectImageMaxEdge, PreviewDirectImageMaxPixelsMP
-    global PreviewDirectImageMaxExpandedMB
+    global PreviewDirectImageMaxExpandedMB, PreviewDocumentEnabled
+    global PreviewPdfEnabled
 
-    PreviewEnabled := PreviewReadBoolean("Enabled", true, settingErrors)
+    loadedEnabled := PreviewReadBoolean("Enabled", true, settingErrors)
+    previousDocumentEnabled := PreviewDocumentEnabled
+    previousPdfEnabled := PreviewPdfEnabled
+    previousSide := PreviewSide
+    previousCacheEnabled := PreviewCacheEnabled
     rawSide := StrLower(Trim(IniRead(ConfigPath, "Preview", "Side", "Auto")))
     if rawSide = "right"
         PreviewSide := "Right"
@@ -98,7 +155,7 @@ LoadPreviewSettings(settingErrors := 0) {
     PreviewKeyboardDelayMs := PreviewReadInteger(
         "KeyboardDelayMs", 250, 50, 2000, settingErrors)
     PreviewWidthDip := PreviewReadInteger(
-        "Width", 320, 180, 640, settingErrors)
+        "Width", 400, 180, 640, settingErrors)
     PreviewCacheEnabled := PreviewReadBoolean(
         "CacheEnabled", true, settingErrors)
     PreviewCacheStartAfterHiddenSeconds := PreviewReadInteger(
@@ -119,6 +176,17 @@ LoadPreviewSettings(settingErrors := 0) {
         "DirectImageMaxPixelsMP", 160, 1, 500, settingErrors)
     PreviewDirectImageMaxExpandedMB := PreviewReadInteger(
         "DirectImageMaxExpandedMB", 256, 16, 512, settingErrors)
+    PreviewDocumentEnabled := PreviewReadBoolean(
+        "DocumentEnabled", true, settingErrors)
+    PreviewPdfEnabled := PreviewReadBoolean(
+        "PdfEnabled", false, settingErrors)
+    enabledChanged := SetFilePreviewEnabled(loadedEnabled, false)
+    if !enabledChanged
+        && (previousSide != PreviewSide
+            || previousCacheEnabled != PreviewCacheEnabled
+            || previousDocumentEnabled != PreviewDocumentEnabled
+            || previousPdfEnabled != PreviewPdfEnabled)
+        PreviewSettingsChanged()
 }
 
 PreviewReadBoolean(key, defaultValue, settingErrors := 0) {
@@ -152,7 +220,9 @@ PreviewReadInteger(key, defaultValue, minimum, maximum, settingErrors := 0) {
 }
 
 PreviewSettingsChanged() {
-    global PreviewEnabled, PreviewCacheEnabled, PreviewGeneration
+    global PreviewEnabled, PreviewCacheEnabled, PreviewDocumentEnabled
+    global PreviewPdfEnabled
+    global PreviewGeneration
     global PreviewCacheActive, PreviewSession
     PreviewGeneration += 1
     if !PreviewCacheEnabled {
@@ -166,9 +236,34 @@ PreviewSettingsChanged() {
     if !PreviewEnabled
         PreviewHide("disabled", true)
     else {
+        if !PreviewDocumentEnabled || (!PreviewPdfEnabled
+            && PreviewDocumentKindIgnoringSettings(PreviewSession.Path) = "pdf")
+            PreviewCancelDocumentDisplay()
         PreviewHide("settings", true)
         PreviewRecoverAfterInteraction()
     }
+}
+
+PreviewDocumentKindIgnoringSettings(path) {
+    SplitPath(path, , , &extension)
+    extensions := PreviewDocumentExtensions()
+    key := StrLower(extension)
+    return extensions.Has(key) ? extensions[key] : ""
+}
+
+PreviewCancelDocumentDisplay() {
+    global PreviewSession, PreviewGeneration
+    if PreviewIsSupportedDocumentPath(PreviewSession.Path) {
+        if PreviewSession.State = "Loading"
+            || PreviewSession.State = "DocumentGenerating"
+            PreviewTerminateCacheHelper()
+        PreviewHide("documents-disabled", true)
+    }
+    PreviewGeneration += 1
+    SetTimer(PreviewShowDocumentStatus, 0)
+    SetTimer(PreviewShowDocumentLongStatus, 0)
+    SetTimer(PreviewDocumentAnimationTick, 0)
+    SetTimer(PreviewDocumentHardTimeout, 0)
 }
 
 PreviewBeginPanelSession() {
@@ -195,7 +290,6 @@ PreviewPanelHidden() {
     PreviewCacheCompletedThisHiddenSession := 0
     PreviewCacheSucceededThisHiddenSession := 0
     PreviewCacheFailedThisHiddenSession := 0
-    PreviewBuildVisibleCacheQueue()
     PreviewWriteCacheStatus("Scheduled")
     SetTimer(PreviewBeginCachePass,
         -(PreviewCacheStartAfterHiddenSeconds * 1000))
@@ -205,6 +299,7 @@ PreviewInvalidateList(reason := "") {
     global PreviewListInstance, PreviewGeneration
     PreviewListInstance += 1
     PreviewGeneration += 1
+    CloseExternalQuickPreview()
     PreviewHide("list-" reason, true)
 }
 
@@ -214,17 +309,18 @@ PreviewHandleMouseMove(hwnd, lParam) {
     if !PreviewEnabled || PreviewSessionDisabled || !IsTrackedFileViewHwnd(hwnd)
         return
     PreviewTrackMouseLeave(hwnd)
+    if PreviewSession.State = "Suppressed"
+        return
     x := SignedMouseCoordinate(lParam & 0xFFFF)
     y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
+    screen := ClientToScreenPoint(hwnd, x, y)
+    if !PreviewScreenPointHitsList(hwnd, screen.X, screen.Y) {
+        PreviewHide("covered", true)
+        return
+    }
     row := HitTestListItemBounds(hwnd, x, y)
     candidate := PreviewCandidateForRow(hwnd, row)
     PreviewInputAuthority := "mouse"
-    if PreviewSession.State = "Suppressed" {
-        PreviewSession.Hwnd := hwnd
-        PreviewSession.Row := row
-        PreviewSession.Path := IsObject(candidate) ? candidate.Path : ""
-        return
-    }
     if !IsObject(candidate) {
         PreviewScheduleLeave()
         return
@@ -279,16 +375,27 @@ PreviewArmCandidate(path, hwnd, row, authority) {
     global PreviewKeyboardDelayMs, PreviewNegativeCache
     if path = ""
         return
+    if PreviewDocumentKindIgnoringSettings(path) != ""
+        && PreviewDocumentKind(path) = "" {
+        PreviewHide("document-type-disabled", true)
+        return
+    }
     SetTimer(PreviewLeaveExpired, 0)
     if PreviewSession.Path = path
         && PreviewSession.Hwnd = hwnd
         && PreviewSession.State != "Hidden"
         return
     if PreviewNegativeCache.Has(PathKey(path)) {
-        failedAt := PreviewNegativeCache[PathKey(path)]
-        if ElapsedTickMilliseconds(failedAt, A_TickCount) < 60000
+        failure := PreviewNegativeCache[PathKey(path)]
+        if failure.Stamp != PreviewFileStamp(path)
+            PreviewNegativeCache.Delete(PathKey(path))
+        else if failure.Permanent
             return
-        PreviewNegativeCache.Delete(PathKey(path))
+        else if ElapsedTickMilliseconds(
+            failure.Tick, A_TickCount) < failure.RetryMs
+            return
+        else
+            PreviewNegativeCache.Delete(PathKey(path))
     }
     wasVisible := PreviewSession.State = "Visible"
         || PreviewSession.VisiblePath != ""
@@ -305,6 +412,16 @@ PreviewArmCandidate(path, hwnd, row, authority) {
     SetTimer(PreviewIssueArmedRequest, -Max(1, delay))
     if wasVisible
         SetTimer(PreviewExpireStaleContent, -150)
+}
+
+PreviewFileStamp(path) {
+    data := Buffer(36, 0)
+    if !DllCall("kernel32\GetFileAttributesExW", "wstr", path,
+        "int", 0, "ptr", data.Ptr, "int")
+        return "missing"
+    size := (NumGet(data, 28, "uint") << 32) | NumGet(data, 32, "uint")
+    write := (NumGet(data, 24, "uint") << 32) | NumGet(data, 20, "uint")
+    return size "|" write
 }
 
 PreviewCandidateDelay(wasVisible, authority) {
@@ -352,6 +469,7 @@ PreviewHandleKeyDown(vk, hwnd) {
     if navigationKeys.Has(vk) {
         PreviewInputAuthority := "keyboard"
         SetTimer(PreviewArmFocusedRow.Bind(hwnd), -1)
+        QuickPreviewScheduleUpdate()
     }
 }
 
@@ -401,6 +519,8 @@ PreviewRecoverFromCursor() {
     for list in [FileView, RecentView] {
         if !IsObject(list) || !ScreenPointInWindow(list.Hwnd, sx, sy)
             continue
+        if !PreviewScreenPointHitsList(list.Hwnd, sx, sy)
+            continue
         clientPoint := ScreenToClientPoint(list.Hwnd, sx, sy)
         row := HitTestListItemBounds(
             list.Hwnd, clientPoint.X, clientPoint.Y)
@@ -415,6 +535,14 @@ PreviewRecoverFromCursor() {
         return
     }
     PreviewHide("recover-outside", true)
+}
+
+PreviewScreenPointHitsList(listHwnd, screenX, screenY) {
+    packedPoint := (screenY << 32) | (screenX & 0xFFFFFFFF)
+    hit := DllCall("user32\WindowFromPoint", "int64", packedPoint, "ptr")
+    return hit = listHwnd
+        || (hit && DllCall("user32\IsChild",
+            "ptr", listHwnd, "ptr", hit, "int"))
 }
 
 PanelMovingOrSizing(wParam, lParam, msg, hwnd) {
@@ -434,15 +562,34 @@ PanelExitMoveSize(wParam, lParam, msg, hwnd) {
 
 PreviewHide(reason := "", invalidate := false) {
     global PreviewSession, PreviewGeneration
+    global PreviewDocumentLongStatusMs
+    wasDirectDocument := PreviewSession.State = "Loading"
+        && PreviewIsSupportedDocumentPath(PreviewSession.Path)
+    wasDocumentGeneration := PreviewSession.DocumentGeneration
+    keepDocumentGeneration := wasDocumentGeneration
+        && ElapsedTickMilliseconds(
+            PreviewSession.RequestStarted, A_TickCount)
+            >= PreviewDocumentLongStatusMs
     SetTimer(PreviewIssueArmedRequest, 0)
     SetTimer(PreviewExpireStaleContent, 0)
+    SetTimer(PreviewShowDocumentStatus, 0)
+    SetTimer(PreviewShowDocumentLongStatus, 0)
+    SetTimer(PreviewDocumentAnimationTick, 0)
+    if wasDirectDocument
+        PreviewTerminateCacheHelper()
+    if wasDocumentGeneration && !keepDocumentGeneration {
+        SetTimer(PreviewDocumentHardTimeout, 0)
+        PreviewTerminateCacheHelper()
+    }
     if invalidate
         PreviewGeneration += 1
     PreviewSession.State := "Hidden"
-    PreviewSession.Path := ""
+    PreviewSession.Path := keepDocumentGeneration ? PreviewSession.Path : ""
     PreviewSession.VisiblePath := ""
     PreviewSession.Generation := PreviewGeneration
     PreviewSession.CacheCommand := false
+    PreviewSession.DocumentGeneration := keepDocumentGeneration
+    PreviewSession.StatusKind := ""
     PreviewHideWindowOnly()
 }
 
@@ -508,7 +655,7 @@ PreviewAssignHelperJob() {
     size := A_PtrSize = 8 ? 144 : 112
     info := Buffer(size, 0)
     NumPut("uint", 0x2100, info, 16) ; PROCESS_MEMORY | KILL_ON_JOB_CLOSE
-    NumPut("uptr", 256 * 1024 * 1024, info, A_PtrSize = 8 ? 112 : 96)
+    NumPut("uptr", 512 * 1024 * 1024, info, A_PtrSize = 8 ? 112 : 96)
     if !DllCall("kernel32\SetInformationJobObject", "ptr", PreviewJobHandle,
         "int", 9, "ptr", info.Ptr, "uint", size, "int")
         return
@@ -532,6 +679,7 @@ PreviewSendRequest(command, path) {
     global PreviewCacheItemMaxKB, PreviewCacheUnreferencedDays
     global PreviewDirectImageMaxFileMB, PreviewDirectImageMaxEdge
     global PreviewDirectImageMaxPixelsMP, PreviewDirectImageMaxExpandedMB
+    global PreviewDocumentThemeVersion
     PreviewSession.Path := path
     if !PreviewEnsureHelper() {
         if command != 2
@@ -555,9 +703,9 @@ PreviewSendRequest(command, path) {
     NumPut("int64", PreviewPanelSession, PreviewMapView, 32)
     NumPut("int64", requestId, PreviewMapView, 40)
     cacheEdge := Min(1024, panelHeight)
-    NumPut("uint", command = 2 ? cacheEdge : Min(1024, requestedWidth),
+    NumPut("uint", command != 1 ? cacheEdge : Min(1024, requestedWidth),
         PreviewMapView, 48)
-    NumPut("uint", command = 2 ? cacheEdge : Min(1024, panelHeight),
+    NumPut("uint", command != 1 ? cacheEdge : Min(1024, panelHeight),
         PreviewMapView, 52)
     NumPut("uint", PreviewDirectImageMaxFileMB, PreviewMapView, 56)
     NumPut("uint", PreviewDirectImageMaxEdge, PreviewMapView, 60)
@@ -569,21 +717,28 @@ PreviewSendRequest(command, path) {
     NumPut("uint", PreviewCacheItemMaxKB, PreviewMapView, 84)
     NumPut("uint", PreviewCacheUnreferencedDays, PreviewMapView, 88)
     NumPut("uint", cacheEdge, PreviewMapView, 92)
+    NumPut("uint", dpi, PreviewMapView, 96)
+    NumPut("uint", PreviewDocumentThemeVersion, PreviewMapView, 100)
     StrPut(path, PreviewMapView + PREVIEW_PATH_OFFSET,
         PREVIEW_PATH_CHARS, "UTF-16")
     StrPut(CacheDir "\preview-cache-v1",
         PreviewMapView + PREVIEW_CACHE_ROOT_OFFSET,
         PREVIEW_CACHE_ROOT_CHARS, "UTF-16")
     DllCall("kernel32\ResetEvent", "ptr", PreviewResponseEvent)
-    PreviewSession.State := "Loading"
+    PreviewSession.State := command = 3 ? "DocumentGenerating" : "Loading"
     PreviewSession.RequestId := requestId
     PreviewSession.RequestStarted := A_TickCount
     PreviewSession.Generation := PreviewGeneration
     PreviewSession.ListInstance := PreviewListInstance
     PreviewSession.PanelSession := PreviewPanelSession
     PreviewSession.CacheCommand := command = 2
+    PreviewSession.DocumentGeneration := command = 3
     DllCall("kernel32\SetEvent", "ptr", PreviewRequestEvent)
     SetTimer(PreviewPollResponse, 15)
+    if command = 1 && PreviewLooksLikeDocument(path) {
+        SetTimer(PreviewShowDocumentStatus, -120)
+        SetTimer(PreviewShowDocumentLongStatus, -5000)
+    }
     return true
 }
 
@@ -602,19 +757,38 @@ PreviewPollResponse() {
         listInstance := NumGet(PreviewMapView, 24, "int64")
         panelSession := NumGet(PreviewMapView, 32, "int64")
         if requestId != PreviewSession.RequestId
-            || !PreviewGenerationMatches(
-                generation, listInstance, panelSession)
             return
+        if !PreviewGenerationMatches(
+                generation, listInstance, panelSession) {
+            if PreviewSession.DocumentGeneration {
+                PreviewSession.DocumentGeneration := false
+                PreviewStopDocumentStatusTimers()
+            }
+            return
+        }
         status := NumGet(PreviewMapView, 12, "uint")
+        if PreviewSession.DocumentGeneration {
+            PreviewFinishDocumentGeneration(status)
+            return
+        }
         if PreviewSession.CacheCommand {
             PreviewFinishCacheRequest(status = 2)
             return
         }
         if status != 2 {
-            PreviewRememberFailure(PreviewSession.Path)
-            PreviewHide("no-content", false)
+            if status = 4 && PreviewLooksLikeDocument(PreviewSession.Path) {
+                PreviewBeginDocumentGeneration(PreviewSession.Path)
+                return
+            }
+            if PreviewLooksLikeDocument(PreviewSession.Path)
+                PreviewShowDocumentError(status)
+            else {
+                PreviewRememberFailure(PreviewSession.Path, status)
+                PreviewHide("no-content", false)
+            }
             return
         }
+        PreviewStopDocumentStatusTimers()
         width := NumGet(PreviewMapView, 128, "uint")
         height := NumGet(PreviewMapView, 132, "uint")
         stride := NumGet(PreviewMapView, 136, "uint")
@@ -628,14 +802,16 @@ PreviewPollResponse() {
         if PreviewPresentPixels(width, height, stride, sourceKind) {
             PreviewSession.State := "Visible"
             PreviewSession.VisiblePath := PreviewSession.Path
-            PreviewQueueHoverCache(PreviewSession.Path)
+            PreviewQueueHoverCache(PreviewSession.Path, sourceKind)
         } else
             PreviewHide("no-space", false)
         return
     }
     if PreviewSession.State = "Loading"
         && ElapsedTickMilliseconds(
-            PreviewSession.RequestStarted, A_TickCount) >= 3000 {
+            PreviewSession.RequestStarted, A_TickCount)
+            >= (PreviewLooksLikeDocument(PreviewSession.Path)
+                ? 12000 : 3000) {
         SetTimer(PreviewPollResponse, 0)
         if PreviewSession.CacheCommand {
             PreviewTerminateCacheHelper()
@@ -644,15 +820,138 @@ PreviewPollResponse() {
         }
         failedPath := PreviewSession.Path
         PreviewTerminateHungHelper()
-        PreviewRememberFailure(failedPath)
-        PreviewHide("timeout", true)
+        if PreviewLooksLikeDocument(failedPath) {
+            PreviewSession.Path := failedPath
+            PreviewShowDocumentError(10)
+        } else {
+            PreviewRememberFailure(failedPath)
+            PreviewHide("timeout", true)
+        }
     }
 }
 
-PreviewRememberFailure(path) {
+PreviewRememberFailure(path, status := 3) {
     global PreviewNegativeCache
-    if path != ""
-        PreviewNegativeCache[PathKey(path)] := A_TickCount
+    if path = ""
+        return
+    permanent := status = 5 || status = 6
+    retryMs := status = 9 ? 20000
+        : (status = 7 ? 30000 : (status = 10 ? 600000 : 60000))
+    PreviewNegativeCache[PathKey(path)] := {
+        Tick: A_TickCount, RetryMs: retryMs, Permanent: permanent,
+        Status: status, Stamp: PreviewFileStamp(path)
+    }
+}
+
+PreviewBeginDocumentGeneration(path) {
+    global PreviewDocumentStatusDelayMs, PreviewDocumentLongStatusMs
+    global PreviewDocumentHardTimeoutMs
+    if !PreviewSendRequest(3, path) {
+        PreviewShowDocumentError(7)
+        return
+    }
+    SetTimer(PreviewShowDocumentStatus, -PreviewDocumentStatusDelayMs)
+    SetTimer(PreviewShowDocumentLongStatus, -PreviewDocumentLongStatusMs)
+    SetTimer(PreviewDocumentHardTimeout, -PreviewDocumentHardTimeoutMs)
+}
+
+PreviewShowDocumentStatus() {
+    global PreviewSession
+    if PreviewSession.State != "DocumentGenerating"
+        && PreviewSession.State != "Loading"
+        return
+    PreviewSession.StatusKind := "initial"
+    PreviewSession.StatusFrame := 0
+    PreviewPresentStatusCard(
+        "首次预览正在生成…", "完成后将自动缓存", true)
+    SetTimer(PreviewDocumentAnimationTick, 350)
+}
+
+PreviewShowDocumentLongStatus() {
+    global PreviewSession
+    if PreviewSession.State != "DocumentGenerating"
+        && PreviewSession.State != "Loading"
+        return
+    PreviewSession.StatusKind := "long"
+    PreviewSession.StatusFrame := 0
+    PreviewPresentStatusCard(
+        "预览生成时间较长", "正在后台处理，稍后再次悬浮可查看", true)
+}
+
+PreviewDocumentAnimationTick() {
+    global PreviewSession
+    if (PreviewSession.State != "DocumentGenerating"
+        && PreviewSession.State != "Loading")
+        || PreviewSession.StatusKind = "" {
+        SetTimer(PreviewDocumentAnimationTick, 0)
+        return
+    }
+    PreviewSession.StatusFrame := Mod(PreviewSession.StatusFrame + 1, 4)
+    if PreviewSession.StatusKind = "long"
+        PreviewPresentStatusCard(
+            "预览生成时间较长",
+            "正在后台处理，稍后再次悬浮可查看", true, true)
+    else
+        PreviewPresentStatusCard(
+            "首次预览正在生成…", "完成后将自动缓存", true, true)
+}
+
+PreviewDocumentHardTimeout() {
+    global PreviewSession
+    if !PreviewSession.DocumentGeneration
+        return
+    failedPath := PreviewSession.Path
+    PreviewTerminateHungHelper()
+    PreviewRememberFailure(failedPath, 10)
+    wasVisibleRequest := PreviewSession.State = "DocumentGenerating"
+    PreviewSession.State := wasVisibleRequest ? "Error" : "Hidden"
+    PreviewSession.DocumentGeneration := false
+    PreviewStopDocumentStatusTimers()
+    if wasVisibleRequest
+        PreviewPresentStatusCard(
+            "暂时无法生成预览", "处理时间超过限制", false)
+}
+
+PreviewFinishDocumentGeneration(status) {
+    global PreviewSession
+    path := PreviewSession.Path
+    PreviewSession.DocumentGeneration := false
+    PreviewStopDocumentStatusTimers()
+    if status = 2 {
+        PreviewSendRequest(1, path)
+        return
+    }
+    PreviewShowDocumentError(status)
+}
+
+PreviewStopDocumentStatusTimers() {
+    global PreviewSession
+    SetTimer(PreviewShowDocumentStatus, 0)
+    SetTimer(PreviewShowDocumentLongStatus, 0)
+    SetTimer(PreviewDocumentAnimationTick, 0)
+    SetTimer(PreviewDocumentHardTimeout, 0)
+    PreviewSession.StatusKind := ""
+}
+
+PreviewShowDocumentError(status) {
+    global PreviewSession
+    path := PreviewSession.Path
+    PreviewStopDocumentStatusTimers()
+    PreviewSession.State := "Error"
+    PreviewSession.DocumentGeneration := false
+    PreviewRememberFailure(path, status)
+    if status = 5
+        PreviewPresentStatusCard("文件内容过大", "未生成预览", false)
+    else if status = 6
+        PreviewPresentStatusCard("文档受密码保护", "无法生成预览", false)
+    else if status = 7
+        PreviewPresentStatusCard("文件当前不可访问", "", false)
+    else if status = 10
+        PreviewPresentStatusCard(
+            "暂时无法生成预览", "处理时间超过限制", false)
+    else
+        PreviewPresentStatusCard(
+            "暂时无法生成预览", "文件可能损坏或格式不受支持", false)
 }
 
 PreviewTerminateHungHelper() {
@@ -679,9 +978,172 @@ PreviewTerminateCacheHelper() {
     PreviewCloseHelperObjects(false)
 }
 
+PreviewPresentStatusCard(line1, line2 := "", animated := false,
+    internalOnly := false) {
+    global Panel, PreviewSide, PreviewSession, PreviewWidthDip
+    global PreviewWindow, PreviewStatusRect
+    placement := PreviewStatusRect
+    if !internalOnly || !IsObject(placement) {
+        panelRect := Buffer(16, 0)
+        if !DllCall("user32\GetWindowRect", "ptr", Panel.Hwnd,
+            "ptr", panelRect.Ptr)
+            return false
+        panelLeft := NumGet(panelRect, 0, "int")
+        panelTop := NumGet(panelRect, 4, "int")
+        panelRight := NumGet(panelRect, 8, "int")
+        panelBottom := NumGet(panelRect, 12, "int")
+        monitor := DllCall("user32\MonitorFromWindow", "ptr", Panel.Hwnd,
+            "uint", 2, "ptr")
+        info := Buffer(40, 0)
+        NumPut("uint", 40, info, 0)
+        if !DllCall("user32\GetMonitorInfoW", "ptr", monitor,
+            "ptr", info.Ptr)
+            return false
+        workLeft := NumGet(info, 20, "int")
+        workTop := NumGet(info, 24, "int")
+        workRight := NumGet(info, 28, "int")
+        workBottom := NumGet(info, 32, "int")
+        dpi := DllCall("user32\GetDpiForWindow",
+            "ptr", Panel.Hwnd, "uint")
+        if !dpi
+            dpi := 96
+        gap := DllCall("kernel32\MulDiv",
+            "int", 4, "int", dpi, "int", 96, "int")
+        minWidth := DllCall("kernel32\MulDiv",
+            "int", 180, "int", dpi, "int", 96, "int")
+        targetWidth := DllCall("kernel32\MulDiv",
+            "int", PreviewWidthDip, "int", dpi, "int", 96, "int")
+        rightAvailable := workRight - panelRight - gap
+        leftAvailable := panelLeft - workLeft - gap
+        side := PreviewSession.Side
+        if side = "" {
+            if PreviewSide = "Right"
+                side := "Right"
+            else if PreviewSide = "Left"
+                side := "Left"
+            else if rightAvailable >= minWidth
+                side := "Right"
+            else if leftAvailable >= minWidth
+                side := "Left"
+            else
+                return false
+            PreviewSession.Side := side
+        }
+        width := Min(targetWidth,
+            side = "Right" ? rightAvailable : leftAvailable)
+        if width < minWidth
+            return false
+        height := Min(panelBottom - panelTop, workBottom - workTop)
+        x := side = "Right" ? panelRight + gap
+            : panelLeft - gap - width
+        y := Max(workTop, Min(panelTop, workBottom - height))
+        placement := {X: x, Y: y, Width: width, Height: height, Dpi: dpi}
+        PreviewStatusRect := placement
+    }
+    if !PreviewBuildStatusCanvas(
+        placement.Width, placement.Height, placement.Dpi,
+        line1, line2, animated)
+        return false
+    PreviewEnsureWindow()
+    if !internalOnly {
+        zorder := PreviewIsTopmostMode() ? -1 : -2
+        DllCall("user32\SetWindowPos", "ptr", PreviewWindow.Hwnd,
+            "ptr", zorder, "int", placement.X, "int", placement.Y,
+            "int", placement.Width, "int", placement.Height,
+            "uint", 0x0010 | 0x0040)
+    }
+    DllCall("user32\InvalidateRect", "ptr", PreviewWindow.Hwnd,
+        "ptr", 0, "int", 0)
+    DllCall("user32\UpdateWindow", "ptr", PreviewWindow.Hwnd)
+    return true
+}
+
+PreviewBuildStatusCanvas(width, height, dpi, line1, line2, animated) {
+    global PreviewCanvasDc, PreviewCanvasBitmap, PreviewCanvasOldBitmap
+    global PreviewCanvasWidth, PreviewCanvasHeight, PreviewSession
+    PreviewReleaseCanvas()
+    screenDc := DllCall("user32\GetDC", "ptr", 0, "ptr")
+    PreviewCanvasDc := DllCall("gdi32\CreateCompatibleDC",
+        "ptr", screenDc, "ptr")
+    PreviewCanvasBitmap := DllCall("gdi32\CreateCompatibleBitmap",
+        "ptr", screenDc, "int", width, "int", height, "ptr")
+    DllCall("user32\ReleaseDC", "ptr", 0, "ptr", screenDc)
+    if !PreviewCanvasDc || !PreviewCanvasBitmap
+        return false
+    PreviewCanvasOldBitmap := DllCall("gdi32\SelectObject",
+        "ptr", PreviewCanvasDc, "ptr", PreviewCanvasBitmap, "ptr")
+    PreviewCanvasWidth := width
+    PreviewCanvasHeight := height
+    rect := Buffer(16, 0)
+    NumPut("int", width, rect, 8)
+    NumPut("int", height, rect, 12)
+    background := DllCall("gdi32\CreateSolidBrush",
+        "uint", 0x00F8F8F8, "ptr")
+    DllCall("user32\FillRect", "ptr", PreviewCanvasDc,
+        "ptr", rect.Ptr, "ptr", background)
+    DllCall("gdi32\DeleteObject", "ptr", background)
+    DllCall("gdi32\SetBkMode", "ptr", PreviewCanvasDc, "int", 1)
+    DllCall("gdi32\SetTextColor",
+        "ptr", PreviewCanvasDc, "uint", 0x003A342F)
+    titleSize := DllCall("kernel32\MulDiv",
+        "int", 15, "int", dpi, "int", 96, "int")
+    bodySize := DllCall("kernel32\MulDiv",
+        "int", 12, "int", dpi, "int", 96, "int")
+    titleFont := DllCall("gdi32\CreateFontW",
+        "int", -titleSize, "int", 0, "int", 0, "int", 0,
+        "int", 600, "uint", 0, "uint", 0, "uint", 0,
+        "uint", 1, "uint", 0, "uint", 0, "uint", 5,
+        "uint", 0, "wstr", "Microsoft YaHei UI", "ptr")
+    bodyFont := DllCall("gdi32\CreateFontW",
+        "int", -bodySize, "int", 0, "int", 0, "int", 0,
+        "int", 400, "uint", 0, "uint", 0, "uint", 0,
+        "uint", 1, "uint", 0, "uint", 0, "uint", 5,
+        "uint", 0, "wstr", "Microsoft YaHei UI", "ptr")
+    oldFont := DllCall("gdi32\SelectObject",
+        "ptr", PreviewCanvasDc, "ptr", titleFont, "ptr")
+    if animated {
+        suffixes := ["", " ·", " ··", " ···"]
+        line1 .= suffixes[PreviewSession.StatusFrame + 1]
+    }
+    centerY := Floor(height / 2)
+    titleRect := Buffer(16, 0)
+    NumPut("int", 20, titleRect, 0)
+    NumPut("int", centerY - 38, titleRect, 4)
+    NumPut("int", width - 20, titleRect, 8)
+    NumPut("int", centerY - 8, titleRect, 12)
+    DllCall("user32\DrawTextW", "ptr", PreviewCanvasDc,
+        "wstr", line1, "int", -1, "ptr", titleRect.Ptr,
+        "uint", 0x00000001 | 0x00000004 | 0x00000800)
+    if line2 != "" {
+        DllCall("gdi32\SelectObject",
+            "ptr", PreviewCanvasDc, "ptr", bodyFont, "ptr")
+        DllCall("gdi32\SetTextColor",
+            "ptr", PreviewCanvasDc, "uint", 0x00706055)
+        bodyRect := Buffer(16, 0)
+        NumPut("int", 20, bodyRect, 0)
+        NumPut("int", centerY + 2, bodyRect, 4)
+        NumPut("int", width - 20, bodyRect, 8)
+        NumPut("int", centerY + 42, bodyRect, 12)
+        DllCall("user32\DrawTextW", "ptr", PreviewCanvasDc,
+            "wstr", line2, "int", -1, "ptr", bodyRect.Ptr,
+            "uint", 0x00000001 | 0x00000004 | 0x00000800)
+    }
+    DllCall("gdi32\SelectObject",
+        "ptr", PreviewCanvasDc, "ptr", oldFont)
+    DllCall("gdi32\DeleteObject", "ptr", titleFont)
+    DllCall("gdi32\DeleteObject", "ptr", bodyFont)
+    border := DllCall("gdi32\CreateSolidBrush",
+        "uint", 0x00D7D3CD, "ptr")
+    DllCall("user32\FrameRect", "ptr", PreviewCanvasDc,
+        "ptr", rect.Ptr, "ptr", border)
+    DllCall("gdi32\DeleteObject", "ptr", border)
+    return true
+}
+
 PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride, sourceKind := 0) {
     global Panel, PreviewSide, PreviewSession, PreviewWidthDip
     global PreviewMapView, PREVIEW_PIXEL_OFFSET, PreviewWindow
+    global PreviewStatusRect
     panelRect := Buffer(16, 0)
     if !DllCall("user32\GetWindowRect", "ptr", Panel.Hwnd, "ptr", panelRect.Ptr)
         return false
@@ -702,7 +1164,7 @@ PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride, sourceKind := 0) {
     dpi := DllCall("user32\GetDpiForWindow", "ptr", Panel.Hwnd, "uint")
     if !dpi
         dpi := 96
-    gap := DllCall("kernel32\MulDiv", "int", 8, "int", dpi, "int", 96, "int")
+    gap := DllCall("kernel32\MulDiv", "int", 4, "int", dpi, "int", 96, "int")
     minWidth := DllCall("kernel32\MulDiv",
         "int", 180, "int", dpi, "int", 96, "int")
     targetWidth := DllCall("kernel32\MulDiv",
@@ -734,18 +1196,21 @@ PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride, sourceKind := 0) {
     contentMaxHeight := Max(1, panelHeight - padding * 2)
     ; Shell is the last-resort source. Its cached thumbnail can be much
     ; smaller than the useful preview area, so enlarge that fallback to fit.
-    scaleLimit := sourceKind = 2 ? 1000.0 : 1.0
+    scaleLimit := sourceKind = 2 || sourceKind >= 4 ? 1000.0 : 1.0
     scale := Min(scaleLimit, contentMaxWidth / sourceWidth,
         contentMaxHeight / sourceHeight)
     drawWidth := Max(1, Floor(sourceWidth * scale))
     drawHeight := Max(1, Floor(sourceHeight * scale))
-    windowHeight := Min(panelHeight, drawHeight + padding * 2)
+    windowHeight := sourceKind >= 4
+        ? panelHeight : Min(panelHeight, drawHeight + padding * 2)
     x := side = "Right" ? panelRight + gap
         : panelLeft - gap - windowWidth
     y := Max(workTop, Min(panelTop, workBottom - windowHeight))
     if !PreviewBuildCanvas(windowWidth, windowHeight, padding,
         drawWidth, drawHeight, sourceWidth, sourceHeight, sourceStride)
         return false
+    PreviewStatusRect := {X: x, Y: y, Width: windowWidth,
+        Height: windowHeight, Dpi: dpi}
     PreviewEnsureWindow()
     zorder := PreviewIsTopmostMode() ? -1 : -2 ; HWND_TOPMOST / NOTOPMOST
     DllCall("user32\SetWindowPos", "ptr", PreviewWindow.Hwnd,
@@ -918,9 +1383,14 @@ PreviewReleaseCanvas() {
     PreviewCanvasHeight := 0
 }
 
-PreviewQueueHoverCache(path) {
+PreviewQueueHoverCache(path, sourceKind) {
     global PreviewHoverCacheQueue
-    if !PreviewLooksLikeImage(path)
+    ; 1=image cache, 4=text already cached by the foreground worker,
+    ; 6=document cache. Only uncached original/Shell results need the
+    ; low-priority hidden-session snapshot pass.
+    if sourceKind != 2 && sourceKind != 3 && sourceKind != 5
+        return
+    if !PreviewLooksLikeImage(path) && !PreviewLooksLikeDocument(path)
         return
     if !ArrayContainsPath(PreviewHoverCacheQueue, path)
         PreviewHoverCacheQueue.Push(path)
@@ -931,28 +1401,6 @@ PreviewLooksLikeImage(path) {
     return InStr("|jpg|jpeg|jpe|png|gif|bmp|dib|tif|tiff|webp|heic|heif|avif|"
         . "ico|dng|cr2|cr3|nef|arw|rw2|orf|raf|", "|"
         . StrLower(extension) "|")
-}
-
-PreviewBuildVisibleCacheQueue() {
-    global PreviewVisibleCacheQueue, ItemPaths, ItemKinds
-    global RecentItemPaths, PinnedPaths
-    PreviewVisibleCacheQueue := []
-    for row, path in ItemPaths {
-        if ItemKinds.Has(row) && ItemKinds[row] = "File"
-            && PreviewLooksLikeImage(path)
-            && !ArrayContainsPath(PreviewVisibleCacheQueue, path)
-            PreviewVisibleCacheQueue.Push(path)
-    }
-    for path in PinnedPaths {
-        if PreviewLooksLikeImage(path)
-            && !ArrayContainsPath(PreviewVisibleCacheQueue, path)
-            PreviewVisibleCacheQueue.Push(path)
-    }
-    for row, path in RecentItemPaths {
-        if PreviewLooksLikeImage(path)
-            && !ArrayContainsPath(PreviewVisibleCacheQueue, path)
-            PreviewVisibleCacheQueue.Push(path)
-    }
 }
 
 PreviewBeginCachePass() {
@@ -979,7 +1427,7 @@ PreviewHasActiveTransfer() {
 PreviewSendNextCacheRequest() {
     global PreviewCacheActive, PreviewCacheCompletedThisHiddenSession
     global PreviewCacheSucceededThisHiddenSession
-    global PreviewHoverCacheQueue, PreviewVisibleCacheQueue
+    global PreviewHoverCacheQueue
     global PanelVisible, PreviewGeneration
     if !PreviewCacheActive || PanelVisible
         return
@@ -992,8 +1440,6 @@ PreviewSendNextCacheRequest() {
     path := ""
     while PreviewHoverCacheQueue.Length && path = ""
         path := PreviewHoverCacheQueue.RemoveAt(1)
-    while path = "" && PreviewVisibleCacheQueue.Length
-        path := PreviewVisibleCacheQueue.RemoveAt(1)
     if path = "" {
         PreviewCacheActive := false
         PreviewWriteCacheStatus("Completed")
@@ -1022,7 +1468,7 @@ PreviewFinishCacheRequest(success) {
 }
 
 PreviewWriteCacheStatus(stage, path := "") {
-    global CacheDir, PreviewHoverCacheQueue, PreviewVisibleCacheQueue
+    global CacheDir, PreviewHoverCacheQueue
     global PreviewCacheCompletedThisHiddenSession
     global PreviewCacheSucceededThisHiddenSession
     global PreviewCacheFailedThisHiddenSession
@@ -1035,8 +1481,7 @@ PreviewWriteCacheStatus(stage, path := "") {
         IniWrite(stage, statusPath, "Cache", "Stage")
         IniWrite(PreviewHoverCacheQueue.Length, statusPath,
             "Cache", "HoverQueueRemaining")
-        IniWrite(PreviewVisibleCacheQueue.Length, statusPath,
-            "Cache", "VisibleQueueRemaining")
+        IniWrite(0, statusPath, "Cache", "VisibleQueueRemaining")
         IniWrite(PreviewCacheCompletedThisHiddenSession, statusPath,
             "Cache", "Attempted")
         IniWrite(PreviewCacheSucceededThisHiddenSession, statusPath,
@@ -1110,6 +1555,14 @@ RunPreviewSelfTests() {
         "图片候选扩展名大小写不敏感")
     AssertSelfTest(!PreviewLooksLikeImage("C:\Temp\document.pdf"),
         "非图片不进入原图缓存生成队列")
+    AssertSelfTest(PreviewIsSupportedDocumentPath("C:\Temp\readme.MD"),
+        "Markdown 文档候选扩展名大小写不敏感")
+    AssertSelfTest(PreviewIsSupportedDocumentPath("C:\Temp\report.pdf"),
+        "PDF 文档候选被集中扩展名表识别")
+    AssertSelfTest(PreviewIsSupportedDocumentPath("C:\Temp\report.docx"),
+        "DOCX 文档候选被集中扩展名表识别")
+    AssertSelfTest(!PreviewIsSupportedDocumentPath("C:\Temp\sheet.xlsx"),
+        "本版本不把 XLSX 交给自研悬浮预览")
     generation := PreviewGeneration
     listInstance := PreviewListInstance
     panelSession := PreviewPanelSession

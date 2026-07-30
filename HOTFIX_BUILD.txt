@@ -1,24 +1,17 @@
-PopDrop file-manager menu callback hotfix
-Build: 2026-07-29-r6
+PopDrop document preview optional-component/cache hotfix
+Build: 2026-07-30
 
 Verification markers:
 
-1. PopDrop.ahk contains:
-   RevealItemsFromPopDropMenu(itemPaths, itemName, itemPos, menuObject)
-
-2. The “在文件管理器中显示” menu item binds:
-   RevealItemsFromPopDropMenu.Bind(paths.Clone())
-
-3. PopDrop.ahk does not bind RevealItemsInFileManager directly to Menu.Add.
-
-4. QuoteWindowsArgument leaves /acmd, Go and other simple control arguments
-   unquoted, while paths containing spaces remain safely quoted.
-
-5. FileManager.ahk contains XYplorerFileManagerAdapter and provider ID
-   XYplorer. A single item is passed as its full path; folder navigation adds
-   a trailing backslash.
-
-6. Double Commander uses -C with a full item path, and Files uses
-   -select with a full item path. FreeCommander XE uses /C with a full item
-   path. One Commander is not registered because its public interface does
-   not support item reveal.
+1. Markdown/text uses explicit visual-line wrapping and DT_SINGLELINE drawing.
+2. Preview renderer specification is version 4, invalidating stale snapshots.
+3. PDF generation prefers a dynamically loaded non-V8 PDFium build.
+4. PDFium custom file access enforces a 64 MiB cumulative read budget.
+5. Windows.Data.Pdf and Shell thumbnail paths remain available as fallbacks.
+6. native/install-pdfium.ps1 pins chromium/7961 and verifies release SHA-256.
+7. QuickLook/Seer Z-order and settings-hover fixes remain unchanged.
+8. Default preview width remains 400.
+9. PDFium is opt-in and installed from native/pdfium-component.ini.
+10. Hidden-panel caching queues only uncached items actually hovered.
+11. PDFium manifest defaults to fixed GitHub TGZ assets.
+12. Installer supports verified Dll, Zip, and Tgz packages with auto-extraction.

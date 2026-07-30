@@ -7,7 +7,7 @@
 
 0.10.0 的 AHK 交互状态机、配置迁移、设置页、共享内存协议、原生
 `PopDropPreview` 源码、x86/x64 构建配置、缓存策略和文档已完成。现有四组跨平台
-契约测试及新增预览契约/状态模型测试全部通过；AHK 文件结构、INI BOM 和 CRLF
+契约测试及新增预览、显示菜单契约/状态模型测试全部通过；AHK 文件结构、INI BOM 和 CRLF
 检查通过。
 
 本环境不能编译或运行 Windows 二进制，也不能进行真实窗口、Shell/WIC、DPI、
@@ -34,14 +34,24 @@
 必然发生共享冲突并删除已编码结果。实现现已在刷新前释放完整编码 COM 链，协议
 升级至 4；新增静态顺序检查防止该问题回归。
 
+文档预览扩展后，Helper 协议继续升级至 5、配置版本升级至 21、Job Object
+上限调整为 512 MiB；新增结果与尚需 Windows 实机执行的项目见
+`DOCUMENT_PREVIEW_TEST_REPORT.md`。
+
 ## 实际运行的自动化测试
 
 ```text
 python3 tests/verify_file_manager_contract.py
 file-manager contract checks: PASS
 
+python3 tests/verify_display_menu_contract.py
+display-menu contract checks: PASS
+
 python3 tests/verify_file_preview_contract.py
 file-preview contract and model checks: PASS
+
+python3 tests/verify_document_preview_contract.py
+document-preview and external-quick-preview checks: PASS
 
 python3 tests/verify_folder_drop_contract.py
 folder-source drop contract checks: PASS
@@ -56,7 +66,7 @@ source-management contract checks: PASS
   `FileManager.ahk`、`ExternalDrop.ahk` 的字符串/注释感知大括号检查：PASS。
 - `config.ini` 与 `config.example.ini` 单一 UTF-16LE BOM、CRLF：PASS。
 - Python 测试脚本 `compileall`：PASS。
-- 应用版本 `0.10.0`、配置版本 `20`、示例配置迁移字段一致性：PASS。
+- 应用版本 `0.10.0`、配置版本 `21`、示例配置迁移字段一致性：PASS。
 
 新增预览测试覆盖：
 
@@ -74,7 +84,7 @@ source-management contract checks: PASS
   生成，以及移动缩放后 Auto 侧边先重算再恢复预览；
 - WIC 首帧、EXIF 方向、Alpha、sRGB、原生缩放转换和受展开内存保护的回退；
 - 云占位拒绝、64 MiB / 65535 / 160 MP / 256 MiB 安全边界；
-- Job Object 256 MiB 限制和有界 4 MiB 共享像素区；
+- Job Object 512 MiB 限制和有界 4 MiB 共享像素区；
 - 隐藏 10 秒、低优先级、单任务、200 ms 让出、50 项成功限额和 100 次尝试硬上限；
 - 缓存 Helper 启动失败/单项超时后继续队列、后台超时不触发预览熔断，以及
   `cache-status.ini` 调度与成功/失败计数；
@@ -83,6 +93,18 @@ source-management contract checks: PASS
   数量清理；
 - `[Preview]` 默认值、非法值回退、配置版本迁移、设置页三项保存；
 - x86/x64 构建脚本和无第三方图像依赖声明。
+
+新增显示菜单契约测试覆盖：
+
+- 工具栏只保留一个固定文字、72 逻辑像素宽的“显示 ▾”按钮，旧按钮、全局变量和
+  动态文字更新函数均已移除，最小窗口宽度仍为 760；
+- 原生一级菜单四个项目及分隔线顺序、两个 Radio 与两个 Check 的显式状态同步；
+- 菜单回调只调用视图、文件预览、近期栏统一 setter，当前视图安全无操作；
+- 配置重载复用 setter，设置窗口即时同步，三个状态继续使用既有配置键；
+- temporary 自动隐藏暂停的 `try/finally` 配对、预览抑制/恢复、按钮物理屏幕矩形定位；
+- 文件预览关闭经过 `PreviewSettingsChanged()` 失效旧 Generation；
+- 工具栏集合和文件夹拖入临时模式继续引用新的显示按钮；
+- 预览窗口与面板间距按 DPI 缩放为 4 DIP。
 
 ## Windows 发布前测试清单（尚未执行）
 
@@ -96,6 +118,13 @@ source-management contract checks: PASS
 
 ### 交互与回归
 
+- “显示 ▾”按钮的 Tab、Space、Enter；菜单方向键、Enter、Esc 和取消无修改。
+- 菜单 Radio/Check 与设置窗口、`config.ini`、重启后的状态逐项交叉验证。
+- 当前视图重复点击不刷新；切换视图保持选择、滚动、图片列表与状态栏。
+- 从菜单关闭文件预览时当前窗口立即消失，晚到 Helper 结果不能重新显示；重新开启
+  无需重启。
+- temporary 模式分别验证菜单选择、Esc 取消和异常路径不会提前隐藏或泄漏暂停计数；
+  always_on_top、normal 模式复测。
 - 主区、固定项、最近栏逐项验证首次、切换、离开宽限。
 - 单击、Ctrl/Shift 多选、框选、滚轮/滚动条、右键菜单、内部/外部拖拽、固定排序。
 - 键盘方向、Home、End、Page Up、Page Down、Enter、Esc、失焦与最后输入仲裁。
@@ -116,7 +145,8 @@ source-management contract checks: PASS
 ### 窗口、DPI 与性能
 
 - 100%、150%、200%，混合 DPI 双屏、负坐标副屏、任务栏四边。
-- 面板靠屏幕边缘、跨屏、接近全屏、实时移动和缩放。
+- 面板靠屏幕边缘、跨屏、接近全屏、实时移动和缩放；确认菜单紧贴按钮下方并由
+  Windows 调整到工作区内。
 - temporary、always_on_top、normal 的层级、无焦点、Alt+Tab/任务栏隐藏。
 - 记录自有缓存、Shell 缓存、常见原图 P95，以及 UI 单次预览相关耗时；
   验收目标分别为 80/150/250/8 ms。

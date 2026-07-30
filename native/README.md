@@ -17,17 +17,25 @@
 
 `PopDropPreview.exe` 是 0.10.0 的文件内容预览组件。它是惰性启动的常驻进程，
 通过当前 PopDrop 进程独占命名的共享内存和事件收发请求。主界面不读取文件，
-也不调用 Shell/WIC。组件严格按以下顺序取内容：
+也不调用 Shell/WIC/IFilter。组件严格按以下顺序取内容：
 
 1. `preview-cache-v1` 中身份、时间、尺寸桶和规格版本都匹配的自有缓存；
 2. WIC 对大小与安全边界允许的本地普通图片执行首帧缩放解码；
 3. 仅在原图超限、解码器不可用或非图片格式时，最后使用
    `SIIGBF_THUMBNAILONLY | SIIGBF_INCACHEONLY` 返回的 Windows 已有真实缩略图。
 
+文本/Markdown/CSV 使用最多 512 KiB 的有界读取和 GDI 静态绘制；长逻辑行先按当前
+字体显式切分为视觉行，再逐行单行绘制。PDF 优先复用系统已有缩略图，首次生成时
+优先调用同目录的非 V8/XFA `pdfium.dll` 按需读取并渲染第一页；DLL 不存在或加载
+失败时，回退到 Win32 原生只读随机访问流和 Windows 自带 `Windows.Data.Pdf`。
+DOCX 在 Helper 内调用 Windows IFilter 提取开头语义文本，
+失败时回退系统真实缩略图。IFilter 和 Shell 扩展都只运行在可终止 Helper 中；
+不启动 Word，不使用 Office COM，也不执行宏、OLE、ActiveX 或外部关系。
+
 直接解码会拒绝仅在线云占位、超出配置边界的源文件和无法安全缩小的图像。
 优先使用 `IWICBitmapSourceTransform`；不支持缩放转换的解码器只有在预计展开内存
-不超限时才进入回退路径。预览进程由主程序放入约 256 MiB 的 Job Object，
-单次请求超过 3 秒会被真正终止并惰性重启。
+不超限时才进入回退路径。预览进程由主程序放入约 512 MiB 的 Job Object；
+图片请求 3 秒、文档请求 12 秒达到硬期限后会被真正终止并惰性重启。
 
 清晰图片缓存仅在面板隐藏期由低优先级 Helper 串行生成。无 Alpha 使用质量约
 82 的 JPEG；有 Alpha 使用真彩压缩 PNG。本版本没有引入调色板量化依赖：
@@ -39,11 +47,26 @@ WIC 无法解码的格式会在这一后台阶段调用 Windows Shell 缩略图�
 ## 构建
 
 要求 Windows 10/11、PowerShell 5.1+，以及 Visual Studio 2022 Build Tools 的
-“使用 C++ 的桌面开发”工作负载。无需第三方包：
+“使用 C++ 的桌面开发”工作负载和随附的当前 Windows SDK。先构建 Helper：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\native\build.ps1
 ```
+
+为了获得更可靠的 PDF 首屏预览，可在设置页启用“PDF 预览”并确认下载，或显式安装
+PDFium 非 V8 构建：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
+```
+
+下载信息由 `native\pdfium-component.ini` 集中维护，默认写入固定 GitHub TGZ
+发行包地址。`PackageType` 支持 `Dll`、`Zip`、`Tgz`；改用自托管 HTTPS 地址时
+必须同时填写 SHA-256。ZIP/TGZ 会自动检查并解压。64 位 Windows 默认只下载 x64
+包并把 `pdfium.dll` 放到 `native\bin\x64`；如需同时
+测试 32 位 AutoHotkey，追加 `-Architecture All`。安装脚本固定发布版本并验证 GitHub
+发布元数据中的 SHA-256。Helper 通过运行时动态加载 PDFium，因此安装 DLL 后无需再次
+编译，只需重启 PopDrop。未执行安装脚本时仍可使用 Windows 内置 PDF 后备。
 
 脚本同时生成：
 
@@ -52,10 +75,15 @@ powershell -ExecutionPolicy Bypass -File .\native\build.ps1
 - `native\bin\x64\PopDropPreview.exe`
 - `native\bin\x86\PopDropPreview.exe`
 
-AHK 源码运行时根据自身位数选择对应文件。发布编译版时，将对应架构的两个 helper 复制到
-`PopDrop.exe` 同目录。helper 协议版本写在请求或共享内存头中；不兼容版本会失败而不会
-猜测字段。源码模式优先加载 `native\bin\<架构>`，编译版优先加载程序同目录组件；
-握手还会校验 `HelperVersion`，防止根目录残留旧 EXE 掩盖最新构建。
+2026-07-30 源码修正版保留了用户提供的旧 Helper 二进制，交付环境没有用 Windows
+SDK 重编译它们。测试本轮 Markdown 修复和 PDFium 动态加载前必须先运行构建脚本；
+PDFium 安装可在构建前后进行。
+
+AHK 源码运行时根据自身位数选择对应文件。发布编译版时，将对应架构的两个 Helper
+以及同架构的 `pdfium.dll`（若启用）复制到 `PopDrop.exe` 同目录。Helper 协议版本
+写在请求或共享内存头中；不兼容版本会失败而不会猜测字段。源码模式优先加载
+`native\bin\<架构>`，编译版优先加载程序同目录组件；握手还会校验
+`HelperVersion`，防止根目录残留旧 EXE 掩盖最新构建。
 
 ## 故障隔离
 
@@ -68,5 +96,7 @@ helper 为独立、非提权进程。崩溃不会终止 PopDrop；主程序检�
 
 ## 第三方组件
 
-两个 Helper 只使用 Windows SDK、Shell、WIC、BCrypt 和 MSVC 运行库。没有下载、
-捆绑或链接 pngquant、libimagequant、GPL 或商业授权组件。
+两个 Helper 的编译仍只链接 Windows SDK、Shell、WIC、Windows Search IFilter、
+BCrypt 和 MSVC 运行库。PDFium 是用户显式安装、运行时动态加载的 BSD 风格许可
+组件；源码包不捆绑它。没有引入 MuPDF、Poppler、pngquant、libimagequant 或商业
+授权组件。

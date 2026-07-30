@@ -29,7 +29,7 @@ Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之�
 
 ```ini
 [General]
-ConfigVersion=20
+ConfigVersion=21
 Hotkey=F2
 OpenFileMode=DoubleClick
 DefaultContextMenu=PopDrop
@@ -57,7 +57,7 @@ HoverDelayMs=350
 SwitchDelayMs=120
 LeaveGraceMs=140
 KeyboardDelayMs=250
-Width=320
+Width=400
 CacheEnabled=1
 CacheStartAfterHiddenSeconds=10
 CacheMaxMB=256
@@ -68,6 +68,12 @@ DirectImageMaxFileMB=64
 DirectImageMaxEdge=65535
 DirectImageMaxPixelsMP=160
 DirectImageMaxExpandedMB=256
+DocumentEnabled=1
+
+[QuickPreview]
+ExternalQuickPreviewProvider=Off
+SeerIntegrationEnabled=0
+QuickLookPath=
 
 [Workspaces]
 Order=workspace-default
@@ -111,8 +117,8 @@ Path=%USERPROFILE%\Downloads
 | `ThumbnailVerticalGap` | 相邻图标行之间的垂直留白，0～128 像素，默认 4。文件名高度由 `ThumbnailTextLines` 另行预留，设为 0 也不会压扁缩略图。 |
 | `ThumbnailTextLines` | 缩略图文件名显示并预留的行数。`1`=单行紧凑，过长名称按图标宽度显示省略号，完整路径仍可在状态栏查看；`2`=双行，默认 2；其他值会自动限制到 1～2。 |
 | `WindowWidth` / `WindowHeight` | 面板打开时的尺寸。 |
-| `ViewMode` | `Thumbnail`=缩略图，`List`=文件名+修改时间。也可以在面板顶部手动切换。 |
-| `ShowRecentSidebar` | `1`=显示最近打开侧边栏，`0`=关闭。面板顶部按钮也可以随时开关。 |
+| `ViewMode` | `Thumbnail`=缩略图，`List`=文件名+修改时间。也可以从面板顶部“显示 ▾”菜单切换。 |
+| `ShowRecentSidebar` | `1`=显示最近打开侧边栏，`0`=关闭。也可以从“显示 ▾”菜单随时开关。 |
 | `RecentFileCount` | 侧边栏最多显示多少个近期文件，范围 1～100。 |
 | `CachePath` | 扫描结果缓存目录。留空时使用软件目录下的 `cache` 文件夹；不可写时退化为内存缓存。 |
 | `ThumbnailPolicy` | `Full`（默认）允许现场生成缩略图，可能造成短暂停顿；`Fast` 只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标。 |
@@ -125,8 +131,19 @@ Path=%USERPROFILE%\Downloads
 
 ### 文件内容预览（v0.10+）
 
-设置页“显示”中可以打开或关闭文件预览，选择自动、右侧或左侧，并控制是否在后台
-生成清晰图片预览。保存后立即生效。原图允许安全解码时优先使用原图；Windows 已有
+主面板顶部的“显示 ▾”打开一个 Windows 原生菜单，结构为：
+
+- “缩略图”和“列表”是互斥视图，圆点表示当前模式；
+- “文件预览”和“近期栏”是独立开关，勾选表示开启；
+- 点击当前视图不会重复刷新；切换其他项目会立即生效并持久化；
+- 按钮可通过 Tab 聚焦，并可用 Space/Enter、方向键、Enter 和 Esc 操作。
+
+菜单打开时会临时暂停 temporary 模式的自动隐藏并抑制当前预览，关闭后恢复判断。
+设置窗口或配置重载改变状态后，下次打开菜单会按真实运行状态重新同步，而不是沿用
+上一次的菜单勾选。
+
+设置页“显示”中可以分别控制文件预览、文档预览、位置、静态快照缓存和外部空格键
+预览。保存后立即生效。原图允许安全解码时优先使用原图；Windows 已有
 缩略图只作为最后回退，并会等比放大到可用区域。后台缓存从面板隐藏后开始计时；
 到达设定时间后由 IDLE 优先级 Helper 串行生成，不会因长时间扫描而永久跳过；
 WIC 不支持的格式会在后台尝试系统缩略图处理器。其余参数保留在 `[Preview]`：
@@ -139,6 +156,7 @@ WIC 不支持的格式会在后台尝试系统缩略图处理器。其余参数�
 | `KeyboardDelayMs` | 真实键盘导航改变焦点后的延迟。 |
 | `Width` | 最大内容宽度，单位 DIP，范围 180–640。 |
 | `CacheEnabled` | 只控制写入新缓存；关闭后仍可读取已有有效缓存。 |
+| `DocumentEnabled` | `1` 允许文档悬浮预览；关闭后立即隐藏文档卡并失效显示请求，已有缓存保留。 |
 | `CacheStartAfterHiddenSeconds` | 面板连续隐藏多久后开始低优先级生成。 |
 | `CacheMaxMB` / `CacheMaxItems` | 自有预览缓存的软容量和项目数上限。 |
 | `CacheItemMaxKB` | 单项硬上限，最大允许值为 2048。 |
@@ -146,7 +164,10 @@ WIC 不支持的格式会在后台尝试系统缩略图处理器。其余参数�
 | `DirectImageMaxEdge` / `DirectImageMaxPixelsMP` | 源图边长和总像素安全边界。 |
 | `DirectImageMaxExpandedMB` | 解码器无法原生缩小时允许的预计展开内存上限。 |
 
-每次面板隐藏会话最多成功生成 50 项；失败不占成功额度，单轮最多尝试 100 项。
+只有本次实际悬浮且尚无静态快照的图片或文档才进入隐藏后生成队列；关闭面板不会
+扫描当前工作区、固定项或最近项。文件大小与最后修改时间都未变化时直接复用现有
+快照，不重新解码或压缩。每次面板隐藏会话最多成功生成 50 项；失败不占成功额度，
+单轮最多尝试 100 项。
 缓存运行状态写入
 `cache\preview-cache-v1\cache-status.ini`；其中 `Stage`、`Attempted`、
 `Succeeded`、`Failed` 和剩余队列可用于判断缓存是否启动及失败位置。
@@ -159,9 +180,42 @@ WIC 不支持的格式会在后台尝试系统缩略图处理器。其余参数�
 或隐藏面板会立即关闭预览。鼠标静止在 A 上而键盘移到 B 时显示 B，只有鼠标再次
 真实移动才切回鼠标候选。
 
-图片会尽可能直接生成内容预览；PDF、视频、Office 等其他文件在 Windows 已有真实
-缩略图时也可预览。具体格式取决于 Windows 和已安装的图像/缩略图组件。没有真实
-内容缩略图时保持安静，不会用普通文件图标代替。
+Markdown、纯文本、日志、配置和常见代码最多读取开头 512 KiB；支持 BOM、UTF-8、
+UTF-16，并在二进制嗅探通过后有限回退系统代码页。CSV/TSV 最多显示 30 行 × 12 列，
+不执行公式。Markdown 只绘制静态标题、段落、强调、列表、任务、引用、代码、表格和
+分隔线；原始 HTML、脚本、Mermaid、插件、网络资源和链接点击均不会执行。
+
+PDF 预览默认关闭。可在“设置 → 显示与过滤”中勾选“PDF 预览”；组件尚未安装时
+PopDrop 会先征求同意，再异步下载当前架构的 PDFium 并校验 SHA-256。PDF 卡只显示
+第一页：已有 Shell 缩略图可直接使用，否则隔离 Helper 优先动态加载
+同目录的非 V8/XFA `pdfium.dll`，使用按需随机读取生成静态快照；PDFium 不可用时
+再通过原生只读随机访问流调用 Windows 自带 `Windows.Data.Pdf`。组件来源由
+`native\pdfium-component.ini` 集中维护，默认填写固定 GitHub TGZ 发行包地址；
+也可改为自托管 HTTPS DLL、ZIP 或 TGZ，并填写 SHA-256。ZIP/TGZ 会自动安全解压并
+定位唯一的 `pdfium.dll`。也可显式运行 `native\install-pdfium.ps1`；
+DOCX 优先使用 Windows IFilter
+提取开头语义文本，无法提取时尝试系统真实缩略图。它们都在可终止 Helper 内运行，
+不会启动 Word、执行宏/OLE/ActiveX、访问远程关系或自动下载云端占位文件。复杂
+DOCX 版式、分页、页眉页脚和嵌入图片可能被简化或忽略。
+
+首次生成约 120 ms 内完成时直接显示；之后显示“首次预览正在生成…”，5 秒后更新为
+长耗时提示，12 秒硬超时。结果只有在 Generation、列表实例和面板会话仍匹配时才
+能显示；移开后完成的安全任务只写共享快照缓存。错误按资源超限、密码保护、超时、
+不可访问和损坏/不支持区分，并使用分类负缓存。
+
+### 外部空格键快速预览
+
+`[QuickPreview]` 默认 `Off`。设置为 `Seer` 时还需
+`SeerIntegrationEnabled=1` 且运行中的 Seer 通过 `SeerWindowClass` 检测；
+设置为 `QuickLook` 时，`QuickLookPath` 必须是桌面版或便携版
+`QuickLook.exe` 的绝对路径，并通过产品信息校验。Microsoft Store 版不具有可假定的
+命令行接口。
+
+能力检测失败时 PopDrop 不接管空格键。成功打开后进入临时 `QuickViewActive`：
+temporary 模式不会因外部查看器获得焦点而隐藏；焦点项变化以 150 ms 防抖同步；
+再次按 Space 或先按 Esc 关闭外部预览，Enter/双击正式打开文件前也会关闭。该状态
+会把外部查看器维持在 PopDrop 之上，关闭时恢复查看器原来的窗口层级；不会修改或
+保存 PopDrop 的置顶设置。PopDrop 不安装、捆绑或模拟按键调用任何外部查看器。
 
 ---
 

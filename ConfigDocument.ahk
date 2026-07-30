@@ -435,6 +435,7 @@ class PopDropConfigDocument {
         folded := StrLower(section)
         if folded = "general" || folded = "filemanager"
             || folded = "preview"
+            || folded = "quickpreview"
             || folded = "noisefilter"
             || folded = "externaltransfer"
             return 1
@@ -475,6 +476,8 @@ class PopDropConfigDocument {
                 return 25
             if folded = "preview"
                 return 27
+            if folded = "quickpreview"
+                return 28
             return 30
         }
         if area = 2 {

@@ -121,6 +121,7 @@ OpenSettingsGui() {
     global Panel, SettingsDialog, SettingsController
 
     CancelFilePointerGesture()
+    PreviewSuppress("settings", false)
     if IsObject(SettingsDialog) {
         try {
             WinRestore("ahk_id " SettingsDialog.Hwnd)
@@ -231,6 +232,9 @@ LoadSettingsIntoDraft() {
     global TransferMaxConcurrent, TransferShowNotifications
     global FileManagerProvider, FileManagerExecutable
     global PreviewEnabled, PreviewSide, PreviewCacheEnabled
+    global PreviewDocumentEnabled, PreviewPdfEnabled
+    global ExternalQuickPreviewProvider
+    global SeerIntegrationEnabled, QuickLookPath
 
     workspaceDrafts := []
     activeSources := []
@@ -285,6 +289,11 @@ LoadSettingsIntoDraft() {
             PreviewEnabled: PreviewEnabled,
             PreviewSide: PreviewSide,
             PreviewCacheEnabled: PreviewCacheEnabled,
+            PreviewDocumentEnabled: PreviewDocumentEnabled,
+            PreviewPdfEnabled: PreviewPdfEnabled,
+            QuickPreviewProvider: ExternalQuickPreviewProvider,
+            SeerIntegrationEnabled: SeerIntegrationEnabled,
+            QuickLookPath: QuickLookPath,
             DefaultDisplayScope: ReadGlobalDisplayScopeForDraft(),
             DefaultFolderTimeMode: ReadGlobalFolderTimeForDraft(),
             DefaultFilter: ReadGlobalFilterForDraft(),
@@ -1252,45 +1261,55 @@ HandleFileManagerTestResult(c, result, successText) {
 BuildDisplaySettingsPage(c, tabs) {
     tabs.UseTab(4)
     g := c.Gui
-    g.AddGroupBox("x200 y29 w818 h330", "共享排除的文件夹名称")
+    g.AddGroupBox("x200 y29 w818 h190", "共享排除的文件夹名称")
     c.ExcludedNameList := g.AddListView(
-        "x220 y56 w410 h238 Report -Multi NoSortHdr", ["文件夹名称"])
+        "x220 y56 w410 h112 Report -Multi NoSortHdr", ["文件夹名称"])
     c.ExcludedNameList.ModifyCol(1, 385)
     c.ExcludedNameAdd := AddUiButton(g, "x650 y56 w88", "添加")
     c.ExcludedNameRemove := AddUiButton(g, "xp y+8 w88", "移除")
     c.ExcludedNameRestore := AddUiButton(g, "xp y+8 w112", "恢复推荐值")
-    g.AddText("x650 y188 w325 h88 c555555",
+    g.AddText("x780 y56 w215 h112 c555555",
         "匹配的文件夹及其内容不会显示。明确添加为监控来源的文件夹"
         . "不受此规则影响。只支持精确文件夹名称，不使用通配符。")
 
-    g.AddGroupBox("x200 y372 w818 h206",
+    g.AddGroupBox("x200 y230 w818 h206",
         "显示 · 应用于所有工作区")
-    g.AddText("x220 y407 w150", "每个来源最多显示：")
+    g.AddText("x220 y265 w150", "每个来源最多显示：")
     c.GlobalMax := AddUiEdit(g, "x380 yp-4 w82 Number")
     g.AddText("x470 yp+4 w150 c666666", "个项目（1–100）")
-    g.AddText("x220 y445 w150", "文件排序：")
+    g.AddText("x220 y303 w150", "文件排序：")
     c.GlobalSort := AddUiDropDownList(g, "x380 yp-4 w245",
         ["修改时间（最新在前）", "名称（升序）"])
-    c.ShowRecent := g.AddCheckBox("x220 y487", "显示最近文件区域")
+    c.ShowRecent := g.AddCheckBox("x220 y345", "显示最近文件区域")
     g.AddText("x420 yp+3 w86", "显示数量：")
     c.RecentCount := AddUiEdit(g, "x508 yp-4 w82 Number")
     g.AddText("x600 yp+4 w120 c666666", "（1–100）")
-    c.NoiseFilterEnabled := g.AddCheckBox("x220 y526",
+    c.NoiseFilterEnabled := g.AddCheckBox("x220 y384",
         "隐藏常见临时、锁定及系统文件（推荐）")
     c.ManageNoiseRules := AddUiButton(g, "x820 yp-5 w138", "管理忽略规则…")
-    g.AddText("x240 y553 w555 c666666",
+    g.AddText("x240 y411 w555 c666666",
         "自动隐藏 Office 锁定文件、系统目录信息等通常不需要显示的文件。")
-    c.HiddenNoiseCount := g.AddText("x800 y556 w130 c666666 Right", "本次共隐藏 0 个")
-    c.ViewHiddenNoise := AddUiButton(g, "x940 y549 w55", "查看…")
+    c.HiddenNoiseCount := g.AddText("x800 y414 w130 c666666 Right", "本次共隐藏 0 个")
+    c.ViewHiddenNoise := AddUiButton(g, "x940 y407 w55", "查看…")
 
-    g.AddGroupBox("x200 y588 w818 h68",
+    g.AddGroupBox("x200 y445 w818 h145",
         "文件内容预览 · 应用于所有工作区")
-    c.PreviewEnabled := g.AddCheckBox("x220 y615", "文件预览")
-    g.AddText("x365 yp+3 w76", "预览位置：")
-    c.PreviewSide := AddUiDropDownList(g, "x445 yp-4 w150",
+    c.PreviewEnabled := g.AddCheckBox("x220 y470", "文件预览")
+    c.PreviewDocumentEnabled := g.AddCheckBox("x320 yp", "文档预览")
+    c.PreviewPdfEnabled := g.AddCheckBox("x420 yp", "PDF 预览")
+    g.AddText("x535 yp+3 w76", "预览位置：")
+    c.PreviewSide := AddUiDropDownList(g, "x615 yp-4 w120",
         ["自动", "右侧", "左侧"])
-    c.PreviewCacheEnabled := g.AddCheckBox("x630 yp",
-        "后台生成清晰图片预览")
+    c.PreviewCacheEnabled := g.AddCheckBox("x755 yp",
+        "后台生成静态快照")
+    g.AddText("x220 y507 w100", "PDFium 组件：")
+    c.PdfiumStatus := g.AddText("x320 yp w440 c666666", "")
+    c.PdfiumInstall := AddUiButton(g, "x820 yp-5 w160", "下载组件")
+    g.AddText("x220 y547 w120", "空格键快速预览：")
+    c.QuickPreviewProvider := AddUiDropDownList(g, "x345 yp-4 w130",
+        ["不启用", "使用 Seer", "使用 QuickLook"])
+    c.QuickLookPath := AddUiEdit(g, "x490 yp w390")
+    c.QuickLookBrowse := AddUiButton(g, "x890 yp-1 w90", "浏览…")
 
     c.ExcludedNameAdd.OnEvent("Click", AddExcludedName.Bind(c))
     c.ExcludedNameRemove.OnEvent("Click", RemoveExcludedName.Bind(c))
@@ -1305,6 +1324,14 @@ BuildDisplaySettingsPage(c, tabs) {
     c.PreviewEnabled.OnEvent("Click", DisplayControlChanged.Bind(c))
     c.PreviewSide.OnEvent("Change", DisplayControlChanged.Bind(c))
     c.PreviewCacheEnabled.OnEvent("Click", DisplayControlChanged.Bind(c))
+    c.PreviewDocumentEnabled.OnEvent("Click", DisplayControlChanged.Bind(c))
+    c.PreviewPdfEnabled.OnEvent(
+        "Click", PdfiumPreviewSettingClicked.Bind(c))
+    c.PdfiumInstall.OnEvent("Click", PdfiumInstallClicked.Bind(c))
+    c.QuickPreviewProvider.OnEvent(
+        "Change", DisplayControlChanged.Bind(c))
+    c.QuickLookPath.OnEvent("Change", DisplayControlChanged.Bind(c))
+    c.QuickLookBrowse.OnEvent("Click", BrowseQuickLookPath.Bind(c))
 }
 
 LoadGeneralControls(c) {
@@ -1394,6 +1421,14 @@ LoadDisplayControls(c) {
             : StrLower(d.PreviewSide) = "left" ? 3 : 1
         c.PreviewSide.Choose(sideIndex)
         c.PreviewCacheEnabled.Value := d.PreviewCacheEnabled
+        c.PreviewDocumentEnabled.Value := d.PreviewDocumentEnabled
+        c.PreviewPdfEnabled.Value := d.PreviewPdfEnabled
+        providerIndex := StrLower(d.QuickPreviewProvider) = "seer" ? 2
+            : StrLower(d.QuickPreviewProvider) = "quicklook" ? 3 : 1
+        c.QuickPreviewProvider.Choose(providerIndex)
+        c.QuickLookPath.Value := d.QuickLookPath
+        UpdateQuickPreviewControlState(c)
+        UpdatePdfiumComponentState(c)
         hiddenCount := IsObject(CurrentScanResult) && HasProp(CurrentScanResult, "HiddenCount")
             ? CurrentScanResult.HiddenCount : 0
         c.HiddenNoiseCount.Text := "本次共隐藏 " hiddenCount " 个"
@@ -1401,6 +1436,30 @@ LoadDisplayControls(c) {
             && HasProp(CurrentScanResult, "HiddenItems")
             && CurrentScanResult.HiddenItems.Length > 0
     } finally c.Loading := false
+}
+
+SyncSettingsDisplayStateFromRuntime() {
+    global SettingsController, ShowRecentSidebar, PreviewEnabled
+    if !IsObject(SettingsController)
+        return
+    c := SettingsController
+    if !HasProp(c, "ShowRecent") || !HasProp(c, "PreviewEnabled")
+        return
+
+    ; Preserve unrelated unsaved settings. If the dialog was clean, the
+    ; already-persisted toolbar change becomes its new clean baseline.
+    DisplayControlChanged(c)
+    wasDirty := SettingsDraftSignature(c.Draft) != c.OriginalSignature
+    c.Draft.General.ShowRecentSidebar := !!ShowRecentSidebar
+    c.Draft.General.PreviewEnabled := !!PreviewEnabled
+    c.Loading := true
+    try {
+        c.ShowRecent.Value := !!ShowRecentSidebar
+        c.RecentCount.Enabled := !!ShowRecentSidebar
+        c.PreviewEnabled.Value := !!PreviewEnabled
+    } finally c.Loading := false
+    if !wasDirty
+        c.OriginalSignature := SettingsDraftSignature(c.Draft)
 }
 
 DisplayControlChanged(c, *) {
@@ -1417,6 +1476,151 @@ DisplayControlChanged(c, *) {
     d.PreviewEnabled := !!c.PreviewEnabled.Value
     d.PreviewSide := ["Auto", "Right", "Left"][Max(1, c.PreviewSide.Value)]
     d.PreviewCacheEnabled := !!c.PreviewCacheEnabled.Value
+    d.PreviewDocumentEnabled := !!c.PreviewDocumentEnabled.Value
+    d.PreviewPdfEnabled := !!c.PreviewPdfEnabled.Value
+    d.QuickPreviewProvider := ["Off", "Seer", "QuickLook"][
+        Max(1, c.QuickPreviewProvider.Value)]
+    d.SeerIntegrationEnabled := d.QuickPreviewProvider = "Seer"
+    d.QuickLookPath := Trim(c.QuickLookPath.Value)
+    UpdateQuickPreviewControlState(c)
+}
+
+PdfiumComponentArchitecture() {
+    return A_PtrSize = 8 ? "x64" : "x86"
+}
+
+PdfiumComponentDllPath() {
+    if A_IsCompiled
+        return A_ScriptDir "\pdfium.dll"
+    return A_ScriptDir "\native\bin\" PdfiumComponentArchitecture()
+        . "\pdfium.dll"
+}
+
+PdfiumComponentInstalled() {
+    path := PdfiumComponentDllPath()
+    if !FileExist(path)
+        return false
+    try return FileGetSize(path) >= 1024 * 1024
+    catch
+        return false
+}
+
+PdfiumComponentInstallerPath() {
+    sourcePath := A_ScriptDir "\native\install-pdfium.ps1"
+    if FileExist(sourcePath)
+        return sourcePath
+    return A_ScriptDir "\install-pdfium.ps1"
+}
+
+UpdatePdfiumComponentState(c) {
+    installed := PdfiumComponentInstalled()
+    c.PdfiumStatus.Text := installed
+        ? "已安装（" PdfiumComponentArchitecture() "）"
+        : "未安装；启用 PDF 预览需要下载约 6–7 MB"
+    c.PdfiumInstall.Text := installed ? "组件已安装" : "下载组件…"
+    c.PdfiumInstall.Enabled := !installed
+        && !(HasProp(c, "PdfiumInstallPid") && c.PdfiumInstallPid)
+}
+
+PdfiumPreviewSettingClicked(c, *) {
+    if c.Loading
+        return
+    if !c.PreviewPdfEnabled.Value {
+        DisplayControlChanged(c)
+        return
+    }
+    if PdfiumComponentInstalled() {
+        DisplayControlChanged(c)
+        return
+    }
+    c.PreviewPdfEnabled.Value := 0
+    c.Draft.General.PreviewPdfEnabled := false
+    if SettingsMessage(c,
+        "可靠的 PDF 预览需要下载 PDFium 组件（约 6–7 MB）。`n`n"
+        . "组件会按当前程序架构下载到 Helper 所在目录，"
+        . "并在安装前校验 SHA-256。是否现在下载？",
+        "启用 PDF 预览", "YesNo Icon!") = "Yes"
+        StartPdfiumComponentInstall(c)
+}
+
+PdfiumInstallClicked(c, *) {
+    if SettingsMessage(c,
+        "将下载与当前程序架构匹配的 PDFium 组件（约 6–7 MB），"
+        . "并校验 SHA-256。是否继续？",
+        "下载 PDF 预览组件", "YesNo Icon!") = "Yes"
+        StartPdfiumComponentInstall(c)
+}
+
+StartPdfiumComponentInstall(c) {
+    if HasProp(c, "PdfiumInstallPid") && c.PdfiumInstallPid
+        return
+    installer := PdfiumComponentInstallerPath()
+    if !FileExist(installer) {
+        SettingsMessage(c, "找不到 PDFium 组件安装脚本：`n" installer,
+            "无法下载组件", "Iconx")
+        return
+    }
+    command := 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'
+        . installer '" -Architecture ' PdfiumComponentArchitecture()
+    if A_IsCompiled
+        command .= ' -DestinationDirectory "' A_ScriptDir '"'
+    try Run(command, A_ScriptDir, "Hide", &pid)
+    catch as err {
+        SettingsMessage(c, "无法启动组件下载：`n" err.Message,
+            "无法下载组件", "Iconx")
+        return
+    }
+    c.PdfiumInstallPid := pid
+    c.PdfiumStatus.Text := "正在下载并校验组件…"
+    c.PdfiumInstall.Enabled := false
+    callback := PollPdfiumComponentInstall.Bind(c, pid)
+    c.PdfiumInstallPoll := callback
+    SetTimer(callback, 500)
+}
+
+PollPdfiumComponentInstall(c, pid) {
+    global SettingsController
+    if ProcessExist(pid)
+        return
+    if HasProp(c, "PdfiumInstallPoll")
+        SetTimer(c.PdfiumInstallPoll, 0)
+    c.PdfiumInstallPid := 0
+    if !IsObject(SettingsController)
+        || SettingsController.Gui.Hwnd != c.Gui.Hwnd
+        return
+    if PdfiumComponentInstalled() {
+        c.PreviewPdfEnabled.Value := 1
+        c.Draft.General.PreviewPdfEnabled := true
+        UpdatePdfiumComponentState(c)
+        SettingsMessage(c,
+            "PDFium 组件安装完成，PDF 预览已勾选。请保存设置后生效。",
+            "组件安装完成", "Iconi")
+    } else {
+        UpdatePdfiumComponentState(c)
+        SettingsMessage(c,
+            "组件下载或校验失败。请检查网络、组件清单和下载地址。",
+            "组件安装失败", "Iconx")
+    }
+}
+
+UpdateQuickPreviewControlState(c) {
+    quickLook := c.QuickPreviewProvider.Value = 3
+    c.QuickLookPath.Enabled := quickLook
+    c.QuickLookBrowse.Enabled := quickLook
+}
+
+BrowseQuickLookPath(c, *) {
+    try selected := SelectPanelFile(
+        "1", , "选择 QuickLook 桌面版或便携版程序",
+        "QuickLook.exe (QuickLook.exe)")
+    catch
+        return
+    if IsObject(selected)
+        selected := selected.Length ? selected[1] : ""
+    if selected != "" {
+        c.QuickLookPath.Value := selected
+        DisplayControlChanged(c)
+    }
 }
 
 RefreshSourceList(c, preferredId := "", selectFirst := true) {
@@ -3001,7 +3205,12 @@ SettingsDraftSignature(draft) {
         g.AllowHttp ? "1" : "0", g.TransferMaxConcurrent "",
         g.ShowCompletionNotifications ? "1" : "0",
         g.PreviewEnabled ? "1" : "0", g.PreviewSide,
-        g.PreviewCacheEnabled ? "1" : "0")
+        g.PreviewCacheEnabled ? "1" : "0",
+        g.PreviewDocumentEnabled ? "1" : "0",
+        g.PreviewPdfEnabled ? "1" : "0",
+        g.QuickPreviewProvider,
+        g.SeerIntegrationEnabled ? "1" : "0",
+        PathKey(g.QuickLookPath))
     n := g.NoiseFilter
     parts.Push("N", n.Enabled ? "1" : "0", n.HideHidden ? "1" : "0",
         n.HideSystem ? "1" : "0", n.HideTemporary ? "1" : "0",
@@ -3085,6 +3294,7 @@ DestroySettingsGui(c) {
     SettingsController := 0
     try c.Gui.Destroy()
     EndAutoHidePause()
+    PreviewRecoverAfterInteraction()
 }
 
 ValidateSettingsDraft(c) {
@@ -3158,6 +3368,13 @@ ValidateSettingsDraft(c) {
         errors.Push("最近文件显示数量必须是 1–100 的整数。")
     if !IsIntegerText(d.General.TransferMaxConcurrent, 1, 6)
         errors.Push("外部传输最大并发数必须是 1–6 的整数。")
+    if !ValueInArray(d.General.QuickPreviewProvider,
+        ["Off", "Seer", "QuickLook"])
+        errors.Push("空格键快速预览提供程序无效。")
+    else if d.General.QuickPreviewProvider = "QuickLook"
+        && !QuickPreviewValidateQuickLookPath(d.General.QuickLookPath)
+        warnings.Push("QuickLook 路径未通过桌面版命令行能力校验；"
+            . "保存后不会拦截空格键。")
 
     if !d.Workspaces.Length
         errors.Push("至少需要保留一个工作区。")
@@ -3512,6 +3729,16 @@ WriteSettingsDraft(draft, tempPath) {
     doc.SetValue("Preview", "Side", g.PreviewSide, 1)
     doc.SetValue("Preview", "CacheEnabled",
         g.PreviewCacheEnabled ? "1" : "0", 1)
+    doc.SetValue("Preview", "DocumentEnabled",
+        g.PreviewDocumentEnabled ? "1" : "0", 1)
+    doc.SetValue("Preview", "PdfEnabled",
+        g.PreviewPdfEnabled ? "1" : "0", 1)
+    doc.SetValue("QuickPreview", "ExternalQuickPreviewProvider",
+        g.QuickPreviewProvider, 1)
+    doc.SetValue("QuickPreview", "SeerIntegrationEnabled",
+        g.SeerIntegrationEnabled ? "1" : "0", 1)
+    doc.SetValue("QuickPreview", "QuickLookPath",
+        g.QuickLookPath, 1)
     noise := g.NoiseFilter
     EnsureNoiseFilterConfigComments(doc)
     noiseEntries := [{Key: "Enabled", Value: noise.Enabled ? "1" : "0"},

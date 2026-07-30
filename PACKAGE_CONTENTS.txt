@@ -1,0 +1,15 @@
+PopDrop optional PDFium / cache hotfix 4 r2
+
+Required PDFium integration files:
+
+- native\install-pdfium.ps1
+- native\pdfium-component.ini
+- native\build.ps1
+- native\PopDropPreview\PopDropPreview.cpp
+
+After extracting this archive, run from the extracted project root:
+
+powershell -ExecutionPolicy Bypass -File .\native\build.ps1
+powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
+
+The source archive intentionally does not contain pdfium.dll.
