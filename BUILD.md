@@ -1,7 +1,6 @@
 # PopDrop 构建与验证
 
-PopDrop 主程序使用 AutoHotkey v2；外部内容投放 helper 使用 Windows C++。本次应用
-工具动作功能没有增加第三方运行库，也不需要重新设计 native helper 协议。
+PopDrop 主程序使用 AutoHotkey v2；外部内容投放和文件预览 helper 使用 Windows C++。
 
 ## 环境
 
@@ -49,15 +48,16 @@ AutoHotkey 位数从 `native\bin\<架构>` 加载；发布包应把对应架构�
 
 ### 常见问题
 
-#### 1. Ahk2Exe 报 "Failed to compile" 但脚本自测通过
+#### Ahk2Exe 解释器存根版本不匹配
+
+**现象：** 编译报 "Failed to compile" 但脚本自测通过。
 
 **根因：** 解释器存根文件（`Unicode 64-bit.bin`、`AutoHotkeySC.bin`）仍是 v1 版本，
 无法解析 `#Requires AutoHotkey v2.0` 开头的 v2 脚本。
 
-**修复：** 将旧版 `*.bin` 替换为 v2 的 `AutoHotkey64.exe`：
+**修复：** 将旧版 `*.bin` 替换为 v2 的 `AutoHotkey64.exe`（需要管理员权限）：
 
 ```powershell
-# 需要管理员权限
 Copy-Item 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe' `
     'C:\Program Files\AutoHotkey\Compiler\Unicode 64-bit.bin' -Force
 Copy-Item 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe' `
@@ -65,31 +65,6 @@ Copy-Item 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe' `
 Copy-Item 'C:\Program Files\AutoHotkey\v2\AutoHotkey32.exe' `
     'C:\Program Files\AutoHotkey\Compiler\Unicode 32-bit.bin' -Force
 ```
-
-#### 2. `--self-test` 编译失败（Exit code 17）
-
-**根因：** `PopDrop.ahk` 在模块化后，`--self-test` 和 `--scan-worker` 参数分派写
-在 `#Include modules/*.ahk` 之前。此时模块中的全局变量和函数尚未定义，分派代码
-引用未赋值的全局变量导致语法校验失败。
-
-**修复：** 将参数分派移到所有 `#Include` 之后：
-
-```ahk
-#Include modules\SelfTests.ahk
-#Include modules\Lifecycle.ahk
-
-if A_Args.Length && A_Args[1] = "--self-test" {
-    RunSelfTests()
-    ExitApp
-}
-```
-
-#### 3. `#Include` 路径文件不存在
-
-**根因：** Ahk2Exe 以入口文件所在目录为工作目录查找 `#Include`。如果从其他目录
-调用，相对路径可能解析失败。
-
-**修复：** 始终在项目根目录执行编译，或使用绝对路径。
 
 ### 发布清单
 
