@@ -1,35 +1,28 @@
-PopDrop v1.0.0 — 模块化重构稳定版
+PopDrop v1.0.0 — 稳定版发布包
 
-AHK source layout:
+Compiled release (for end users):
 
-- PopDrop.ahk（入口，含 #Include 指令）
-- *.ahk（根目录模块：ConfigDocument, ExternalDrop, FileManager, Preview, QuickPreview, SettingsGui）
-- modules\*.ahk（14 个业务模块）
+- PopDrop.exe（主程序，x64）
+- PopDropTransfer.exe（外部内容投放 Helper，x64）
+- PopDropPreview.exe（文件预览 Helper，x64）
+- config.example.ini（配置示例，复制为 config.ini 使用）
+- README.md（项目介绍）
+- USAGE.md（使用指南）
+- CHANGELOG.md（更新日志）
+- THIRD_PARTY_NOTICES.md（第三方许可声明）
 - assets\（图标资源）
-- config.example.ini（配置示例）
-
-Native helper components:
-
-- PopDropTransfer.exe（外部内容投放，x86/x64）
-- PopDropPreview.exe（文件预览，x86/x64）
-- native\build.ps1（构建脚本）
-- native\install-pdfium.ps1（PDFium 安装脚本）
+- native\bin\x64\（x64 Helper 备用二进制）
+- native\bin\x86\（x86 Helper 备用二进制）
+- native\install-pdfium.ps1（PDFium 安装脚本，可选）
 - native\pdfium-component.ini（PDFium 组件配置）
-- native\PopDropTransfer\PopDropTransfer.cpp（源码）
-- native\PopDropPreview\PopDropPreview.cpp（源码）
+- native\third_party\pdfium\LICENSE（PDFium BSD 许可证）
 
-After extracting the source archive, the compiled PopDrop.exe is already
-included. For source mode, run from the project root:
+To use:
 
-    AutoHotkey64.exe .\PopDrop.ahk
+1. 将 config.example.ini 复制为 config.ini 并编辑
+2. 运行 PopDrop.exe
+3. 按 F2 呼出面板
 
-To rebuild native helpers:
-
-    powershell -ExecutionPolicy Bypass -File .\native\build.ps1
-
-To enable PDF preview (optional):
+可选 PDF 预览：
 
     powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
-
-The archive intentionally does not contain pdfium.dll (download on demand
-via the settings page or install-pdfium.ps1).
