@@ -1,25 +1,35 @@
-PopDrop optional PDFium / cache hotfix 4 r2
+PopDrop v1.0.0 — 模块化重构稳定版
 
 AHK source layout:
 
-- PopDrop.ahk
-- modules\*.ahk
-- CODE_ORGANIZATION.md
+- PopDrop.ahk（入口，含 #Include 指令）
+- *.ahk（根目录模块：ConfigDocument, ExternalDrop, FileManager, Preview, QuickPreview, SettingsGui）
+- modules\*.ahk（14 个业务模块）
+- assets\（图标资源）
+- config.example.ini（配置示例）
 
-Required PDFium integration files:
+Native helper components:
 
-- native\install-pdfium.ps1
-- native\pdfium-component.ini
-- native\build.ps1
-- native\PopDropPreview\PopDropPreview.cpp
+- PopDropTransfer.exe（外部内容投放，x86/x64）
+- PopDropPreview.exe（文件预览，x86/x64）
+- native\build.ps1（构建脚本）
+- native\install-pdfium.ps1（PDFium 安装脚本）
+- native\pdfium-component.ini（PDFium 组件配置）
+- native\PopDropTransfer\PopDropTransfer.cpp（源码）
+- native\PopDropPreview\PopDropPreview.cpp（源码）
 
-After extracting this archive, run from the extracted project root:
+After extracting the source archive, the compiled PopDrop.exe is already
+included. For source mode, run from the project root:
 
-powershell -ExecutionPolicy Bypass -File .\native\build.ps1
-powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
+    AutoHotkey64.exe .\PopDrop.ahk
 
-The source archive intentionally does not contain pdfium.dll.
+To rebuild native helpers:
 
-This revision also includes the QuickLook menu, action editor, long-path footer,
-source inheritance, and Seer settings fixes plus their cross-platform contract
-test.
+    powershell -ExecutionPolicy Bypass -File .\native\build.ps1
+
+To enable PDF preview (optional):
+
+    powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
+
+The archive intentionally does not contain pdfium.dll (download on demand
+via the settings page or install-pdfium.ps1).
