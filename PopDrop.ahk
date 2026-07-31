@@ -4,7 +4,7 @@
 
 ;@Ahk2Exe-SetMainIcon assets\app.ico
 ;@Ahk2Exe-AddResource assets\tray.ico, 555
-;@Ahk2Exe-SetVersion 0.10.0.0
+;@Ahk2Exe-SetVersion 1.0.0.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -15,7 +15,7 @@
 ; ──── 排序模式常量 ────
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
-global APP_VERSION := "0.10.0"
+global APP_VERSION := "1.0.0"
 global CONFIG_VERSION := "23"
 
 ; ──── 文件管理器适配器 ────
@@ -72,19 +72,6 @@ global DROP_ADAPTER_DIBV5 := "DibV5"
 global DROP_ADAPTER_DIB := "Dib"
 global DROP_ADAPTER_URL := "Url"
 global DROP_ADAPTER_UNSUPPORTED := "Unsupported"
-
-if A_Args.Length && A_Args[1] = "--self-test" {
-    RunSelfTests()
-    ExitApp
-}
-
-if A_Args.Length && A_Args[1] = "--scan-worker" {
-    ; #NoTrayIcon 在脚本执行前生效，worker 从一开始就不会创建托盘图标。
-    ; WinHide 作为解释器隐藏主窗口的第二层防护保留。
-    try WinHide("ahk_id " A_ScriptHwnd)
-    RunScanWorkerMode()
-    ExitApp
-}
 
 ; 只有主界面进程拥有托盘图标。必须在 worker 分流之后再打开，
 ; 才能消除启动和刷新时短命 worker 图标的一闪而过。
@@ -339,3 +326,14 @@ OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 #Include modules\ShellDrag.ahk
 #Include modules\SelfTests.ahk
 #Include modules\Lifecycle.ahk
+
+if A_Args.Length && A_Args[1] = "--self-test" {
+    RunSelfTests()
+    ExitApp
+}
+
+if A_Args.Length && A_Args[1] = "--scan-worker" {
+    try WinHide("ahk_id " A_ScriptHwnd)
+    RunScanWorkerMode()
+    ExitApp
+}
