@@ -1,5 +1,11 @@
 PopDrop optional PDFium / cache hotfix 4 r2
 
+AHK source layout:
+
+- PopDrop.ahk
+- modules\*.ahk
+- CODE_ORGANIZATION.md
+
 Required PDFium integration files:
 
 - native\install-pdfium.ps1

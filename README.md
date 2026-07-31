@@ -141,6 +141,7 @@ PopDrop 配置及该 SourceId 的专属规则，不会删除、移动或修改�
 ![PopDrop 右键菜单](https://i.see.you/2026/07/28/mQi0/2237f40.avif)
 
 可以选择默认使用 PopDrop 的简洁菜单，或者完整的 Windows 系统菜单。按住 `Shift` 右击，可以临时打开另一种菜单。
+PopDrop 简洁菜单支持对单个文件或子文件夹执行重命名；完成后会刷新列表，并同步各工作区中受影响的固定路径。
 
 同一个应用既可以作为文件的“打开方式”，也可以提供多个工具动作。例如，把一组文件逐个交给某个程序处理，或者一次性把全部文件传给压缩、转换等工具。
 
@@ -238,5 +239,8 @@ PopDrop 主程序使用 AutoHotkey v2，外部内容投放组件使用 Windows C
 从源码运行外部内容投放和文件预览时，还需要构建 `PopDropTransfer.exe` 与
 `PopDropPreview.exe`。构建环境、命令和输出布局见
 [native/README.md](native/README.md)。
+
+主入口、各 AHK 模块的职责边界和验证命令见
+[CODE_ORGANIZATION.md](CODE_ORGANIZATION.md)。复制源码时请保留 `modules` 目录。
 
 遇到问题或有改进建议，欢迎提交 [Issue](https://github.com/hiforrest/PopDrop/issues)。反馈时如果能附上 Windows 版本、PopDrop 版本和复现步骤，会更容易定位问题。
