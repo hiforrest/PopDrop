@@ -333,6 +333,8 @@ if A_Args.Length && A_Args[1] = "--self-test" {
 }
 
 if A_Args.Length && A_Args[1] = "--scan-worker" {
+    ; #NoTrayIcon 在脚本执行前生效，worker 从一开始就不会创建托盘图标。
+    ; WinHide 作为解释器隐藏主窗口的第二层防护保留。
     try WinHide("ahk_id " A_ScriptHwnd)
     RunScanWorkerMode()
     ExitApp
