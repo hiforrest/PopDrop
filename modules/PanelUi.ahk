@@ -298,15 +298,15 @@ BuildTrayMenu() {
         TraySetIcon(A_ScriptDir "\assets\tray.ico", 1, true)
     }
     A_TrayMenu.Delete()
-    A_TrayMenu.Add("显示/隐藏面板 (" ActiveHotkey ")", TogglePanel)
-    A_TrayMenu.Add("刷新并显示", ShowAndRefresh)
+    A_TrayMenu.Add("显示/隐藏面板（" ActiveHotkey "）", TogglePanel)
     A_TrayMenu.Add()
-    A_TrayMenu.Add("添加打开软件…", AddConfiguredOpenApp)
-    A_TrayMenu.Add("PopDrop 设置…", OpenConfig)
-    A_TrayMenu.Add("下载任务…", OpenTransferCenter)
-    A_TrayMenu.Add("高级编辑 config.ini", OpenConfigFile)
+    A_TrayMenu.Add("设置", OpenConfig)
+    A_TrayMenu.Add("高级设置", OpenConfigFile)
+    A_TrayMenu.Add()
+    A_TrayMenu.Add("关于 PopDrop", OpenAboutPopDrop)
+    A_TrayMenu.Add()
     A_TrayMenu.Add("退出", RequestExitPopDrop)
-    A_TrayMenu.Default := "显示/隐藏面板 (" ActiveHotkey ")"
+    A_TrayMenu.Default := "显示/隐藏面板（" ActiveHotkey "）"
     A_IconTip := "PopDrop v" APP_VERSION
 }
 

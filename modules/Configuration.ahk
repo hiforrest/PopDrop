@@ -1,192 +1,43 @@
 ; PopDrop configuration bootstrap, migration, validation and filtering.
 
+ConfigDefaultValue(section, key, fallback := "") {
+    global ConfigExamplePath
+    if !IsSet(ConfigExamplePath) || !FileExist(ConfigExamplePath)
+        return fallback
+    try value := IniRead(ConfigExamplePath, section, key, fallback)
+    catch
+        return fallback
+    return value
+}
+
+ConfigDefaultBoolean(section, key, fallback := false) {
+    raw := Trim(ConfigDefaultValue(section, key, fallback ? "1" : "0"))
+    return raw = "1" ? true : raw = "0" ? false : fallback
+}
+
+ConfigDefaultInteger(section, key, fallback := 0) {
+    try return Integer(Trim(ConfigDefaultValue(section, key, fallback)))
+    catch
+        return fallback
+}
+
 EnsureConfig() {
-    global ConfigPath, CONFIG_VERSION
+    global ConfigPath, ConfigExamplePath, CONFIG_VERSION
+    ; Keep startup self-contained: compiled and source launches may enter
+    ; configuration before the main script has initialized optional globals.
+    if !IsSet(ConfigExamplePath) || ConfigExamplePath = ""
+        ConfigExamplePath := A_ScriptDir "\config.example.ini"
     if FileExist(ConfigPath) {
         EnsureConfigEncoding()
         if ConfigLayoutNeedsNormalization()
             AtomicConfigEdit(NormalizeConfigDocument)
         return
     }
-
-    defaultDesktop := GetKnownFolderPath(
-        "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}")
-    if defaultDesktop = ""
-        defaultDesktop := A_Desktop
-    defaultDocuments := GetKnownFolderPath(
-        "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}")
-    if defaultDocuments = ""
-        defaultDocuments := A_MyDocuments
-    defaultDownloads := GetKnownFolderPath(
-        "{374DE290-123F-4565-9164-39C4925E467B}")
-    if defaultDownloads = ""
-        defaultDownloads := "%USERPROFILE%\Downloads"
-
-    defaultConfig :=
-    (
-    "; PopDrop 配置文件`n"
-    "; 修改后，在面板中点“刷新”即可重新读取。`n"
-    "`n"
-    "; <PopDrop:area 1>`n"
-    "[General]`n"
-    "ConfigVersion=" CONFIG_VERSION "`n"
-    "Hotkey=F2`n"
-    "; DoubleClick（默认）| SingleClick`n"
-    "OpenFileMode=DoubleClick`n"
-    "; PopDrop（默认）| System；按住 Shift 打开另一个菜单`n"
-    "DefaultContextMenu=PopDrop`n"
-    "EscapeHidesPanel=1`n"
-    "MaxFilesPerFolder=8`n"
-    "; FilesOnly | FilesAndFolders | RecursiveFiles`n"
-    "DisplayScope=FilesOnly`n"
-    "; DirectoryModified | LatestContent`n"
-    "FolderTimeMode=DirectoryModified`n"
-    "; v0.6 及更早版本兼容项；DisplayScope 存在时优先使用新配置`n"
-    "IncludeSubfolders=0`n"
-    "ThumbnailSize=96`n"
-    "ThumbnailHorizontalGap=24`n"
-    "ThumbnailVerticalGap=4`n"
-    "ThumbnailTextLines=2`n"
-    "WindowWidth=766`n"
-    "WindowHeight=576`n"
-    "ViewMode=Thumbnail`n"
-    "ShowRecentSidebar=0`n"
-    "RecentFileCount=12`n"
-    "CachePath=`n"
-    "ThumbnailPolicy=Full`n"
-    "; 窗口模式：always_on_top（默认）| temporary（失焦自动隐藏）| normal（普通窗口）`n"
-    "WindowMode=temporary`n"
-    "; ModifiedDesc（默认，从新到旧）| NameAsc（文件名自然升序）`n"
-    "SortMode=ModifiedDesc`n"
-    "; All / Include / Exclude`n"
-    "FilterMode=All`n"
-    "FileExtensions=`n"
-    "LastOpenProgramDir=`n"
-    "LastTransferTargetDir=`n"
-    "TransferFavoritesInitialized=1`n"
-    "GlobalExcludedNamesInitialized=1`n"
-    "`n"
-    "[Preview]`n"
-    "; <PopDrop:PreviewHelp>`n"
-    "; 文件内容预览。高级限制仅建议在排查兼容性问题时修改。`n"
-    "Enabled=1`n"
-    "Side=Auto`n"
-    "HoverDelayMs=350`n"
-    "SwitchDelayMs=120`n"
-    "LeaveGraceMs=140`n"
-    "KeyboardDelayMs=250`n"
-    "Width=400`n"
-    "CacheEnabled=1`n"
-    "CacheStartAfterHiddenSeconds=10`n"
-    "CacheMaxMB=256`n"
-    "CacheMaxItems=1000`n"
-    "CacheItemMaxKB=2048`n"
-    "CacheUnreferencedDays=7`n"
-    "DirectImageMaxFileMB=64`n"
-    "DirectImageMaxEdge=65535`n"
-    "DirectImageMaxPixelsMP=160`n"
-    "DirectImageMaxExpandedMB=256`n"
-    "DocumentEnabled=1`n"
-    "PdfEnabled=0`n"
-    "`n"
-    "[QuickPreview]`n"
-    "; 可选外部空格键预览；默认关闭，不自动安装或探测 Store 应用。`n"
-    "; Off | Seer | QuickLook`n"
-    "ExternalQuickPreviewProvider=Off`n"
-    "SeerIntegrationEnabled=0`n"
-    "QuickLookPath=`n"
-    "`n"
-    "[NoiseFilter]`n"
-    "; <PopDrop:NoiseFilterHelp>`n"
-    "; Enabled：总开关；1=排除噪音文件，0=全部显示。`n"
-    "; HideHidden：是否排除具有 Hidden 属性的文件。`n"
-    "; HideSystem：是否排除具有 System 属性的文件。`n"
-    "; HideTemporaryAttribute：是否排除具有 Temporary 属性的文件。`n"
-    "; HideIncompleteDownloads：是否排除 *.crdownload、*.part、*.download。`n"
-    "; CustomPatternCount：下方 CustomPatternNNN 自定义文件名规则的数量。`n"
-    "; 以上选项只影响 PopDrop 显示，不会删除、移动或修改真实文件。`n"
-    "Enabled=1`n"
-    "HideHidden=1`n"
-    "HideSystem=1`n"
-    "HideTemporaryAttribute=0`n"
-    "HideIncompleteDownloads=0`n"
-    "CustomPatternCount=0`n"
-    "`n"
-    "[ExternalTransfer]`n"
-    "; 公开 URL 仅在没有本地文件、虚拟文件和图片数据时兜底`n"
-    "EnablePublicUrlFallback=1`n"
-    "; HTTP 默认关闭；HTTPS 始终要求有效 TLS 证书`n"
-    "AllowHttp=0`n"
-    "; 全局后台并发数，范围 1～6`n"
-    "MaxConcurrent=3`n"
-    "ShowCompletionNotifications=1`n"
-    "`n"
-    "[FileManager]`n"
-    "; WindowsShell（默认）| DirectoryOpus | TotalCommander | XYplorer | DoubleCommander | Files | FreeCommander`n"
-    "Provider=WindowsShell`n"
-    "; 第三方程序分别使用 dopusrt.exe、TOTALCMD64.EXE/TOTALCMD.EXE、XYplorer.exe、doublecmd.exe、Files 官方启动程序或 FreeCommander.exe`n"
-    "Executable=`n"
-    "`n"
-    "; <PopDrop:area 2>`n"
-    "[Folders]`n"
-    "; v0.8 及更早版本兼容快照；工作区来源保存在第三区。`n"
-    "`n"
-    "[PinnedFiles]`n"
-    "; v0.9.0 旧版共享固定项迁移入口；迁移后固定项按工作区保存在第三区。`n"
-    "`n"
-    "; <PopDrop:area 3>`n"
-    "[Workspaces]`n"
-    "Order=workspace-default`n"
-    "Active=workspace-default`n"
-    "PinnedScopeVersion=1`n"
-    "`n"
-    "[Workspace:workspace-default]`n"
-    "Name=默认工作区`n"
-    "SourceOrder=source-documents,source-downloads`n"
-    "`n"
-    "[WorkspacePinned:workspace-default]`n"
-    "`n"
-    "[Source:source-documents]`n"
-    "WorkspaceId=workspace-default`n"
-    "Name=文档`n"
-    "Path=" defaultDocuments "`n"
-    "`n"
-    "[Source:source-downloads]`n"
-    "WorkspaceId=workspace-default`n"
-    "Name=下载`n"
-    "Path=" defaultDownloads "`n"
-    "`n"
-    "[Sources]`n"
-    "; v0.8 及更早版本兼容快照。`n"
-    "Order=`n"
-    "`n"
-    "; <PopDrop:area 4>`n"
-    "[OpenApps]`n"
-    "; 顺序和稳定 ID，例如：Order=7zip,everedit`n"
-    "; 详情保存在 [OpenApp:<ID>]；ID 建议只使用字母、数字、-、_`n"
-    "; 每个应用可用 ShowInOpenMenu 控制打开方式，并用 ActionOrder 排列工具动作`n"
-    "; 动作详情保存在 [OpenAppAction:<应用ID>:<动作ID>]，ArgNNN 每行一个参数`n"
-    "Order=`n"
-    "`n"
-    "; <PopDrop:area 5>`n"
-    "[TransferFavorites]`n"
-    "Path001=" defaultDesktop "`n"
-    "Path002=" defaultDownloads "`n"
-    "; 删除上面任一 Path 行即可从常用位置移除；不会自动恢复`n"
-    "; Path003=D:\Projects\Delivery`n"
-    "`n"
-    "[RecentTargets]`n"
-    "`n"
-    "; <PopDrop:area 6>`n"
-    "[ExcludedFolderNames]`n"
-    "Name001=.git`n"
-    "Name002=.svn`n"
-    "Name003=.hg`n"
-    "Name004=node_modules`n"
-    "Name005=__pycache__`n"
-    )
-    ; The layout-aware editor stores one UTF-16LE BOM and CRLF line endings.
-    FileAppend(defaultConfig, ConfigPath, "UTF-16")
+    if !FileExist(ConfigExamplePath)
+        throw Error("缺少默认配置文件 config.example.ini，无法创建 config.ini。")
+    ; config.example.ini is the single source of truth for initial defaults.
+    FileCopy(ConfigExamplePath, ConfigPath, 1)
+    EnsureConfigEncoding()
 }
 
 EnsureWorkspaceConfig() {
@@ -544,25 +395,25 @@ EnsurePreviewConfigDefaults(doc) {
         "; 图片会尽可能直接生成内容预览；其他文件依赖 Windows 已有真实缩略图。"
     ], 1)
     defaults := [
-        {Key: "Enabled", Value: "1"},
-        {Key: "Side", Value: "Auto"},
-        {Key: "HoverDelayMs", Value: "350"},
-        {Key: "SwitchDelayMs", Value: "120"},
-        {Key: "LeaveGraceMs", Value: "140"},
-        {Key: "KeyboardDelayMs", Value: "250"},
-        {Key: "Width", Value: "400"},
-        {Key: "CacheEnabled", Value: "1"},
-        {Key: "CacheStartAfterHiddenSeconds", Value: "10"},
-        {Key: "CacheMaxMB", Value: "256"},
-        {Key: "CacheMaxItems", Value: "1000"},
-        {Key: "CacheItemMaxKB", Value: "2048"},
-        {Key: "CacheUnreferencedDays", Value: "7"},
-        {Key: "DirectImageMaxFileMB", Value: "64"},
-        {Key: "DirectImageMaxEdge", Value: "65535"},
-        {Key: "DirectImageMaxPixelsMP", Value: "160"},
-        {Key: "DirectImageMaxExpandedMB", Value: "256"},
-        {Key: "DocumentEnabled", Value: "1"},
-        {Key: "PdfEnabled", Value: "0"}
+        {Key: "Enabled", Value: ConfigDefaultValue("Preview", "Enabled", "1")},
+        {Key: "Side", Value: ConfigDefaultValue("Preview", "Side", "Auto")},
+        {Key: "HoverDelayMs", Value: ConfigDefaultValue("Preview", "HoverDelayMs", "350")},
+        {Key: "SwitchDelayMs", Value: ConfigDefaultValue("Preview", "SwitchDelayMs", "120")},
+        {Key: "LeaveGraceMs", Value: ConfigDefaultValue("Preview", "LeaveGraceMs", "140")},
+        {Key: "KeyboardDelayMs", Value: ConfigDefaultValue("Preview", "KeyboardDelayMs", "250")},
+        {Key: "Width", Value: ConfigDefaultValue("Preview", "Width", "400")},
+        {Key: "CacheEnabled", Value: ConfigDefaultValue("Preview", "CacheEnabled", "1")},
+        {Key: "CacheStartAfterHiddenSeconds", Value: ConfigDefaultValue("Preview", "CacheStartAfterHiddenSeconds", "10")},
+        {Key: "CacheMaxMB", Value: ConfigDefaultValue("Preview", "CacheMaxMB", "256")},
+        {Key: "CacheMaxItems", Value: ConfigDefaultValue("Preview", "CacheMaxItems", "1000")},
+        {Key: "CacheItemMaxKB", Value: ConfigDefaultValue("Preview", "CacheItemMaxKB", "2048")},
+        {Key: "CacheUnreferencedDays", Value: ConfigDefaultValue("Preview", "CacheUnreferencedDays", "7")},
+        {Key: "DirectImageMaxFileMB", Value: ConfigDefaultValue("Preview", "DirectImageMaxFileMB", "64")},
+        {Key: "DirectImageMaxEdge", Value: ConfigDefaultValue("Preview", "DirectImageMaxEdge", "65535")},
+        {Key: "DirectImageMaxPixelsMP", Value: ConfigDefaultValue("Preview", "DirectImageMaxPixelsMP", "160")},
+        {Key: "DirectImageMaxExpandedMB", Value: ConfigDefaultValue("Preview", "DirectImageMaxExpandedMB", "256")},
+        {Key: "DocumentEnabled", Value: ConfigDefaultValue("Preview", "DocumentEnabled", "1")},
+        {Key: "PdfEnabled", Value: ConfigDefaultValue("Preview", "PdfEnabled", "0")}
     ]
     for entry in defaults {
         if !IsObject(GetDocumentEntry(doc, "Preview", entry.Key))

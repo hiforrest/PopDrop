@@ -16,8 +16,8 @@
 3. 双击 `PopDrop.ahk`
 4. 按 `F2` 试试看
 
-外部内容投放需要同目录的 `PopDropTransfer.exe`，文件预览需要
-`PopDropPreview.exe`。正式发布包应已包含；源码运行时可用
+外部内容投放需要 `native\bin\<架构>\PopDropTransfer.exe`，文件预览需要
+对应架构的 `native\bin\<架构>\PopDropPreview.exe`。正式发布包应已包含；源码运行时可用
 Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之外不需要第三方
 运行库。除了右键菜单中的
 “复制到…”和“移动到…”，把项目投放到来源分组也可能操作真实文件；具体安全语义见
@@ -151,7 +151,7 @@ WIC 不支持的格式会在后台尝试系统缩略图处理器。其余参数�
 | 配置项 | 作用 |
 |---|---|
 | `Enabled` | `1` 开启，`0` 关闭；关闭时立即取消当前请求并隐藏窗口。 |
-| `Side` | `Auto`、`Right` 或 `Left`；Auto 在普通文件切换期间锁定侧边，面板移动或缩放结束后按新工作区重算。 |
+| `Side` | `Auto`、`Right` 或 `Left`；Auto 在普通文件切换期间锁定侧边，优先放在面板左侧（新文件列表侧），左侧空间不足时才放右侧；面板移动或缩放结束后按新工作区重算。 |
 | `HoverDelayMs` / `SwitchDelayMs` / `LeaveGraceMs` | 首次悬浮、已显示时切换和离开宽限。 |
 | `KeyboardDelayMs` | 真实键盘导航改变焦点后的延迟。 |
 | `Width` | 最大内容宽度，单位 DIP，范围 180–640。 |

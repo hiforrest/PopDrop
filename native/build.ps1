@@ -64,5 +64,6 @@ Build-Architecture "x86" "x64"
 
 Write-Host ""
 Write-Host "Build complete. Source version automatically selects helpers from native\bin\<arch>."
-Write-Host "For release EXEs, copy the matching PopDropTransfer.exe and PopDropPreview.exe to the PopDrop.exe directory."
+Write-Host "For release packages, keep the freshly built helpers under native\bin\<arch>\."
+Write-Host "Do not mix helpers from another release; PopDropTransfer embeds the application version."
 Write-Host "For reliable PDF preview, also run native\install-pdfium.ps1 to download pdfium.dll."

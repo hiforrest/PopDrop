@@ -242,7 +242,8 @@ DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
         ; Internal drags already own a trusted path array. External HDROP is
         ; pre-read only for the narrow stable-local case approved by
         ; CanPreloadHDropForFolderFeedback(); async/URL/virtual/image objects
-        ; remain zero-extraction until Drop.
+        ; remain zero-extraction until Drop. Plain filesystem HDROP is read
+        ; during DragEnter so folder-only feedback works in Windows Sandbox.
         if IsObject(ActiveInternalDragContext) {
             CacheDropSessionPaths(
                 session, ActiveInternalDragContext.Paths, false)

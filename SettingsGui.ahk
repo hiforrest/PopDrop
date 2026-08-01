@@ -6,6 +6,23 @@ OpenConfig(*) {
     OpenSettingsGui()
 }
 
+OpenAboutPopDrop(*) {
+    c := OpenSettingsGui()
+    if IsObject(c)
+        ShowSettingsPage(c, 5)
+}
+
+OpenAboutUrl(url, *) {
+    try Run(url)
+    catch as err {
+        global SettingsController
+        if IsObject(SettingsController)
+            SettingsMessage(SettingsController,
+                "无法打开链接：`n" url "`n`n" err.Message,
+                "打开链接失败", "Icon!")
+    }
+}
+
 OpenFileManagerSettings() {
     c := OpenSettingsGui()
     if !IsObject(c)
@@ -162,21 +179,26 @@ OpenSettingsGui() {
     navDisplay := navigation.Add("显示与过滤", sharedRoot)
     workspaceRoot := navigation.Add("工作区设置", 0, "Expand")
     navWorkspace := navigation.Add("当前工作区", workspaceRoot)
+    navAbout := navigation.Add("关于 PopDrop")
     controller.Navigation := navigation
     controller.NavPages := Map(
-        navGeneral, 1, navWorkspace, 2, navOperations, 3, navDisplay, 4)
+        navGeneral, 1, navWorkspace, 2, navOperations, 3, navDisplay, 4,
+        navAbout, 5)
     controller.NavItems := Map(
-        1, navGeneral, 2, navWorkspace, 3, navOperations, 4, navDisplay)
+        1, navGeneral, 2, navWorkspace, 3, navOperations, 4, navDisplay,
+        5, navAbout)
     ; Tab3 remains the native page host, but its duplicate tab strip is placed
     ; above the client area. The TreeView is the only visible page navigation.
     tabs := guiObj.AddTab3("x184 y-26 w852 h674 -Tabstop",
         ["共享设置 · 通用", "当前工作区",
-         "共享设置 · 打开与文件操作", "共享设置 · 显示与过滤"])
+         "共享设置 · 打开与文件操作", "共享设置 · 显示与过滤",
+         "关于 PopDrop"])
     controller.Tab := tabs
     BuildGeneralSettingsPage(controller, tabs)
     BuildSourcesSettingsPage(controller, tabs)
     BuildOperationsSettingsPage(controller, tabs)
     BuildDisplaySettingsPage(controller, tabs)
+    BuildAboutSettingsPage(controller, tabs)
     tabs.UseTab()
 
     ; Tab3's hidden header otherwise leaves its white page background touching
@@ -1338,6 +1360,34 @@ BuildDisplaySettingsPage(c, tabs) {
         "Change", DisplayControlChanged.Bind(c))
     c.QuickLookPath.OnEvent("Change", DisplayControlChanged.Bind(c))
     c.QuickLookBrowse.OnEvent("Click", BrowseQuickLookPath.Bind(c))
+}
+
+BuildAboutSettingsPage(c, tabs) {
+    global APP_VERSION
+    tabs.UseTab(5)
+    g := c.Gui
+    g.AddGroupBox("x200 y29 w818 h380", "关于 PopDrop")
+
+    title := g.AddText("x232 y68 w520 h42", "PopDrop")
+    title.SetFont("s22 Bold", "Microsoft YaHei UI")
+    tagline := g.AddText("x235 y116 w520 h30", "需要时就在手边")
+    tagline.SetFont("s11", "Microsoft YaHei UI")
+    version := g.AddText("x235 y158 w320 h26", "版本 v" APP_VERSION)
+    version.SetFont("s10 c666666", "Microsoft YaHei UI")
+
+    g.AddText("x235 y205 w180 h24", "项目链接")
+    project := AddUiButton(g, "x235 y237 w130", "项目主页")
+    releases := AddUiButton(g, "x375 y237 w130", "检查更新")
+    project.OnEvent("Click", OpenAboutUrl.Bind(
+        "https://github.com/hiforrest/PopDrop"))
+    releases.OnEvent("Click", OpenAboutUrl.Bind(
+        "https://github.com/hiforrest/PopDrop/releases"))
+
+    g.AddText("x235 y292 w180 h24", "作者")
+    author := AddUiButton(g, "x235 y324 w130", "作者主页")
+    author.OnEvent("Click", OpenAboutUrl.Bind("https://s.ee/katt"))
+    g.AddText("x235 y360 w440 h24 c666666",
+        "先让几件小事顺手一点")
 }
 
 LoadGeneralControls(c) {

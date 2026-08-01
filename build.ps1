@@ -20,6 +20,7 @@
 # ============================================================
 $script:ProjectRoot = "D:\GProgram\PopDrop"
 $script:AhkScriptPath = Join-Path $ProjectRoot "PopDrop.ahk"
+$script:ConfigExamplePath = Join-Path $ProjectRoot "config.example.ini"
 $script:OutputPath = Join-Path $ProjectRoot "PopDrop.exe"
 $script:AppIcoPath = Join-Path $ProjectRoot "assets\app.ico"
 $script:TrayIcoPath = Join-Path $ProjectRoot "assets\tray.ico"
@@ -76,6 +77,15 @@ if (-not (Test-Path -LiteralPath $AhkScriptPath -PathType Leaf)) {
     exit 2
 }
 Write-OK "Script found: $AhkScriptPath"
+
+# The example configuration is runtime input and the single source of
+# defaults. Keep it beside every compiled/package output.
+Write-Step "Checking default configuration: $ConfigExamplePath"
+if (-not (Test-Path -LiteralPath $ConfigExamplePath -PathType Leaf)) {
+    Write-Err "Default configuration not found: $ConfigExamplePath"
+    exit 10
+}
+Write-OK "Default configuration found"
 
 # 3. Check first line is #Requires AutoHotkey v2.0
 Write-Step "Checking #Requires directive"
@@ -245,6 +255,7 @@ $duration = $endTime - $startTime
 
 $outputExists = Test-Path -LiteralPath $OutputPath -PathType Leaf
 $outputSize = if ($outputExists) { (Get-Item -LiteralPath $OutputPath).Length } else { 0 }
+$configExampleExists = Test-Path -LiteralPath $ConfigExamplePath -PathType Leaf
 
 $logContent = @"
 ========================================
@@ -277,6 +288,7 @@ Exit code (hex): 0x$("{0:X2}" -f $exitCode)
 ---------- Validation ----------
 File exists: $outputExists
 File size: $outputSize bytes
+config.example.ini exists beside output: $configExampleExists
 "@
 
 $logContent | Out-File -FilePath $logFile -Encoding utf8
@@ -308,7 +320,7 @@ if ($exitCode -ne 0) {
 }
 
 # Final verdict
-if ($exitCode -eq 0 -and $outputExists -and $outputSize -gt 0) {
+if ($exitCode -eq 0 -and $outputExists -and $outputSize -gt 0 -and $configExampleExists) {
     Write-OK "===== BUILD SUCCESS ====="
     Write-Host "Output: $OutputPath" -ForegroundColor Green
     Write-Host "Log: $logFile" -ForegroundColor Green

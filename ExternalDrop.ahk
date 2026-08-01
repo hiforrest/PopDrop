@@ -317,11 +317,12 @@ CanPreloadHDropForFolderFeedback(decision, asyncInfo, sourceKind) {
     ; needed and classification is always safe.
     if sourceKind != "External"
         return true
-    ; External preview is deliberately narrower than the final HDROP support.
-    ; Any async, URL, virtual-file or image signal keeps the payload Unknown
-    ; until Drop, preserving the helper's unique GetData ownership.
-    if !IsObject(asyncInfo) || asyncInfo.Supported
-        return false
+    ; A plain HDROP from Explorer must be inspected during DragEnter so the
+    ; folder-only toolbar can appear before Drop. Some Windows Sandbox and
+    ; Explorer builds advertise IDataObjectAsyncCapability even for ordinary
+    ; filesystem folders; rejecting those objects leaves no visual target.
+    ; Virtual/image/URL payloads remain deferred because they may be delayed
+    ; browser renders rather than stable filesystem paths.
     if HasProp(decision, "HasExplicitUrl") && decision.HasExplicitUrl
         return false
     if HasProp(decision, "HasVirtualFiles") && decision.HasVirtualFiles
@@ -529,17 +530,9 @@ ReleaseMarshaledDataFile(path) {
 }
 
 ResolveTransferHelper() {
-    rootHelper := A_ScriptDir "\PopDropTransfer.exe"
-    builtHelper := A_ScriptDir "\native\bin\"
+    helperPath := A_ScriptDir "\native\bin\"
         . (A_PtrSize = 8 ? "x64" : "x86") "\PopDropTransfer.exe"
-    candidates := A_IsCompiled
-        ? [rootHelper, builtHelper]
-        : [builtHelper, rootHelper]
-    for path in candidates {
-        if FileExist(path)
-            return path
-    }
-    return ""
+    return FileExist(helperPath) ? helperPath : ""
 }
 
 EnsureTransferRuntimeDirectory() {

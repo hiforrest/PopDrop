@@ -79,11 +79,9 @@ powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
 SDK 重编译它们。测试本轮 Markdown 修复和 PDFium 动态加载前必须先运行构建脚本；
 PDFium 安装可在构建前后进行。
 
-AHK 源码运行时根据自身位数选择对应文件。发布编译版时，将对应架构的两个 Helper
-以及同架构的 `pdfium.dll`（若启用）复制到 `PopDrop.exe` 同目录。Helper 协议版本
-写在请求或共享内存头中；不兼容版本会失败而不会猜测字段。源码模式优先加载
-`native\bin\<架构>`，编译版优先加载程序同目录组件；握手还会校验
-`HelperVersion`，防止根目录残留旧 EXE 掩盖最新构建。
+AHK 源码和编译版都根据自身位数选择 `native\bin\<架构>` 中对应文件；发布包还需将
+同架构的 `pdfium.dll`（若启用）放在该目录。Helper 协议版本写在请求或共享内存头中；
+不兼容版本会失败而不会猜测字段。握手还会校验 `HelperVersion`。
 
 ## 故障隔离
 

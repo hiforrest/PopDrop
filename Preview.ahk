@@ -136,7 +136,8 @@ LoadPreviewSettings(settingErrors := 0) {
     previousPdfEnabled := PreviewPdfEnabled
     previousSide := PreviewSide
     previousCacheEnabled := PreviewCacheEnabled
-    rawSide := StrLower(Trim(IniRead(ConfigPath, "Preview", "Side", "Auto")))
+    rawSide := StrLower(Trim(IniRead(ConfigPath, "Preview", "Side",
+        ConfigDefaultValue("Preview", "Side", "Auto"))))
     if rawSide = "right"
         PreviewSide := "Right"
     else if rawSide = "left"
@@ -147,39 +148,62 @@ LoadPreviewSettings(settingErrors := 0) {
             settingErrors.Push("[Preview] Side 无效，已使用 Auto。")
     }
     PreviewHoverDelayMs := PreviewReadInteger(
-        "HoverDelayMs", 350, 50, 2000, settingErrors)
+        "HoverDelayMs", ConfigDefaultInteger("Preview", "HoverDelayMs", 350),
+        50, 2000, settingErrors)
     PreviewSwitchDelayMs := PreviewReadInteger(
-        "SwitchDelayMs", 120, 0, 1000, settingErrors)
+        "SwitchDelayMs", ConfigDefaultInteger("Preview", "SwitchDelayMs", 120),
+        0, 1000, settingErrors)
     PreviewLeaveGraceMs := PreviewReadInteger(
-        "LeaveGraceMs", 140, 0, 1000, settingErrors)
+        "LeaveGraceMs", ConfigDefaultInteger("Preview", "LeaveGraceMs", 140),
+        0, 1000, settingErrors)
     PreviewKeyboardDelayMs := PreviewReadInteger(
-        "KeyboardDelayMs", 250, 50, 2000, settingErrors)
+        "KeyboardDelayMs", ConfigDefaultInteger("Preview", "KeyboardDelayMs", 250),
+        50, 2000, settingErrors)
     PreviewWidthDip := PreviewReadInteger(
-        "Width", 400, 180, 640, settingErrors)
+        "Width", ConfigDefaultInteger("Preview", "Width", 400),
+        180, 640, settingErrors)
     PreviewCacheEnabled := PreviewReadBoolean(
-        "CacheEnabled", true, settingErrors)
+        "CacheEnabled", ConfigDefaultBoolean("Preview", "CacheEnabled", true),
+        settingErrors)
     PreviewCacheStartAfterHiddenSeconds := PreviewReadInteger(
-        "CacheStartAfterHiddenSeconds", 10, 3, 300, settingErrors)
+        "CacheStartAfterHiddenSeconds",
+        ConfigDefaultInteger("Preview", "CacheStartAfterHiddenSeconds", 10),
+        3, 300, settingErrors)
     PreviewCacheMaxMB := PreviewReadInteger(
-        "CacheMaxMB", 256, 16, 4096, settingErrors)
+        "CacheMaxMB", ConfigDefaultInteger("Preview", "CacheMaxMB", 256),
+        16, 4096, settingErrors)
     PreviewCacheMaxItems := PreviewReadInteger(
-        "CacheMaxItems", 1000, 10, 50000, settingErrors)
+        "CacheMaxItems", ConfigDefaultInteger("Preview", "CacheMaxItems", 1000),
+        10, 50000, settingErrors)
     PreviewCacheItemMaxKB := PreviewReadInteger(
-        "CacheItemMaxKB", 2048, 128, 2048, settingErrors)
+        "CacheItemMaxKB", ConfigDefaultInteger("Preview", "CacheItemMaxKB", 2048),
+        128, 2048, settingErrors)
     PreviewCacheUnreferencedDays := PreviewReadInteger(
-        "CacheUnreferencedDays", 7, 1, 365, settingErrors)
+        "CacheUnreferencedDays",
+        ConfigDefaultInteger("Preview", "CacheUnreferencedDays", 7),
+        1, 365, settingErrors)
     PreviewDirectImageMaxFileMB := PreviewReadInteger(
-        "DirectImageMaxFileMB", 64, 1, 256, settingErrors)
+        "DirectImageMaxFileMB",
+        ConfigDefaultInteger("Preview", "DirectImageMaxFileMB", 64),
+        1, 256, settingErrors)
     PreviewDirectImageMaxEdge := PreviewReadInteger(
-        "DirectImageMaxEdge", 65535, 1024, 65535, settingErrors)
+        "DirectImageMaxEdge",
+        ConfigDefaultInteger("Preview", "DirectImageMaxEdge", 65535),
+        1024, 65535, settingErrors)
     PreviewDirectImageMaxPixelsMP := PreviewReadInteger(
-        "DirectImageMaxPixelsMP", 160, 1, 500, settingErrors)
+        "DirectImageMaxPixelsMP",
+        ConfigDefaultInteger("Preview", "DirectImageMaxPixelsMP", 160),
+        1, 500, settingErrors)
     PreviewDirectImageMaxExpandedMB := PreviewReadInteger(
-        "DirectImageMaxExpandedMB", 256, 16, 512, settingErrors)
+        "DirectImageMaxExpandedMB",
+        ConfigDefaultInteger("Preview", "DirectImageMaxExpandedMB", 256),
+        16, 512, settingErrors)
     PreviewDocumentEnabled := PreviewReadBoolean(
-        "DocumentEnabled", true, settingErrors)
+        "DocumentEnabled", ConfigDefaultBoolean("Preview", "DocumentEnabled", true),
+        settingErrors)
     PreviewPdfEnabled := PreviewReadBoolean(
-        "PdfEnabled", false, settingErrors)
+        "PdfEnabled", ConfigDefaultBoolean("Preview", "PdfEnabled", false),
+        settingErrors)
     enabledChanged := SetFilePreviewEnabled(loadedEnabled, false)
     if !enabledChanged
         && (previousSide != PreviewSide
@@ -632,10 +656,12 @@ PreviewEnsureHelper() {
         "uptr", PREVIEW_MAP_BYTES)
     NumPut("uint", 0x56504450, PreviewMapView, 0) ; PDPV
     NumPut("uint", PREVIEW_PROTOCOL_VERSION, PreviewMapView, 4)
-    helperPath := A_IsCompiled
-        ? A_ScriptDir "\PopDropPreview.exe"
-        : A_ScriptDir "\native\bin\" (A_PtrSize = 8 ? "x64" : "x86")
-            . "\PopDropPreview.exe"
+    helperPath := A_ScriptDir "\native\bin\"
+        . (A_PtrSize = 8 ? "x64" : "x86") "\PopDropPreview.exe"
+    if !FileExist(helperPath) {
+        PreviewCloseHelperObjects(false)
+        return false
+    }
     try Run('"' helperPath '" --shared "' PreviewObjectBase '"',
         A_ScriptDir, "Hide", &PreviewHelperPid)
     catch {
@@ -1021,10 +1047,11 @@ PreviewPresentStatusCard(line1, line2 := "", animated := false,
                 side := "Right"
             else if PreviewSide = "Left"
                 side := "Left"
-            else if rightAvailable >= minWidth
-                side := "Right"
+            ; Auto follows the file list's left edge first, minimizing eye travel.
             else if leftAvailable >= minWidth
                 side := "Left"
+            else if rightAvailable >= minWidth
+                side := "Right"
             else
                 return false
             PreviewSession.Side := side
@@ -1177,10 +1204,11 @@ PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride, sourceKind := 0) {
             side := "Right"
         else if PreviewSide = "Left"
             side := "Left"
-        else if rightAvailable >= minWidth
-            side := "Right"
+        ; Keep Auto's left-first preference consistent for image/document output.
         else if leftAvailable >= minWidth
             side := "Left"
+        else if rightAvailable >= minWidth
+            side := "Right"
         else
             return false
         PreviewSession.Side := side
