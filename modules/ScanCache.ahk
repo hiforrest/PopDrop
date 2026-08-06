@@ -1182,10 +1182,17 @@ EnsureCacheDirectory(path) {
     }
 }
 
-ComputeConfigFingerprint(settings) {
+ComputeConfigFingerprint(settings, workspaceIdOverride := "",
+    workspaceTypeOverride := "", pinnedPathsOverride := 0) {
     global RecentFileCount, GlobalExcludedFolderNames, GlobalNoiseFilter, PinnedPaths
     global ActiveWorkspaceId, ActiveWorkspaceType
-    raw := "v6|workspace=" ActiveWorkspaceId "|type=" ActiveWorkspaceType
+    workspaceId := workspaceIdOverride != ""
+        ? workspaceIdOverride : ActiveWorkspaceId
+    workspaceType := workspaceTypeOverride != ""
+        ? workspaceTypeOverride : ActiveWorkspaceType
+    pinnedPaths := IsObject(pinnedPathsOverride)
+        ? pinnedPathsOverride : PinnedPaths
+    raw := "v6|workspace=" workspaceId "|type=" workspaceType
         . "|recent=" RecentFileCount
         . "|excludedNames=" JoinArray(GlobalExcludedFolderNames, ",")
         . "|noiseEnabled=" (GlobalNoiseFilter.Enabled ? 1 : 0)
@@ -1194,7 +1201,7 @@ ComputeConfigFingerprint(settings) {
         . "|temporary=" (GlobalNoiseFilter.HideTemporary ? 1 : 0)
         . "|downloads=" (GlobalNoiseFilter.HideIncompleteDownloads ? 1 : 0)
         . "|patterns=" JoinArray(GlobalNoiseFilter.CustomPatternTexts, Chr(30))
-        . "|pinned=" JoinNormalizedPaths(PinnedPaths)
+        . "|pinned=" JoinNormalizedPaths(pinnedPaths)
     for folder in settings {
         raw .= "|" folder.Name "|" StrLower(RTrim(folder.Path, "\"))
         raw .= "|mode=" folder.Mode
@@ -1250,6 +1257,40 @@ LoadDiskScanCache() {
     if candidatePath != CacheFilePath
         WriteCurrentScanCache()
     return true
+}
+
+WorkspaceCacheFilePath(workspaceId) {
+    global CacheDir
+    return CacheDir "\\workspace-"
+        . HashString(StrLower(workspaceId)) ".ini"
+}
+
+LoadWorkspaceSnapshot(workspaceId, fingerprint) {
+    global CacheDir
+    indexed := RuntimeIndexLoadSnapshot(workspaceId, fingerprint)
+    if IsObject(indexed)
+        return indexed
+    path := WorkspaceCacheFilePath(workspaceId)
+    if !FileExist(path)
+        return 0
+    return ReadScanResult(path, "", fingerprint, workspaceId)
+}
+
+WriteWorkspaceSnapshot(result, workspaceId, fingerprint) {
+    global CacheWritable
+    if RuntimeIndexSaveSnapshot(result, workspaceId, fingerprint)
+        return true
+    if !CacheWritable
+        return false
+    path := WorkspaceCacheFilePath(workspaceId)
+    try {
+        tempPath := path ".writing"
+        WriteScanResultAtomic(result, tempPath, false)
+        FileMove(tempPath, path, 1)
+        return true
+    } catch {
+        return false
+    }
 }
 
 ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "",
@@ -1331,16 +1372,22 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "",
     }
 }
 
-WriteScanRequest(path, generation, sourceKeys := 0, includeRecent := false) {
+WriteScanRequest(path, generation, sourceKeys := 0, includeRecent := false,
+    context := 0) {
     global LastValidFolderSettings, CurrentConfigFingerprint, RecentFileCount
     global GlobalExcludedFolderNames, PinnedPaths, ActiveWorkspaceId
     global ActiveWorkspaceType, WORKSPACE_TYPE_TEXT
+    folders := IsObject(context) ? context.Folders : LastValidFolderSettings
+    workspaceId := IsObject(context) ? context.WorkspaceId : ActiveWorkspaceId
+    fingerprint := IsObject(context) ? context.Fingerprint : CurrentConfigFingerprint
+    workspaceType := IsObject(context) ? context.WorkspaceType : ActiveWorkspaceType
+    pinnedPaths := IsObject(context) ? context.PinnedPaths : PinnedPaths
     try FileDelete(path)
     IniWrite("6", path, "Meta", "Version")
     IniWrite(generation, path, "Meta", "Generation")
-    IniWrite(CurrentConfigFingerprint, path, "Meta", "Fingerprint")
-    IniWrite(ActiveWorkspaceId, path, "Meta", "WorkspaceId")
-    IniWrite(LastValidFolderSettings.Length, path, "Meta", "FolderCount")
+    IniWrite(fingerprint, path, "Meta", "Fingerprint")
+    IniWrite(workspaceId, path, "Meta", "WorkspaceId")
+    IniWrite(folders.Length, path, "Meta", "FolderCount")
     IniWrite(RecentFileCount, path, "Meta", "RecentFileCount")
     IniWrite(includeRecent ? "1" : "0", path, "Meta", "IncludeRecent")
     IniWrite(GlobalExcludedFolderNames.Length, path,
@@ -1348,21 +1395,22 @@ WriteScanRequest(path, generation, sourceKeys := 0, includeRecent := false) {
     for index, name in GlobalExcludedFolderNames
         IniWrite(name, path, "Meta",
             "GlobalExcludedName" Format("{:03}", index))
-    IniWrite(PinnedPaths.Length, path, "Meta", "PinnedPathCount")
-    for index, pinnedPath in PinnedPaths
+    IniWrite(pinnedPaths.Length, path, "Meta", "PinnedPathCount")
+    for index, pinnedPath in pinnedPaths
         IniWrite(pinnedPath, path, "Meta", "PinnedPath" Format("{:03}", index))
-    for index, folder in LastValidFolderSettings {
+    for index, folder in folders {
         section := "Folder" Format("{:03}", index)
         sourceKey := folder.SourceId != "" ? folder.SourceId
             : ResolveFolderSourceId(folder.Name, folder.Path)
-        shouldScan := !IsObject(sourceKeys) || sourceKeys.Has(sourceKey)
+        shouldScan := !IsObject(sourceKeys)
+            || sourceKeys.Has(StrLower(sourceKey))
         IniWrite(shouldScan ? "1" : "0", path, section, "Scan")
         IniWrite(folder.Name, path, section, "Name")
         IniWrite(folder.Path, path, section, "Path")
         IniWrite(folder.IncludeSubfolders ? "1" : "0", path, section, "IncludeSubfolders")
         IniWrite(folder.DisplayScope, path, section, "DisplayScope")
         IniWrite(folder.FolderTimeMode, path, section, "FolderTimeMode")
-        IniWrite(ActiveWorkspaceType = WORKSPACE_TYPE_TEXT
+        IniWrite(workspaceType = WORKSPACE_TYPE_TEXT
             ? 0 : folder.MaxFilesPerFolder,
             path, section, "MaxFilesPerFolder")
         IniWrite(folder.SortMode, path, section, "SortMode")
@@ -1433,10 +1481,15 @@ StartBackgroundScan(sourceKeys := 0, reason := "auto", includeRecent := -1) {
     global ScanGeneration, WorkerGeneration, WorkerWorkspaceId
     global WorkerRequestPath, WorkerReadyPath, WorkerPid, CacheDir, CacheWritable
     global WorkerAppliedSourceIndexes, WorkerRecentApplied, WorkerChanged
+    global WorkerSourceDirtyTokens, WorkerRecentDirtyToken
+    global SourceWatcherRecentDirty, SourceWatcherRecentGeneration
     global WorkerStatusToken, ActiveWorkspaceId, ShowRecentSidebar
+    global InactiveScanJob
     ReconcileSourceWatchers()
     if includeRecent = -1
         includeRecent := ShowRecentSidebar
+    if IsObject(InactiveScanJob)
+        CancelInactiveWorkspaceScan()
     if WorkerRunning && StrLower(WorkerWorkspaceId) != StrLower(ActiveWorkspaceId) {
         if WorkerPid && ProcessExist(WorkerPid)
             try ProcessClose(WorkerPid)
@@ -1481,6 +1534,20 @@ StartBackgroundScan(sourceKeys := 0, reason := "auto", includeRecent := -1) {
     WorkerRequestPath := requestPath
     WorkerReadyPath := readyPath
     WorkerAppliedSourceIndexes := Map()
+    WorkerSourceDirtyTokens := Map()
+    if IsObject(sourceKeys) {
+        for sourceKey, value in sourceKeys
+            WorkerSourceDirtyTokens[StrLower(sourceKey)] :=
+                GetWorkspaceSourceDirtyToken(ActiveWorkspaceId, sourceKey)
+    } else {
+        for folder in LastValidFolderSettings {
+            sourceId := folder.SourceId != "" ? folder.SourceId
+                : ResolveFolderSourceId(folder.Name, folder.Path)
+            WorkerSourceDirtyTokens[StrLower(sourceId)] :=
+                GetWorkspaceSourceDirtyToken(ActiveWorkspaceId, sourceId)
+        }
+    }
+    WorkerRecentDirtyToken := SourceWatcherRecentGeneration
     WorkerRecentApplied := false
     WorkerChanged := false
     token := ++WorkerStatusToken
@@ -1519,10 +1586,12 @@ EnsureCurrentScanSkeleton() {
 PollWorkerResult() {
     global WorkerRunning, WorkerPid, WorkerReadyPath, WorkerGeneration
     global WorkerAppliedSourceIndexes, WorkerRecentApplied, WorkerChanged
+    global WorkerSourceDirtyTokens, WorkerRecentDirtyToken
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
     global CurrentHiddenBySource
     global LastValidFolderSettings
     global PendingFileOperationRefresh, Panel, PanelVisible, ActiveWorkspaceId
+    global SourceWatcherRecentDirty, SourceWatcherRecentGeneration
     appliedSource := false
     appliedRecent := false
     if !WorkerRunning {
@@ -1550,6 +1619,15 @@ PollWorkerResult() {
         while CurrentScanResult.Folders.Length < sourceIndex
             CurrentScanResult.Folders.Push({Name: "", Path: "", State: "Pending", Files: []})
         CurrentScanResult.Folders[sourceIndex] := partial.Folders[1]
+        sourceId := LastValidFolderSettings[sourceIndex].SourceId
+        if sourceId = ""
+            sourceId := ResolveFolderSourceId(
+                LastValidFolderSettings[sourceIndex].Name,
+                LastValidFolderSettings[sourceIndex].Path)
+        sourceKey := StrLower(sourceId)
+        if WorkerSourceDirtyTokens.Has(sourceKey)
+            ClearWorkspaceSourceDirty(ActiveWorkspaceId, sourceId,
+                WorkerSourceDirtyTokens[sourceKey])
         CurrentHiddenBySource[sourceIndex] := {
             Count: partial.HiddenCount, Items: partial.HiddenItems}
         RebuildCurrentHiddenDiagnostics()
@@ -1569,6 +1647,8 @@ PollWorkerResult() {
                 != ResultSignature({Folders: [], Recent: partial.Recent})
                 WorkerChanged := true
             CurrentScanResult.Recent := partial.Recent
+            if WorkerRecentDirtyToken = SourceWatcherRecentGeneration
+                SourceWatcherRecentDirty := false
             appliedRecent := true
         }
     }
@@ -1661,6 +1741,211 @@ FlushPendingScanCacheWrite() {
     WriteCurrentScanCache()
 }
 
+QueueInactiveWorkspaceScans() {
+    global WorkspaceDirtySourceKeys, ActiveWorkspaceId, InactiveScanQueue
+    global InactiveRecentPending, SourceWatcherRecentDirty, ShowRecentSidebar
+    if SourceWatcherRecentDirty && ShowRecentSidebar
+        InactiveRecentPending := true
+    for workspaceKey, dirty in WorkspaceDirtySourceKeys {
+        if workspaceKey = StrLower(ActiveWorkspaceId) || !dirty.Count
+            continue
+        if !InactiveScanQueue.Has(workspaceKey)
+            InactiveScanQueue[workspaceKey] := Map()
+        queued := InactiveScanQueue[workspaceKey]
+        for sourceKey, token in dirty
+            queued[sourceKey] := token
+    }
+    StartNextInactiveWorkspaceScan()
+}
+
+StartNextInactiveWorkspaceScan() {
+    global InactiveScanJob, InactiveScanQueue, CacheDir, CacheWritable
+    global InactiveScanGeneration
+    global ActiveWorkspaceId, CurrentConfigFingerprint
+    global InactiveRecentPending, SourceWatcherRecentGeneration
+    global WorkerRunning
+    if IsObject(InactiveScanJob) || WorkerRunning || !CacheWritable
+        return
+    for workspaceKey, queued in InactiveScanQueue {
+        if !queued.Count {
+            InactiveScanQueue.Delete(workspaceKey)
+            continue
+        }
+        found := FindWorkspace(workspaceKey)
+        if !IsObject(found) || !found.Value.Sources.Length {
+            InactiveScanQueue.Delete(workspaceKey)
+            continue
+        }
+        workspace := found.Value
+        if StrLower(workspace.Id) = StrLower(ActiveWorkspaceId)
+            continue
+        generation := "inactive-" Format("{:016X}-{:08X}", A_TickCount,
+            ++InactiveScanGeneration)
+        requestPath := CacheDir "\\" generation ".request.ini"
+        readyPath := CacheDir "\\" generation ".ready"
+        try {
+            DirCreate(readyPath)
+            settings := workspace.Sources
+            fingerprint := ComputeConfigFingerprint(settings, workspace.Id,
+                workspace.Type, workspace.PinnedPaths)
+            existing := LoadWorkspaceSnapshot(workspace.Id, fingerprint)
+            scanKeys := IsObject(existing) ? queued : 0
+            context := {Folders: settings, WorkspaceId: workspace.Id,
+                Fingerprint: fingerprint, WorkspaceType: workspace.Type,
+                PinnedPaths: workspace.PinnedPaths}
+            includeRecent := InactiveRecentPending
+            WriteScanRequest(requestPath, generation, scanKeys,
+                includeRecent, context)
+            pid := StartScanWorkerProcess(requestPath, readyPath)
+            tokens := Map()
+            for sourceKey, token in queued
+                tokens[sourceKey] := token
+            InactiveScanJob := {WorkspaceId: workspace.Id,
+                Fingerprint: fingerprint, Generation: generation,
+                RequestPath: requestPath, ReadyPath: readyPath, Pid: pid,
+                SourceTokens: tokens, IncludeRecent: includeRecent,
+                RecentToken: SourceWatcherRecentGeneration,
+                Applied: Map(), Result: existing}
+            InactiveRecentPending := false
+            InactiveScanQueue.Delete(workspaceKey)
+            SetTimer(PollInactiveWorkspaceScan, 75)
+        } catch {
+            try FileDelete(requestPath)
+            try DirDelete(readyPath, true)
+            InactiveScanQueue.Delete(workspaceKey)
+        }
+        return
+    }
+}
+
+PollInactiveWorkspaceScan() {
+    global InactiveScanJob, InactiveScanQueue
+    global SourceWatcherRecentDirty, SourceWatcherRecentGeneration
+    if !IsObject(InactiveScanJob) {
+        SetTimer(PollInactiveWorkspaceScan, 0)
+        return
+    }
+    job := InactiveScanJob
+    if !IsObject(job.Result) {
+        job.Result := LoadWorkspaceSnapshot(job.WorkspaceId, job.Fingerprint)
+        if !IsObject(job.Result)
+            job.Result := BuildWorkspaceScanSkeleton(job.WorkspaceId,
+                job.Fingerprint)
+    }
+    Loop Files, job.ReadyPath "\\source-*.ini", "F" {
+        if !RegExMatch(A_LoopFileName, "i)^source-(\d+)\.ini$", &match)
+            continue
+        sourceIndex := Integer(match[1])
+        if job.Applied.Has(sourceIndex)
+            continue
+        partial := ReadScanResult(A_LoopFileFullPath, job.Generation,
+            job.Fingerprint, job.WorkspaceId)
+        if !IsObject(partial) || !partial.Folders.Length
+            continue
+        job.Applied[sourceIndex] := true
+        while job.Result.Folders.Length < sourceIndex
+            job.Result.Folders.Push({Name: "", Path: "", State: "Pending", Files: []})
+        job.Result.Folders[sourceIndex] := partial.Folders[1]
+    }
+    recentPath := job.ReadyPath "\\recent.ini"
+    if job.IncludeRecent && FileExist(recentPath) {
+        recent := ReadScanResult(recentPath, job.Generation,
+            job.Fingerprint, job.WorkspaceId)
+        if IsObject(recent)
+            job.Result.Recent := recent.Recent
+    }
+    completePath := job.ReadyPath "\\complete.ini"
+    if FileExist(completePath) {
+        if IniRead(completePath, "Meta", "Generation", "") = job.Generation {
+            if WriteWorkspaceSnapshot(job.Result, job.WorkspaceId,
+                job.Fingerprint) {
+                ; Clear Dirty only after the merged snapshot is durable. If a
+                ; write fails, the source remains queued for a later retry.
+                for sourceKey, token in job.SourceTokens {
+                    sourceId := ""
+                    found := FindWorkspace(job.WorkspaceId)
+                    if IsObject(found) {
+                        for folder in found.Value.Sources {
+                            candidate := folder.SourceId != "" ? folder.SourceId
+                                : ResolveFolderSourceId(folder.Name, folder.Path)
+                            if StrLower(candidate) = sourceKey {
+                                sourceId := candidate
+                                break
+                            }
+                        }
+                    }
+                    if sourceId != ""
+                        ClearWorkspaceSourceDirty(job.WorkspaceId, sourceId,
+                            token)
+                }
+                if job.IncludeRecent
+                    && job.RecentToken = SourceWatcherRecentGeneration
+                    SourceWatcherRecentDirty := false
+            }
+        }
+        FinishInactiveWorkspaceScan()
+        return
+    }
+    if job.Pid && !ProcessExist(job.Pid) {
+        RequeueInactiveWorkspaceJob(job)
+        FinishInactiveWorkspaceScan()
+    }
+}
+
+BuildWorkspaceScanSkeleton(workspaceId, fingerprint) {
+    found := FindWorkspace(workspaceId)
+    result := {Version: 5, Generation: "index", Fingerprint: fingerprint,
+        WorkspaceId: workspaceId, Kind: "Snapshot", SourceIndex: 0,
+        Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
+    if IsObject(found)
+        for folder in found.Value.Sources
+            result.Folders.Push({Name: folder.Name, Path: folder.Path,
+                State: "Pending", Files: []})
+    return result
+}
+
+GetWorkspaceSourceIdByIndex(workspaceId, sourceIndex) {
+    found := FindWorkspace(workspaceId)
+    if !IsObject(found) || sourceIndex < 1
+        return ""
+    settings := found.Value.Sources
+    if sourceIndex > settings.Length
+        return ""
+    sourceId := settings[sourceIndex].SourceId
+    return sourceId != "" ? sourceId : ResolveFolderSourceId(
+        settings[sourceIndex].Name, settings[sourceIndex].Path)
+}
+
+FinishInactiveWorkspaceScan() {
+    global InactiveScanJob
+    SetTimer(PollInactiveWorkspaceScan, 0)
+    if IsObject(InactiveScanJob) {
+        try FileDelete(InactiveScanJob.RequestPath)
+        try DirDelete(InactiveScanJob.ReadyPath, true)
+    }
+    InactiveScanJob := 0
+    StartNextInactiveWorkspaceScan()
+}
+
+RequeueInactiveWorkspaceJob(job) {
+    global InactiveScanQueue
+    workspaceKey := StrLower(job.WorkspaceId)
+    if !InactiveScanQueue.Has(workspaceKey)
+        InactiveScanQueue[workspaceKey] := Map()
+    for sourceKey, token in job.SourceTokens
+        InactiveScanQueue[workspaceKey][sourceKey] := token
+}
+
+CancelInactiveWorkspaceScan() {
+    global InactiveScanJob, InactiveScanQueue
+    if !IsObject(InactiveScanJob)
+        return
+    RequeueInactiveWorkspaceJob(InactiveScanJob)
+    if InactiveScanJob.Pid && ProcessExist(InactiveScanJob.Pid)
+        try ProcessClose(InactiveScanJob.Pid)
+    FinishInactiveWorkspaceScan()
+}
+
 FinishWorker(startPending := true) {
     global WorkerRunning, WorkerPid, WorkerRequestPath, WorkerReadyPath
     global PendingRefresh, WorkerStatusToken
@@ -1672,10 +1957,14 @@ FinishWorker(startPending := true) {
         try DirDelete(WorkerReadyPath, true)
     WorkerRunning := false
     WorkerPid := 0
+    pendingStarted := false
     if startPending && PendingRefresh {
         PendingRefresh := false
+        pendingStarted := true
         SetTimer(StartPendingRefresh, -50)
     }
+    if !pendingStarted
+        StartNextInactiveWorkspaceScan()
 }
 
 StartPendingRefresh() {

@@ -5,17 +5,99 @@
 ; sources are reconciled by the background worker instead.
 
 SourceWatcherSettingsSignature() {
-    global LastValidFolderSettings, ShowRecentSidebar
+    global Workspaces, ShowRecentSidebar, CacheDir
     raw := "recent=" (ShowRecentSidebar ? 1 : 0)
-    for folder in LastValidFolderSettings {
-        key := folder.SourceId != "" ? folder.SourceId
-            : ResolveFolderSourceId(folder.Name, folder.Path)
-        subtree := folder.DisplayScope != "FilesOnly"
-            || folder.FolderTimeMode = "LatestContent"
-        raw .= "|" key "|" StrLower(RTrim(folder.Path, "\"))
-            . "|" (subtree ? 1 : 0)
+        . "|cache=" StrLower(RTrim(CacheDir, "\"))
+    for workspace in Workspaces {
+        raw .= "|workspace=" StrLower(workspace.Id)
+        for folder in GetWorkspaceWatchFolders(workspace) {
+            key := folder.SourceId != "" ? folder.SourceId
+                : ResolveFolderSourceId(folder.Name, folder.Path)
+            subtree := folder.DisplayScope != "FilesOnly"
+                || folder.FolderTimeMode = "LatestContent"
+            raw .= "|" key "|" StrLower(RTrim(folder.Path, "\"))
+                . "|" (subtree ? 1 : 0)
+        }
     }
     return HashString(raw)
+}
+
+GetWorkspaceWatchFolders(workspace) {
+    if IsObject(workspace.Sources) && workspace.Sources.Length
+        return workspace.Sources
+    ; Invalid configurations still get a conservative watcher definition so
+    ; a later repair can mark the source dirty without losing its identity.
+    result := []
+    for ref in workspace.SourceRefs
+        result.Push({Name: ref.Name, Path: ref.Path, SourceId: ref.SourceId,
+            DisplayScope: "FilesOnly", FolderTimeMode: "Modified"})
+    return result
+}
+
+BuildSourceWatcherKey(path, subtree) {
+    return PathKey(path) "|" (subtree ? 1 : 0)
+}
+
+MarkWorkspaceSourceDirty(workspaceId, sourceId) {
+    global WorkspaceDirtySourceKeys
+    workspaceKey := StrLower(workspaceId)
+    if !WorkspaceDirtySourceKeys.Has(workspaceKey)
+        WorkspaceDirtySourceKeys[workspaceKey] := Map()
+    dirty := WorkspaceDirtySourceKeys[workspaceKey]
+    sourceKey := StrLower(sourceId)
+    dirty[sourceKey] := dirty.Has(sourceKey) ? dirty[sourceKey] + 1 : 1
+}
+
+MarkWorkspaceSourceUnmonitored(workspaceId, sourceId) {
+    global WorkspaceUnmonitoredSourceKeys, WorkspaceSourceHealth
+    workspaceKey := StrLower(workspaceId)
+    if !WorkspaceUnmonitoredSourceKeys.Has(workspaceKey)
+        WorkspaceUnmonitoredSourceKeys[workspaceKey] := Map()
+    WorkspaceUnmonitoredSourceKeys[workspaceKey][StrLower(sourceId)] := true
+    SetWorkspaceSourceHealth(workspaceId, sourceId, "Unmonitored")
+}
+
+SetWorkspaceSourceHealth(workspaceId, sourceId, state) {
+    global WorkspaceSourceHealth
+    workspaceKey := StrLower(workspaceId)
+    if !WorkspaceSourceHealth.Has(workspaceKey)
+        WorkspaceSourceHealth[workspaceKey] := Map()
+    WorkspaceSourceHealth[workspaceKey][StrLower(sourceId)] := state
+}
+
+GetWorkspaceRefreshSourceKeys(workspaceId, includeUnmonitored := true) {
+    global WorkspaceDirtySourceKeys, WorkspaceUnmonitoredSourceKeys
+    result := Map()
+    workspaceKey := StrLower(workspaceId)
+    if WorkspaceDirtySourceKeys.Has(workspaceKey)
+        for sourceKey, token in WorkspaceDirtySourceKeys[workspaceKey]
+            result[sourceKey] := true
+    if includeUnmonitored && WorkspaceUnmonitoredSourceKeys.Has(workspaceKey)
+        for sourceKey, value in WorkspaceUnmonitoredSourceKeys[workspaceKey]
+            result[sourceKey] := true
+    return result
+}
+
+GetWorkspaceSourceDirtyToken(workspaceId, sourceId) {
+    global WorkspaceDirtySourceKeys
+    workspaceKey := StrLower(workspaceId)
+    sourceKey := StrLower(sourceId)
+    return WorkspaceDirtySourceKeys.Has(workspaceKey)
+        && WorkspaceDirtySourceKeys[workspaceKey].Has(sourceKey)
+        ? WorkspaceDirtySourceKeys[workspaceKey][sourceKey] : 0
+}
+
+ClearWorkspaceSourceDirty(workspaceId, sourceId, token := 0) {
+    global WorkspaceDirtySourceKeys
+    workspaceKey := StrLower(workspaceId)
+    sourceKey := StrLower(sourceId)
+    if !WorkspaceDirtySourceKeys.Has(workspaceKey)
+        return
+    dirty := WorkspaceDirtySourceKeys[workspaceKey]
+    if !dirty.Has(sourceKey)
+        return
+    if token = 0 || dirty[sourceKey] = token
+        dirty.Delete(sourceKey)
 }
 
 IsLocalWatchablePath(path) {
@@ -33,33 +115,59 @@ IsLocalWatchablePath(path) {
 
 ReconcileSourceWatchers(force := false) {
     global SourceWatcherSignature, SourceWatcherDefinitions, SourceWatchers
-    global LastValidFolderSettings, ShowRecentSidebar, CacheDir
+    global WorkspaceUnmonitoredSourceKeys, WorkspaceSourceHealth
+    global Workspaces, ShowRecentSidebar, CacheDir
     signature := SourceWatcherSettingsSignature()
     if !force && signature = SourceWatcherSignature
         return
     CleanupSourceWatchers()
     SourceWatcherSignature := signature
     SourceWatcherDefinitions := Map()
-    for index, folder in LastValidFolderSettings {
-        key := folder.SourceId != "" ? folder.SourceId
-            : ResolveFolderSourceId(folder.Name, folder.Path)
-        definition := {Key: key, Path: folder.Path,
-            Subtree: folder.DisplayScope != "FilesOnly"
-                || folder.FolderTimeMode = "LatestContent",
-            Kind: "Source", Index: index}
-        SourceWatcherDefinitions[key] := definition
-        cacheConflicts := CacheDir != "" && (PathsEqual(CacheDir, folder.Path)
-            || (definition.Subtree
-                && IsSameOrDescendantPath(CacheDir, folder.Path)))
-        if !cacheConflicts && IsLocalWatchablePath(folder.Path)
-            && DirExist(folder.Path) {
+    WorkspaceUnmonitoredSourceKeys := Map()
+    WorkspaceSourceHealth := Map()
+    for workspace in Workspaces {
+        for index, folder in GetWorkspaceWatchFolders(workspace) {
+            sourceId := folder.SourceId != "" ? folder.SourceId
+                : ResolveFolderSourceId(folder.Name, folder.Path)
+            subtree := folder.DisplayScope != "FilesOnly"
+                || folder.FolderTimeMode = "LatestContent"
+            watchKey := BuildSourceWatcherKey(folder.Path, subtree)
+            if !SourceWatcherDefinitions.Has(watchKey)
+                SourceWatcherDefinitions[watchKey] := {Key: watchKey,
+                    Path: folder.Path, Subtree: subtree, Kind: "Source",
+                    Bindings: []}
+            SourceWatcherDefinitions[watchKey].Bindings.Push({
+                WorkspaceId: workspace.Id, SourceId: sourceId, Index: index})
+        }
+    }
+
+    for watchKey, definition in SourceWatcherDefinitions {
+        canWatch := IsLocalWatchablePath(definition.Path)
+            && DirExist(definition.Path)
+        cacheConflicts := false
+        if CacheDir != ""
+            cacheConflicts := PathsEqual(CacheDir, definition.Path)
+                || (definition.Subtree
+                    && IsSameOrDescendantPath(CacheDir, definition.Path))
+        if canWatch && !cacheConflicts {
             watcher := CreateSourceWatcher(definition)
-            if IsObject(watcher)
-                SourceWatchers[key] := watcher
-            else
+            if IsObject(watcher) {
+                SourceWatchers[watchKey] := watcher
+                for binding in definition.Bindings
+                    SetWorkspaceSourceHealth(binding.WorkspaceId,
+                        binding.SourceId, "Healthy")
+            } else
+                canWatch := false
+        }
+        if !canWatch {
+            for binding in definition.Bindings
+                MarkWorkspaceSourceUnmonitored(binding.WorkspaceId,
+                    binding.SourceId)
+            if IsLocalWatchablePath(definition.Path)
                 ScheduleSourceWatcherReopen()
         }
     }
+
     if ShowRecentSidebar {
         recentPath := A_AppData "\Microsoft\Windows\Recent"
         definition := {Key: "__recent", Path: recentPath,
@@ -94,7 +202,8 @@ CreateSourceWatcher(definition) {
     overlappedSize := A_PtrSize = 8 ? 32 : 20
     eventOffset := A_PtrSize * 2 + 8
     watcher := {Key: definition.Key, Path: definition.Path,
-        Kind: definition.Kind, Index: definition.Index,
+        Kind: definition.Kind,
+        Bindings: definition.HasProp("Bindings") ? definition.Bindings : [],
         Subtree: definition.Subtree, Handle: handle, Event: eventHandle,
         Buffer: Buffer(65536, 0), Overlapped: Buffer(overlappedSize, 0)}
     NumPut("ptr", eventHandle, watcher.Overlapped, eventOffset)
@@ -124,7 +233,7 @@ PollSourceWatchers() {
             continue
         if waitResult != 0 {
             failedKeys.Push(key)
-            QueueSourceWatcherChange(watcher)
+            QueueSourceWatcherChange(watcher, "Failed")
             continue
         }
         bytesTransferred := 0
@@ -132,7 +241,8 @@ PollSourceWatchers() {
             "ptr", watcher.Overlapped.Ptr, "uint*", &bytesTransferred,
             "int", false, "int")
         ; A zero-byte successful result is the documented overflow signal.
-        QueueSourceWatcherChange(watcher)
+        QueueSourceWatcherChange(watcher,
+            ok && bytesTransferred = 0 ? "Overflowed" : "Dirty")
         DllCall("kernel32\ResetEvent", "ptr", watcher.Event)
         if !ok || !IssueSourceWatchRead(watcher)
             failedKeys.Push(key)
@@ -149,13 +259,18 @@ PollSourceWatchers() {
         SetTimer(PollSourceWatchers, 0)
 }
 
-QueueSourceWatcherChange(watcher) {
-    global SourceWatcherDirtyKeys, SourceWatcherRecentDirty
+QueueSourceWatcherChange(watcher, state := "Dirty") {
+    global SourceWatcherRecentDirty, SourceWatcherRecentGeneration
     global SourceWatcherRefreshPending
-    if watcher.Kind = "Recent"
+    if watcher.Kind = "Recent" {
         SourceWatcherRecentDirty := true
-    else
-        SourceWatcherDirtyKeys[watcher.Key] := true
+        SourceWatcherRecentGeneration += 1
+    } else {
+        for binding in watcher.Bindings {
+            SetWorkspaceSourceHealth(binding.WorkspaceId, binding.SourceId, state)
+            MarkWorkspaceSourceDirty(binding.WorkspaceId, binding.SourceId)
+        }
+    }
     if !SourceWatcherRefreshPending {
         SourceWatcherRefreshPending := true
         ; Collapse editor-save sequences and bulk copies into one source batch.
@@ -164,15 +279,14 @@ QueueSourceWatcherChange(watcher) {
 }
 
 FlushSourceWatcherChanges() {
-    global SourceWatcherDirtyKeys, SourceWatcherRecentDirty
+    global ActiveWorkspaceId, SourceWatcherRecentDirty, ShowRecentSidebar
     global SourceWatcherRefreshPending
-    sourceKeys := SourceWatcherDirtyKeys
-    includeRecent := SourceWatcherRecentDirty
-    SourceWatcherDirtyKeys := Map()
-    SourceWatcherRecentDirty := false
+    sourceKeys := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, false)
+    includeRecent := SourceWatcherRecentDirty && ShowRecentSidebar
     SourceWatcherRefreshPending := false
     if sourceKeys.Count || includeRecent
         StartBackgroundScan(sourceKeys, "watch", includeRecent)
+    QueueInactiveWorkspaceScans()
 }
 
 ScheduleSourceWatcherReopen() {
@@ -227,53 +341,63 @@ ResumeSourceMonitoring() {
 
 CheckRefreshPolicyOnShow() {
     global StartupCalibrationPending, LastDailyCalibrationDate
-    global ConsistencyCheckHours, ProcessStartedAt, LastConsistencyBucket
+    global ConsistencyCheckMinutes, ProcessStartedAt, LastConsistencyBucket
     global ConsistencyCheckPending, ShowRecentSidebar
-    global SourceWatcherDefinitions, SourceWatchers
+    global ActiveWorkspaceId, Workspaces, WorkspaceCalibrationSeeded
+    global SourceWatcherRecentDirty, SourceWatcherRecentGeneration
     ReconcileSourceWatchers()
     today := SubStr(A_Now, 1, 8)
     calibrated := false
     if StartupCalibrationPending || LastDailyCalibrationDate != today {
+        WorkspaceCalibrationSeeded := false
+        SeedWorkspaceCalibrationDirty()
+        if ShowRecentSidebar {
+            SourceWatcherRecentDirty := true
+            SourceWatcherRecentGeneration += 1
+        }
         StartupCalibrationPending := false
         LastDailyCalibrationDate := today
         StartBackgroundScan(0, "calibration", ShowRecentSidebar)
+        QueueInactiveWorkspaceScans()
         calibrated := true
     }
     if !calibrated {
-        unmonitored := Map()
-        for key, definition in SourceWatcherDefinitions {
-            if definition.Kind = "Source" && !SourceWatchers.Has(key)
-                unmonitored[key] := true
-        }
+        unmonitored := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, true)
         if unmonitored.Count
             StartBackgroundScan(unmonitored, "reconnect", false)
     }
-    if ConsistencyCheckHours <= 0
+    if ConsistencyCheckMinutes <= 0
         return
-    elapsedHours := DateDiff(A_Now, ProcessStartedAt, "Hours")
-    bucket := Floor(elapsedHours / ConsistencyCheckHours)
+    elapsedMinutes := DateDiff(A_Now, ProcessStartedAt, "Minutes")
+    bucket := Floor(elapsedMinutes / ConsistencyCheckMinutes)
     if bucket > LastConsistencyBucket
         ConsistencyCheckPending := true
 }
 
+SeedWorkspaceCalibrationDirty() {
+    global Workspaces, WorkspaceCalibrationSeeded
+    if WorkspaceCalibrationSeeded
+        return
+    for workspace in Workspaces
+        for folder in GetWorkspaceWatchFolders(workspace) {
+            sourceId := folder.SourceId != "" ? folder.SourceId
+                : ResolveFolderSourceId(folder.Name, folder.Path)
+            MarkWorkspaceSourceDirty(workspace.Id, sourceId)
+        }
+    WorkspaceCalibrationSeeded := true
+}
+
 RunPendingConsistencyCheckAfterHide() {
     global ConsistencyCheckPending, LastConsistencyBucket
-    global ConsistencyCheckHours, ProcessStartedAt
-    global SourceWatcherDefinitions, SourceWatchers
+    global ConsistencyCheckMinutes, ProcessStartedAt, ActiveWorkspaceId
     if !ConsistencyCheckPending
         return
     ConsistencyCheckPending := false
-    sourceKeys := Map()
-    ; Healthy local handles already provide continuity. Reconcile only sources
-    ; whose handles are absent/failed (network, removable or error recovery).
-    for key, definition in SourceWatcherDefinitions {
-        if definition.Kind = "Source" && !SourceWatchers.Has(key)
-            sourceKeys[key] := true
-    }
+    sourceKeys := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, true)
     if sourceKeys.Count
         StartBackgroundScan(sourceKeys, "consistency", false)
-    if ConsistencyCheckHours > 0 {
-        elapsedHours := DateDiff(A_Now, ProcessStartedAt, "Hours")
-        LastConsistencyBucket := Floor(elapsedHours / ConsistencyCheckHours)
+    if ConsistencyCheckMinutes > 0 {
+        elapsedMinutes := DateDiff(A_Now, ProcessStartedAt, "Minutes")
+        LastConsistencyBucket := Floor(elapsedMinutes / ConsistencyCheckMinutes)
     }
 }

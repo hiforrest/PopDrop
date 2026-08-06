@@ -381,9 +381,18 @@ ConfigDocumentContainsKey(doc, section, key) {
 }
 
 EnsureRefreshConfigDefaults(doc) {
-    if !ConfigDocumentContainsKey(doc, "General", "ConsistencyCheckHours")
-        doc.SetValue("General", "ConsistencyCheckHours",
-            ConfigDefaultValue("General", "ConsistencyCheckHours", "2"), 1)
+    if !ConfigDocumentContainsKey(doc, "General", "ConsistencyCheckMinutes") {
+        legacyHours := Trim(doc.GetValue("General",
+            "ConsistencyCheckHours", ""))
+        if legacyHours != "" {
+            try minutes := Integer(legacyHours) * 60
+            catch
+                minutes := 60
+        } else
+            minutes := ConfigDefaultValue(
+                "General", "ConsistencyCheckMinutes", "60")
+        doc.SetValue("General", "ConsistencyCheckMinutes", minutes, 1)
+    }
 }
 
 EnsureKnownFolderDefaults(doc) {
@@ -575,7 +584,7 @@ LoadSettings(*) {
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
     global CurrentHiddenBySource
     global WorkspaceScanSnapshots, PanelRenderSignature, RecentRenderSignature
-    global ConsistencyCheckHours
+    global ConsistencyCheckMinutes
     global ConfigErrors, LastValidFolderSettings
     global ConfigErrorsShown
     global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
@@ -696,11 +705,19 @@ LoadSettings(*) {
         ConfigPath, "General", "ThumbnailPolicy", "Full"))) = "full"
         ? "Full" : "Fast"
     CachePathSetting := Trim(IniRead(ConfigPath, "General", "CachePath", ""))
-    try ConsistencyCheckHours := Integer(IniRead(
-        ConfigPath, "General", "ConsistencyCheckHours", "2"))
-    catch
-        ConsistencyCheckHours := 2
-    ConsistencyCheckHours := Max(0, Min(ConsistencyCheckHours, 168))
+    rawConsistencyMinutes := IniRead(
+        ConfigPath, "General", "ConsistencyCheckMinutes", "")
+    if rawConsistencyMinutes = "" {
+        try ConsistencyCheckMinutes := Integer(IniRead(
+            ConfigPath, "General", "ConsistencyCheckHours", "1")) * 60
+        catch
+            ConsistencyCheckMinutes := 60
+    } else {
+        try ConsistencyCheckMinutes := Integer(rawConsistencyMinutes)
+        catch
+            ConsistencyCheckMinutes := 60
+    }
+    ConsistencyCheckMinutes := Max(0, Min(ConsistencyCheckMinutes, 10080))
     LastOpenProgramDir := NormalizePath(
         IniRead(ConfigPath, "General", "LastOpenProgramDir", ""))
     LastTransferTargetDir := NormalizePath(

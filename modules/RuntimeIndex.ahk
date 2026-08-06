@@ -141,13 +141,15 @@ RuntimeIndexColumnText(statement, index) {
     return valuePtr ? StrGet(valuePtr) : ""
 }
 
-RuntimeIndexSaveSnapshot(result) {
+RuntimeIndexSaveSnapshot(result, workspaceId := "", fingerprint := "") {
     global RuntimeIndexAvailable, RuntimeIndexDb
     global ActiveWorkspaceId, CurrentConfigFingerprint
     if !RuntimeIndexAvailable && !InitializeRuntimeIndex()
         return false
-    workspaceId := ActiveWorkspaceId
-    if workspaceId = ""
+    targetWorkspaceId := workspaceId != "" ? workspaceId : ActiveWorkspaceId
+    targetFingerprint := fingerprint != ""
+        ? fingerprint : CurrentConfigFingerprint
+    if targetWorkspaceId = ""
         return false
     statements := []
     try {
@@ -155,8 +157,8 @@ RuntimeIndexSaveSnapshot(result) {
         workspace := RuntimeIndexPrepare("INSERT OR REPLACE INTO workspace_snapshot "
             . "(workspace_id,fingerprint,updated_at) VALUES(?,?,?);")
         statements.Push(workspace)
-        RuntimeIndexBindText(workspace, 1, workspaceId)
-        RuntimeIndexBindText(workspace, 2, CurrentConfigFingerprint)
+        RuntimeIndexBindText(workspace, 1, targetWorkspaceId)
+        RuntimeIndexBindText(workspace, 2, targetFingerprint)
         RuntimeIndexBindText(workspace, 3, A_Now)
         RuntimeIndexStepDone(workspace)
 
@@ -164,7 +166,7 @@ RuntimeIndexSaveSnapshot(result) {
             statement := RuntimeIndexPrepare("DELETE FROM " tableName
                 . " WHERE workspace_id=?;")
             statements.Push(statement)
-            RuntimeIndexBindText(statement, 1, workspaceId)
+            RuntimeIndexBindText(statement, 1, targetWorkspaceId)
             RuntimeIndexStepDone(statement)
         }
 
@@ -179,7 +181,7 @@ RuntimeIndexSaveSnapshot(result) {
         statements.Push(itemStatement)
         statements.Push(recentStatement)
         for sourceIndex, folder in result.Folders {
-            RuntimeIndexBindText(sourceStatement, 1, workspaceId)
+            RuntimeIndexBindText(sourceStatement, 1, targetWorkspaceId)
             RuntimeIndexBindInt(sourceStatement, 2, sourceIndex)
             RuntimeIndexBindText(sourceStatement, 3, folder.Name)
             RuntimeIndexBindText(sourceStatement, 4, folder.Path)
@@ -187,7 +189,7 @@ RuntimeIndexSaveSnapshot(result) {
             RuntimeIndexStepDone(sourceStatement)
             RuntimeIndexReset(sourceStatement)
             for itemIndex, item in folder.Files {
-                RuntimeIndexBindText(itemStatement, 1, workspaceId)
+                RuntimeIndexBindText(itemStatement, 1, targetWorkspaceId)
                 RuntimeIndexBindInt(itemStatement, 2, sourceIndex)
                 RuntimeIndexBindInt(itemStatement, 3, itemIndex)
                 RuntimeIndexBindText(itemStatement, 4, item.Path)
@@ -200,7 +202,7 @@ RuntimeIndexSaveSnapshot(result) {
             }
         }
         for itemIndex, item in result.Recent {
-            RuntimeIndexBindText(recentStatement, 1, workspaceId)
+            RuntimeIndexBindText(recentStatement, 1, targetWorkspaceId)
             RuntimeIndexBindInt(recentStatement, 2, itemIndex)
             RuntimeIndexBindText(recentStatement, 3, item.Path)
             RuntimeIndexBindText(recentStatement, 4, item.Name)

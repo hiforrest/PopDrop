@@ -102,7 +102,7 @@ ViewMode=Thumbnail
 ShowRecentSidebar=0
 RecentFileCount=12
 CachePath=
-ConsistencyCheckHours=2
+ConsistencyCheckMinutes=60
 ThumbnailPolicy=Full
 WindowMode=temporary
 
@@ -188,7 +188,7 @@ Path=%USERPROFILE%\Downloads
 | `ShowRecentSidebar` | `1`=显示最近打开侧边栏，`0`=关闭。也可以从“显示 ▾”菜单随时开关。 |
 | `RecentFileCount` | 侧边栏最多显示多少个近期文件，范围 1～100。 |
 | `CachePath` | 运行时索引目录。留空时优先使用软件目录下的 `cache`；目录不可写或位于网络盘时回退到 `%LOCALAPPDATA%\PopDrop\cache`。 |
-| `ConsistencyCheckHours` | 轻量一致性检查间隔（小时），默认 2，`0`=关闭。不启用常驻计时器：呼出窗口时判断是否到期，窗口关闭后只校验未被健康监听覆盖的来源。 |
+| `ConsistencyCheckMinutes` | 轻量一致性检查间隔（分钟），默认 60，`0`=关闭。不启用常驻计时器：呼出窗口时判断是否到期，窗口关闭后只校验 Dirty、监听失败或不可监听的来源；旧版 `ConsistencyCheckHours` 会自动换算。 |
 | `ThumbnailPolicy` | `Full`（默认）首帧先读取 Shell 缓存或显示类型图标，再逐项增强未缓存缩略图；`Fast` 只使用已有缓存和类型图标。 |
 | `WindowMode` | 窗口显示模式：`temporary`（默认，置顶，切换到其他窗口后自动隐藏）、`always_on_top`（始终置顶）、`normal`（普通窗口，不置顶）。 |
 | `OpenFileMode` | 普通文件的鼠标激活方式：`DoubleClick`（默认）或 `SingleClick`。缺失、空值或未知值都回退为双击。 |

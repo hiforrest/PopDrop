@@ -211,12 +211,16 @@ RedrawPanelToolbar() {
 
 MainWorkspaceChanged(control, *) {
     global WorkspaceSelectorIds, ActiveWorkspaceId
+    global InactiveScanJob
     index := control.Value
     if index < 1 || index > WorkspaceSelectorIds.Length
         return
     targetId := WorkspaceSelectorIds[index]
     if StrLower(targetId) = StrLower(ActiveWorkspaceId)
         return
+    if IsObject(InactiveScanJob)
+        && StrLower(InactiveScanJob.WorkspaceId) = StrLower(targetId)
+        CancelInactiveWorkspaceScan()
     if !RequestActivateWorkspace(targetId, "main")
         SyncWorkspaceControls()
 }
@@ -232,6 +236,7 @@ RequestActivateWorkspace(workspaceId, origin := "main") {
 ActivateWorkspace(workspaceId) {
     global ActiveWorkspaceId, PanelVisible, StatusKind, FileView
     global LastFileWorkspaceId, WORKSPACE_TYPE_FILES
+    global SourceWatcherRecentDirty
     found := FindWorkspace(workspaceId)
     if !IsObject(found)
         return false
@@ -264,8 +269,15 @@ ActivateWorkspace(workspaceId) {
         else
             FileView.Focus()
     }
-    ReconcileSourceWatchers(true)
-    StartBackgroundScan(0, "workspace", ShowRecentSidebar)
+    ReconcileSourceWatchers()
+    refreshKeys := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, true)
+    needsFullScan := !ScanResultLoaded
+    includeRecent := ShowRecentSidebar && (!ScanResultLoaded
+        || SourceWatcherRecentDirty)
+    if needsFullScan
+        StartBackgroundScan(0, "workspace", includeRecent)
+    else if refreshKeys.Count || includeRecent
+        StartBackgroundScan(refreshKeys, "workspace", includeRecent)
     return true
 }
 
