@@ -381,6 +381,9 @@ ConfigDocumentContainsKey(doc, section, key) {
 }
 
 EnsureRefreshConfigDefaults(doc) {
+    global CONTENT_UPDATE_FAST
+    if !ConfigDocumentContainsKey(doc, "General", "ContentUpdateMode")
+        doc.SetValue("General", "ContentUpdateMode", CONTENT_UPDATE_FAST, 1)
     if !ConfigDocumentContainsKey(doc, "General", "ConsistencyCheckMinutes") {
         legacyHours := Trim(doc.GetValue("General",
             "ConsistencyCheckHours", ""))
@@ -584,7 +587,8 @@ LoadSettings(*) {
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
     global CurrentHiddenBySource
     global WorkspaceScanSnapshots, PanelRenderSignature, RecentRenderSignature
-    global ConsistencyCheckMinutes
+    global ConsistencyCheckMinutes, ContentUpdateMode
+    global CONTENT_UPDATE_FAST, CONTENT_UPDATE_ACCURACY
     global ConfigErrors, LastValidFolderSettings
     global ConfigErrorsShown
     global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
@@ -696,6 +700,12 @@ LoadSettings(*) {
     SetRecentSidebarVisible(
         IniRead(ConfigPath, "General", "ShowRecentSidebar", "0") = "1",
         false)
+    rawContentUpdateMode := StrLower(Trim(IniRead(ConfigPath, "General",
+        "ContentUpdateMode", CONTENT_UPDATE_FAST)))
+    if rawContentUpdateMode = StrLower(CONTENT_UPDATE_ACCURACY)
+        ContentUpdateMode := CONTENT_UPDATE_ACCURACY
+    else
+        ContentUpdateMode := CONTENT_UPDATE_FAST
     try RecentFileCount := Integer(IniRead(ConfigPath, "General", "RecentFileCount", "12"))
     catch
         RecentFileCount := 12

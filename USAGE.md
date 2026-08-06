@@ -189,6 +189,15 @@ Path=%USERPROFILE%\Downloads
 | `RecentFileCount` | 侧边栏最多显示多少个近期文件，范围 1～100。 |
 | `CachePath` | 运行时索引目录。留空时优先使用软件目录下的 `cache`；目录不可写或位于网络盘时回退到 `%LOCALAPPDATA%\PopDrop\cache`。 |
 | `ConsistencyCheckMinutes` | 轻量一致性检查间隔（分钟），默认 60，`0`=关闭。不启用常驻计时器：呼出窗口时判断是否到期，窗口关闭后只校验 Dirty、监听失败或不可监听的来源；旧版 `ConsistencyCheckHours` 会自动换算。 |
+
+### 内容更新方式
+
+在“PopDrop 设置 → 内容更新方式”中可选择：
+
+- **极速显示（推荐）**：优先快速显示已有内容，适合重视打开和切换速度的用户。
+- **准确优先**：打开窗口和切换工作区时重新确认内容，适合对内容准确性要求极高或曾遇到显示滞后的用户。
+
+对应配置键为 `ContentUpdateMode=Fast` 或 `ContentUpdateMode=Accuracy`；建议通过设置页面修改。
 | `ThumbnailPolicy` | `Full`（默认）首帧先读取 Shell 缓存或显示类型图标，再逐项增强未缓存缩略图；`Fast` 只使用已有缓存和类型图标。 |
 | `WindowMode` | 窗口显示模式：`temporary`（默认，置顶，切换到其他窗口后自动隐藏）、`always_on_top`（始终置顶）、`normal`（普通窗口，不置顶）。 |
 | `OpenFileMode` | 普通文件的鼠标激活方式：`DoubleClick`（默认）或 `SingleClick`。缺失、空值或未知值都回退为双击。 |

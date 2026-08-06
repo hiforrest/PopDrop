@@ -1481,6 +1481,7 @@ StartBackgroundScan(sourceKeys := 0, reason := "auto", includeRecent := -1) {
     global ScanGeneration, WorkerGeneration, WorkerWorkspaceId
     global WorkerRequestPath, WorkerReadyPath, WorkerPid, CacheDir, CacheWritable
     global WorkerAppliedSourceIndexes, WorkerRecentApplied, WorkerChanged
+    global WorkerFullScan
     global WorkerSourceDirtyTokens, WorkerRecentDirtyToken
     global SourceWatcherRecentDirty, SourceWatcherRecentGeneration
     global WorkerStatusToken, ActiveWorkspaceId, ShowRecentSidebar
@@ -1500,6 +1501,8 @@ StartBackgroundScan(sourceKeys := 0, reason := "auto", includeRecent := -1) {
         PendingIncludeRecent := false
     }
     if WorkerRunning {
+        if !IsObject(sourceKeys) && WorkerFullScan
+            return
         PendingRefresh := true
         if !IsObject(sourceKeys)
             PendingFullRefresh := true
@@ -1529,6 +1532,7 @@ StartBackgroundScan(sourceKeys := 0, reason := "auto", includeRecent := -1) {
         return
     }
     WorkerRunning := true
+    WorkerFullScan := !IsObject(sourceKeys)
     WorkerGeneration := generation
     WorkerWorkspaceId := ActiveWorkspaceId
     WorkerRequestPath := requestPath
@@ -1948,7 +1952,7 @@ CancelInactiveWorkspaceScan() {
 
 FinishWorker(startPending := true) {
     global WorkerRunning, WorkerPid, WorkerRequestPath, WorkerReadyPath
-    global PendingRefresh, WorkerStatusToken
+    global PendingRefresh, WorkerStatusToken, WorkerFullScan
     SetTimer(PollWorkerResult, 0)
     ++WorkerStatusToken
     try FileDelete(WorkerRequestPath)
@@ -1956,6 +1960,7 @@ FinishWorker(startPending := true) {
         && RegExMatch(WorkerReadyPath, "i)\\ready-[0-9A-F-]+$")
         try DirDelete(WorkerReadyPath, true)
     WorkerRunning := false
+    WorkerFullScan := false
     WorkerPid := 0
     pendingStarted := false
     if startPending && PendingRefresh {

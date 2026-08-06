@@ -345,6 +345,7 @@ CheckRefreshPolicyOnShow() {
     global ConsistencyCheckPending, ShowRecentSidebar
     global ActiveWorkspaceId, Workspaces, WorkspaceCalibrationSeeded
     global SourceWatcherRecentDirty, SourceWatcherRecentGeneration
+    global ContentUpdateMode, CONTENT_UPDATE_ACCURACY
     ReconcileSourceWatchers()
     today := SubStr(A_Now, 1, 8)
     calibrated := false
@@ -361,7 +362,11 @@ CheckRefreshPolicyOnShow() {
         QueueInactiveWorkspaceScans()
         calibrated := true
     }
-    if !calibrated {
+    if !calibrated && ContentUpdateMode = CONTENT_UPDATE_ACCURACY {
+        ; Accuracy mode validates the visible workspace every time the panel
+        ; is summoned, even when its cached snapshot is already present.
+        StartBackgroundScan(0, "accuracy-show", ShowRecentSidebar)
+    } else if !calibrated {
         unmonitored := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, true)
         if unmonitored.Count
             StartBackgroundScan(unmonitored, "reconnect", false)

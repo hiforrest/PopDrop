@@ -9,7 +9,7 @@ OpenConfig(*) {
 OpenAboutPopDrop(*) {
     c := OpenSettingsGui()
     if IsObject(c)
-        ShowSettingsPage(c, 5)
+        ShowSettingsPage(c, 6)
 }
 
 OpenAboutUrl(url, *) {
@@ -177,27 +177,29 @@ OpenSettingsGui() {
     navGeneral := navigation.Add("通用", sharedRoot)
     navOperations := navigation.Add("打开与文件操作", sharedRoot)
     navDisplay := navigation.Add("显示与过滤", sharedRoot)
+    navContentUpdate := navigation.Add("内容更新方式", sharedRoot)
     workspaceRoot := navigation.Add("工作区设置", 0, "Expand")
     navWorkspace := navigation.Add("当前工作区", workspaceRoot)
     navAbout := navigation.Add("关于 PopDrop")
     controller.Navigation := navigation
     controller.NavPages := Map(
         navGeneral, 1, navWorkspace, 2, navOperations, 3, navDisplay, 4,
-        navAbout, 5)
+        navContentUpdate, 5, navAbout, 6)
     controller.NavItems := Map(
         1, navGeneral, 2, navWorkspace, 3, navOperations, 4, navDisplay,
-        5, navAbout)
+        5, navContentUpdate, 6, navAbout)
     ; Tab3 remains the native page host, but its duplicate tab strip is placed
     ; above the client area. The TreeView is the only visible page navigation.
     tabs := guiObj.AddTab3("x184 y-26 w852 h674 -Tabstop",
         ["共享设置 · 通用", "当前工作区",
          "共享设置 · 打开与文件操作", "共享设置 · 显示与过滤",
-         "关于 PopDrop"])
+         "共享设置 · 内容更新方式", "关于 PopDrop"])
     controller.Tab := tabs
     BuildGeneralSettingsPage(controller, tabs)
     BuildSourcesSettingsPage(controller, tabs)
     BuildOperationsSettingsPage(controller, tabs)
     BuildDisplaySettingsPage(controller, tabs)
+    BuildContentUpdateSettingsPage(controller, tabs)
     BuildAboutSettingsPage(controller, tabs)
     tabs.UseTab()
 
@@ -231,6 +233,7 @@ OpenSettingsGui() {
     RefreshExcludedNameList(controller)
     LoadGeneralControls(controller)
     LoadDisplayControls(controller)
+    LoadContentUpdateControls(controller)
     navigation.Modify(navGeneral, "Select Vis")
     guiObj.Show("w1050 h704")
     return controller
@@ -257,6 +260,7 @@ LoadSettingsIntoDraft() {
     global FileManagerProvider, FileManagerExecutable
     global PreviewEnabled, PreviewSide, PreviewCacheEnabled
     global PreviewDocumentEnabled, PreviewPdfEnabled
+    global ContentUpdateMode
     global ExternalQuickPreviewProvider
     global SeerIntegrationEnabled, QuickLookPath
 
@@ -322,6 +326,7 @@ LoadSettingsIntoDraft() {
             QuickPreviewProvider: ExternalQuickPreviewProvider,
             SeerIntegrationEnabled: SeerIntegrationEnabled,
             QuickLookPath: QuickLookPath,
+            ContentUpdateMode: ContentUpdateMode,
             DefaultDisplayScope: ReadGlobalDisplayScopeForDraft(),
             DefaultFolderTimeMode: ReadGlobalFolderTimeForDraft(),
             DefaultFilter: ReadGlobalFilterForDraft(),
@@ -828,6 +833,7 @@ ReloadSettingsDraft(c) {
     c.SelectedTargetId := ""
     LoadGeneralControls(c)
     LoadDisplayControls(c)
+    LoadContentUpdateControls(c)
     RefreshSettingsWorkspaceControls(c)
     RefreshApplicationList(c)
     RefreshDestinationList(c)
@@ -1418,7 +1424,7 @@ BuildDisplaySettingsPage(c, tabs) {
 
 BuildAboutSettingsPage(c, tabs) {
     global APP_VERSION
-    tabs.UseTab(5)
+    tabs.UseTab(6)
     g := c.Gui
     g.AddGroupBox("x200 y29 w818 h360", "关于 PopDrop")
 
@@ -1442,6 +1448,54 @@ BuildAboutSettingsPage(c, tabs) {
     author.OnEvent("Click", OpenAboutUrl.Bind("https://s.ee/katt"))
     g.AddText("x385 y330 w440 h24 c666666",
         "先让几件小事顺手一点。")
+}
+
+BuildContentUpdateSettingsPage(c, tabs) {
+    tabs.UseTab(5)
+    g := c.Gui
+    g.AddGroupBox("x200 y29 w818 h300", "内容更新方式 · 应用于所有工作区")
+    c.ContentUpdateFast := g.AddRadio("x224 y68 Group", "极速显示（推荐）")
+    g.AddText("x244 y101 w744 h54 c555555",
+        "在意窗口打开和工作区切换速度的用户适合此模式。"
+        . "通常会快速显示最新内容，极少数特殊存储环境可能出现短暂延迟。")
+    c.ContentUpdateAccuracy := g.AddRadio("x224 y178", "准确优先")
+    g.AddText("x244 y211 w744 h54 c555555",
+        "适合对内容准确性要求极高，或曾遇到文件显示滞后、更新不及时的用户。"
+        . "打开窗口和切换工作区时会重新确认内容，文件较多时等待时间可能更长。")
+    c.ContentUpdateHint := g.AddText("x224 y278 w744 h36 c666666",
+        "当前设置会在保存后立即应用。")
+    c.ContentUpdateFast.OnEvent(
+        "Click", ContentUpdateControlChanged.Bind(c, "Fast"))
+    c.ContentUpdateAccuracy.OnEvent(
+        "Click", ContentUpdateControlChanged.Bind(c, "Accuracy"))
+}
+
+ContentUpdateControlChanged(c, selectedMode := "", *) {
+    global CONTENT_UPDATE_FAST, CONTENT_UPDATE_ACCURACY
+    if c.Loading
+        return
+    ; The explanatory text between the two controls prevents Windows from
+    ; reliably treating them as one native radio group. Enforce exclusivity
+    ; explicitly and use the clicked control as the source of truth.
+    if selectedMode = "Accuracy" {
+        c.ContentUpdateAccuracy.Value := true
+        c.ContentUpdateFast.Value := false
+        c.Draft.General.ContentUpdateMode := CONTENT_UPDATE_ACCURACY
+    } else {
+        c.ContentUpdateFast.Value := true
+        c.ContentUpdateAccuracy.Value := false
+        c.Draft.General.ContentUpdateMode := CONTENT_UPDATE_FAST
+    }
+}
+
+LoadContentUpdateControls(c) {
+    global CONTENT_UPDATE_FAST, CONTENT_UPDATE_ACCURACY
+    c.Loading := true
+    try {
+        mode := c.Draft.General.ContentUpdateMode
+        c.ContentUpdateFast.Value := mode != CONTENT_UPDATE_ACCURACY
+        c.ContentUpdateAccuracy.Value := mode = CONTENT_UPDATE_ACCURACY
+    } finally c.Loading := false
 }
 
 LoadGeneralControls(c) {
@@ -3405,6 +3459,7 @@ SettingsDraftSignature(draft) {
     parts.Push(g.OpenFileMode, g.DefaultContextMenu, g.Hotkey,
         g.DoubleHotkeyWorkspaceId, g.WindowMode,
         g.EscapeHidesPanel ? "1" : "0",
+        g.ContentUpdateMode,
         g.ShowRecentSidebar ? "1" : "0",
         g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode,
         ParseFileManagerProvider(g.FileManagerProvider),
@@ -3478,9 +3533,13 @@ JoinNormalizedPaths(paths) {
 }
 
 SettingsDraftHasChanges(c) {
+    global CONTENT_UPDATE_ACCURACY
     CommitCurrentSourceControlsToDraft(c)
     GeneralControlChanged(c)
     DisplayControlChanged(c)
+    ContentUpdateControlChanged(c,
+        c.Draft.General.ContentUpdateMode = CONTENT_UPDATE_ACCURACY
+            ? "Accuracy" : "Fast")
     FileManagerControlChanged(c)
     return SettingsDraftSignature(c.Draft) != c.OriginalSignature
 }
@@ -3996,6 +4055,8 @@ WriteSettingsDraft(draft, tempPath) {
     doc.SetValue("General", "SortMode", g.SortMode, 1)
     doc.SetValue("General", "ShowRecentSidebar",
         g.ShowRecentSidebar ? "1" : "0", 1)
+    doc.SetValue("General", "ContentUpdateMode",
+        g.ContentUpdateMode, 1)
     doc.SetValue("General", "RecentFileCount", g.RecentFileCount, 1)
     doc.SetValue("ExternalTransfer", "EnablePublicUrlFallback",
         g.EnablePublicUrlFallback ? "1" : "0", 1)

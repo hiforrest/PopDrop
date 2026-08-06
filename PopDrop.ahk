@@ -20,6 +20,8 @@ global SORT_NAME_ASC := "NameAsc"
 global SORT_SMART := "Smart"
 global APP_VERSION := "1.1.0"
 global CONFIG_VERSION := "27"
+global CONTENT_UPDATE_FAST := "Fast"
+global CONTENT_UPDATE_ACCURACY := "Accuracy"
 
 ; ──── 工作区类型 ────
 global WORKSPACE_TYPE_FILES := "Files"
@@ -170,6 +172,7 @@ global WindowWidth := 766
 global WindowHeight := 576
 global ViewMode := "Thumbnail"
 global ShowRecentSidebar := false
+global ContentUpdateMode := CONTENT_UPDATE_FAST
 global RecentFileCount := 12
 ; Native single-line control tuning. Buttons and edits use the full logical
 ; height. A DropDownList adds its own frame around the selection field, so its
@@ -271,6 +274,7 @@ global PanelRenderSignature := ""
 global PanelRenderedWorkspaceId := ""
 global RecentRenderSignature := ""
 global WorkerRunning := false
+global WorkerFullScan := false
 global WorkerPid := 0
 global WorkerGeneration := ""
 global WorkerWorkspaceId := ""

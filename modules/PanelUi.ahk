@@ -237,6 +237,7 @@ ActivateWorkspace(workspaceId) {
     global ActiveWorkspaceId, PanelVisible, StatusKind, FileView
     global LastFileWorkspaceId, WORKSPACE_TYPE_FILES
     global SourceWatcherRecentDirty
+    global ContentUpdateMode, CONTENT_UPDATE_ACCURACY
     found := FindWorkspace(workspaceId)
     if !IsObject(found)
         return false
@@ -272,6 +273,7 @@ ActivateWorkspace(workspaceId) {
     ReconcileSourceWatchers()
     refreshKeys := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, true)
     needsFullScan := !ScanResultLoaded
+        || ContentUpdateMode = CONTENT_UPDATE_ACCURACY
     includeRecent := ShowRecentSidebar && (!ScanResultLoaded
         || SourceWatcherRecentDirty)
     if needsFullScan
