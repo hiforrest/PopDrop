@@ -445,6 +445,7 @@ class PopDropConfigDocument {
         if folded = "sources" || folded = "workspaces"
             || SubStr(folded, 1, 10) = "workspace:"
             || SubStr(folded, 1, 16) = "workspacepinned:"
+            || SubStr(folded, 1, 17) = "textsourcepinned:"
             || (SubStr(folded, 1, 7) = "source:"
                 && SubStr(folded, 1, 14) != "sourceexclude:"
                 && SubStr(folded, 1, 12) != "sourceallow:")
@@ -494,6 +495,8 @@ class PopDropConfigDocument {
                 return 20
             if SubStr(folded, 1, 16) = "workspacepinned:"
                 return 25
+            if SubStr(folded, 1, 17) = "textsourcepinned:"
+                return 27
             if folded = "sources"
                 return 30
             return 40

@@ -75,9 +75,8 @@ powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
 - `native\bin\x64\PopDropPreview.exe`
 - `native\bin\x86\PopDropPreview.exe`
 
-2026-07-30 源码修正版保留了用户提供的旧 Helper 二进制，交付环境没有用 Windows
-SDK 重编译它们。测试本轮 Markdown 修复和 PDFium 动态加载前必须先运行构建脚本；
-PDFium 安装可在构建前后进行。
+源码包中的 Helper 二进制仅作为历史构建产物。发布 v1.1.0 前必须在 Windows SDK / MSVC
+环境运行本目录的 `build.ps1`，确保 `HelperVersion=1.1.0`；PDFium 安装可在构建前后进行。
 
 AHK 源码和编译版都根据自身位数选择 `native\bin\<架构>` 中对应文件；发布包还需将
 同架构的 `pdfium.dll`（若启用）放在该目录。Helper 协议版本写在请求或共享内存头中；

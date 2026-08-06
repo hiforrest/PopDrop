@@ -5,6 +5,11 @@ $source = Join-Path $PSScriptRoot "PopDropTransfer\PopDropTransfer.cpp"
 $previewSource = Join-Path $PSScriptRoot "PopDropPreview\PopDropPreview.cpp"
 $outRoot = Join-Path $PSScriptRoot "bin"
 
+$transferText = Get-Content -LiteralPath $source -Raw
+if ($transferText -notmatch 'kHelperVersion\[\]\s*=\s*L"1\.1\.0"') {
+    throw "PopDropTransfer source version is not 1.1.0."
+}
+
 function Build-Architecture([string]$Architecture, [string]$HostArchitecture) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere)) {

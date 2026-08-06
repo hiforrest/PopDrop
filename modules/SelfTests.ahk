@@ -6,7 +6,8 @@ RunSelfTests() {
     global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
     global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
     global DROP_ADAPTER_HDROP, DROP_ADAPTER_VIRTUAL, DROP_ADAPTER_PNG
-    global DROP_ADAPTER_URL, DROP_ADAPTER_UNSUPPORTED
+    global DROP_ADAPTER_URL, DROP_ADAPTER_TEXT, DROP_ADAPTER_UNSUPPORTED
+    global WORKSPACE_TYPE_FILES, WORKSPACE_TYPE_TEXT
     global APP_VERSION
     try {
         RunConfigDocumentSelfTests()
@@ -19,6 +20,24 @@ RunSelfTests() {
         RunNoiseFilterSelfTests()
         RunWorkspaceSelfTests()
         RunOpenAppActionSelfTests()
+        AssertSelfTest(ShouldCaptureTextBlockPaste(
+            true, true, "Cards", true),
+            "文本卡片区 Ctrl+V 创建固定文本块")
+        AssertSelfTest(ShouldCaptureTextBlockPaste(
+            true, true, "Container", true),
+            "文本工作区容器 Ctrl+V 创建固定文本块")
+        AssertSelfTest(!ShouldCaptureTextBlockPaste(
+            true, true, "Control", true),
+            "输入控件 Ctrl+V 保持普通粘贴")
+        AssertSelfTest(!ShouldCaptureTextBlockPaste(
+            true, false, "Cards", true),
+            "文件工作区 Ctrl+V 不创建文本块")
+        AssertSelfTest(!ShouldCaptureTextBlockPaste(
+            true, true, "Cards", false),
+            "无文本剪贴板不创建文本块")
+        AssertSelfTest(!ShouldCaptureTextBlockPaste(
+            false, true, "Cards", true),
+            "非活动面板不接管 Ctrl+V")
         AssertSelfTest(ParseGlobalOpenFileMode("") = OPEN_MODE_DOUBLE,
             "缺失全局打开方式回退为双击")
         AssertSelfTest(ParseGlobalOpenFileMode("broken") = OPEN_MODE_DOUBLE,
@@ -200,6 +219,9 @@ RunSelfTests() {
             "PopDrop 内部 HDROP 不交给外部 helper")
         AssertSelfTest(ShouldContinuePinnedReorder(dropPinnedTarget),
             "固定项原生分组内保持排序手势")
+        AssertSelfTest(ShouldContinuePinnedReorder({
+            Type: "TextPinned", Available: true, GroupId: 8}),
+            "文本块固定项保持手动排序")
         AssertSelfTest(!ShouldContinuePinnedReorder({
             Type: "Pinned", Available: true, GroupId: 0}),
             "固定项工具栏按钮不进入内部排序")
@@ -260,8 +282,65 @@ RunSelfTests() {
             "Url", true)).Adapter = DROP_ADAPTER_URL,
             "格式分类：明确 URL 最后兜底")
         AssertSelfTest(ClassifyAvailableDropFormats(Map(
-            "UnicodeText", true)).Adapter = DROP_ADAPTER_UNSUPPORTED,
-            "任意 Unicode 文本不会被误判为 URL")
+            "UnicodeText", true)).Adapter = DROP_ADAPTER_TEXT,
+            "纯 Unicode 文本进入文本适配器")
+        textTarget := {Type: "TextSource", Available: true,
+            Name: "话术", Path: "C:\Text", GroupId: 7}
+        mixedDecision := {Adapter: DROP_ADAPTER_HDROP,
+            HasUnicodeText: true, HasAnsiText: false}
+        AssertSelfTest(SelectDropAdapterForTarget(
+            mixedDecision, textTarget) = DROP_ADAPTER_TEXT,
+            "文本目标优先使用 Unicode 正文")
+        AssertSelfTest(SelectDropAdapterForTarget(
+            mixedDecision, dropFilesTarget) = DROP_ADAPTER_HDROP,
+            "文件目标保持 HDROP 语义")
+        AssertSelfTest(ResolveDropEffect(textTarget, 0, 3, "External") = 1,
+            "文本来源允许复制投放")
+        draftPath := TextBlockInboxDirectory() "\draft.md"
+        AssertSelfTest(ResolveDropEffect(
+            textTarget, 0, 3, "Pinned", [draftPath]) = 2,
+            "独立固定文本块默认移动到文本来源")
+        AssertSelfTest(ResolveDropEffect(
+            textTarget, 0x0008, 3, "Pinned", [draftPath]) = 1,
+            "Ctrl 可显式复制独立文本块")
+        AssertSelfTest(ResolveDropEffect(
+            textTarget, 0, 3, "Pinned", ["C:\Text\reference.md"]) = 1,
+            "普通固定文本块仍保持复制语义")
+        AssertSelfTest(ResolveDropEffect(
+            textTarget, 0x0004, 3, "Pinned",
+            ["C:\Text\reference.md"]) = 0,
+            "Shift 不能从固定链接移动原文件")
+        mixedPinnedTextPaths := [draftPath, "C:\Text\reference.md"]
+        AssertSelfTest(ResolveDropEffect(
+            textTarget, 0, 3, "Pinned", mixedPinnedTextPaths) = 0,
+            "独立文本块与链接混选时默认拒绝投放")
+        AssertSelfTest(ResolveDropEffect(
+            textTarget, 0x0008, 3, "Pinned", mixedPinnedTextPaths) = 1,
+            "Ctrl 可统一复制独立文本块与链接混合选区")
+        movedDraftMappings := Map()
+        movedDraftMappings[PathKey(draftPath)] := {
+            OldPath: draftPath, NewPath: "C:\Text\draft.md"}
+        removeMovedContext := {
+            RemoveMovedPinsWorkspaceId: "workspace-text-default",
+            RemoveMovedPinnedPaths: [draftPath]}
+        AssertSelfTest(ShouldRemoveMovedPinnedPath(
+            "workspace-text-default", draftPath, movedDraftMappings,
+            removeMovedContext),
+            "成功分类的独立文本块从当前工作区固定项移除")
+        AssertSelfTest(!ShouldRemoveMovedPinnedPath(
+            "workspace-other", draftPath, movedDraftMappings,
+            removeMovedContext),
+            "其他工作区对同一文本块的链接继续保留")
+        AssertSelfTest(ParseWorkspaceType("text") = WORKSPACE_TYPE_TEXT
+            && ParseWorkspaceType("") = WORKSPACE_TYPE_FILES,
+            "工作区类型解析兼容旧配置")
+        ansiFormat := Buffer(A_PtrSize = 8 ? 32 : 20, 0)
+        FillAnsiTextFormat(ansiFormat.Ptr)
+        AssertSelfTest(IsAnsiTextFormat(ansiFormat.Ptr)
+            && !IsUnicodeTextFormat(ansiFormat.Ptr),
+            "文本拖出同时提供独立的 ANSI 格式")
+        AssertSelfTest(MakeTextBlockTitle("# 角色`n`n你是产品专家")
+            = "你是产品专家", "文本块标题跳过通用结构标题")
         AssertSelfTest(IsDuplicatePinnedCandidate(
             ["C:\A.txt"], [], "c:\a.txt"),
             "重复固定项按规范路径跳过")
@@ -344,6 +423,16 @@ RunWorkspaceSelfTests() {
     AssertSelfTest(IsSafeStableId("workspace-123")
         && !IsSafeStableId("workspace:123"),
         "稳定工作区 ID 格式")
+    workspaces := [
+        {Id: "files-a", Type: "Files"},
+        {Id: "text-a", Type: "Text"},
+        {Id: "files-b", Type: "Files"}]
+    AssertSelfTest(ResolveFileWorkspaceId(
+        "files-b", workspaces, "text-a") = "files-b",
+        "主快捷键优先返回最近文件工作区")
+    AssertSelfTest(ResolveFileWorkspaceId(
+        "missing", workspaces, "text-a") = "files-a",
+        "最近文件工作区失效时回退到首个文件工作区")
 }
 
 RunFolderDropSelfTests() {
@@ -382,7 +471,8 @@ RunFolderDropSelfTests() {
             Adapter: DROP_ADAPTER_HDROP,
             HasExplicitUrl: false,
             HasVirtualFiles: false,
-            HasImagePayload: false
+            HasImagePayload: false,
+            HasShellIdList: false
         }
         AssertSelfTest(CanPreloadHDropForFolderFeedback(
             stableDecision, {Supported: true}, "Source"),
@@ -394,24 +484,37 @@ RunFolderDropSelfTests() {
             "内部拖拽直接使用上下文路径分类")
         AssertSelfTest(!CanPreloadHDropForFolderFeedback(
             stableDecision, {Supported: true}, "External"),
-            "外部异步 HDROP 不允许预读")
+            "未知外部异步 HDROP 不允许预读")
+        explorerDecision := {
+            Adapter: DROP_ADAPTER_HDROP,
+            HasExplicitUrl: false,
+            HasVirtualFiles: true,
+            HasImagePayload: false,
+            HasShellIdList: true
+        }
+        AssertSelfTest(CanPreloadHDropForFolderFeedback(
+            explorerDecision, {Supported: true}, "External"),
+            "Explorer Shell 文件夹即使异步并带辅助格式也允许预读")
         urlDecision := {
             Adapter: DROP_ADAPTER_HDROP,
             HasExplicitUrl: true,
             HasVirtualFiles: false,
-            HasImagePayload: false
+            HasImagePayload: false,
+            HasShellIdList: false
         }
         virtualDecision := {
             Adapter: DROP_ADAPTER_HDROP,
             HasExplicitUrl: false,
             HasVirtualFiles: true,
-            HasImagePayload: false
+            HasImagePayload: false,
+            HasShellIdList: false
         }
         imageDecision := {
             Adapter: DROP_ADAPTER_HDROP,
             HasExplicitUrl: false,
             HasVirtualFiles: false,
-            HasImagePayload: true
+            HasImagePayload: true,
+            HasShellIdList: false
         }
         AssertSelfTest(!CanPreloadHDropForFolderFeedback(
             urlDecision, {Supported: false}, "External")
@@ -434,6 +537,19 @@ RunFolderDropSelfTests() {
             && session.HDropReadCount = 1
             && firstRead.Length = 2 && secondRead.Length = 2,
             "稳定本地 HDROP 和 Drop 复用同一次读取")
+
+        retryState := {Count: 0, Paths: [firstFolder]}
+        retrySession := CreateDropSessionState()
+        preloadRead := PreloadDropSessionHDropPaths(retrySession, 0,
+            SelfTestDelayedHDropReader.Bind(retryState))
+        dropRead := GetDropSessionHDropPaths(retrySession, 0,
+            SelfTestDelayedHDropReader.Bind(retryState))
+        AssertSelfTest(preloadRead.Length = 0
+            && retryState.Count = 2
+            && retrySession.HDropReadCount = 2
+            && dropRead.Length = 1
+            && PathsEqual(dropRead[1], firstFolder),
+            "悬停阶段尚未就绪的 HDROP 在实际 Drop 时重试")
 
         addTarget := ResolveAddSourceDropTarget(
             "FoldersOnly", "测试", [firstFolder], [], false)
@@ -485,6 +601,11 @@ RunFolderDropSelfTests() {
 SelfTestHDropReader(state, dataObject) {
     state.Count += 1
     return state.Paths
+}
+
+SelfTestDelayedHDropReader(state, dataObject) {
+    state.Count += 1
+    return state.Count = 1 ? [] : state.Paths
 }
 
 SelfTestSourceIdFactory(state) {
@@ -732,9 +853,10 @@ RunSourceManagementSelfTests() {
         && JoinArray(removal.Values, ",") = "source-a,source-c",
         "SourceOrder 按稳定 ID 删除且保持其余顺序")
     sections := SourceOwnedConfigSections("source-a")
-    AssertSelfTest(sections.Length = 4
+    AssertSelfTest(sections.Length = 5
         && sections[1] = "Source:source-a"
-        && sections[4] = "SourceAllow:source-a",
+        && sections[4] = "SourceAllow:source-a"
+        && sections[5] = "TextSourcePinned:source-a",
         "来源专属配置清理范围完整")
 }
 
@@ -814,7 +936,9 @@ RunSourceRemovalConfigSelfTests() {
             . "[SourceExclude:source-files]`n"
             . "Path001=build`n`n"
             . "[SourceAllow:source-files]`n"
-            . "Path001=.git`n"
+            . "Path001=.git`n`n"
+            . "[TextSourcePinned:source-files]`n"
+            . "File001=" sharedPath "\常用.md`n"
         DirCreate(testRoot)
         FileAppend(testConfig, testPath, "UTF-16")
         ConfigPath := testPath

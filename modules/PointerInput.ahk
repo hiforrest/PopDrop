@@ -5,6 +5,8 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     global DragPaths, DragItemContexts, SelectedFilePaths
     global DragSourceHwnd, DragStartX, DragStartY, DragStarted
     global PinnedReorderActive, PinnedReorderPath
+    global TextSourceReorderActive, TextSourceReorderPath
+    global TextSourceReorderSourceId
     global FilePointerGesture, FilePointerGestureSerial
     global OPEN_MODE_SINGLE
 
@@ -67,6 +69,9 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     DragStarted := false
     PinnedReorderActive := false
     PinnedReorderPath := ""
+    TextSourceReorderActive := false
+    TextSourceReorderPath := ""
+    TextSourceReorderSourceId := ""
     ; 只根据按下行的显示上下文识别排序手势。相同路径也可能同时出现在
     ; Files 来源中，不能仅凭它存在于 PinnedPaths 就把来源项目当成固定项。
     if isMainView && DragPaths.Length = 1 && row
@@ -74,6 +79,15 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
         && ItemOpenContexts[row].Area = "Pinned"
         && PathsEqual(DragPaths[1], path)
         PinnedReorderPath := DragPaths[1]
+    if isMainView && DragPaths.Length = 1 && row
+        && ItemOpenContexts.Has(row)
+        && ItemOpenContexts[row].Area = "Source"
+        && HasProp(ItemOpenContexts[row], "FolderPinned")
+        && ItemOpenContexts[row].FolderPinned
+        && PathsEqual(DragPaths[1], path) {
+        TextSourceReorderPath := path
+        TextSourceReorderSourceId := ItemOpenContexts[row].SourceId
+    }
 
     ; 原生 ListView 会在按下已选项时先收敛多选。消息返回后恢复快照，
     ; 因而超过阈值的拖拽仍能显示并发送整组选择；未拖拽的释放再收敛。
@@ -91,6 +105,8 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
     global DragPaths, DragItemContexts, DragSourceHwnd
     global DragStartX, DragStartY, DragStarted, StatusText, StatusKind
     global PinnedReorderActive, PinnedReorderPath
+    global TextSourceReorderActive, TextSourceReorderPath
+    global TextSourceReorderSourceId
     global FilePointerGesture
 
     PreviewHandleMouseMove(hwnd, lParam)
@@ -123,6 +139,28 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
     screenPoint := ClientToScreenPoint(hwnd, x, y)
     reorderDropTarget := PinnedReorderPath != ""
         ? ResolveDropTarget(screenPoint.X, screenPoint.Y) : 0
+    if TextSourceReorderPath != ""
+        reorderDropTarget := ResolveDropTarget(screenPoint.X, screenPoint.Y)
+    if TextSourceReorderPath != ""
+        && IsObject(reorderDropTarget)
+        && reorderDropTarget.Type = "TextSource"
+        && StrLower(reorderDropTarget.SourceId)
+            = StrLower(TextSourceReorderSourceId) {
+        if !TextSourceReorderActive {
+            TextSourceReorderActive := true
+            PreviewSuppress("text-source-reorder", false)
+            DllCall("user32\SetCapture", "ptr", hwnd, "ptr")
+            StatusKind := "user"
+            StatusText.Text := "在当前文件夹的置顶文本块内可调整顺序。"
+        }
+        return
+    }
+    if TextSourceReorderActive {
+        TextSourceReorderActive := false
+        DllCall("user32\ReleaseCapture")
+    }
+    TextSourceReorderPath := ""
+    TextSourceReorderSourceId := ""
     if PinnedReorderPath != ""
         && ShouldContinuePinnedReorder(reorderDropTarget) {
         if !PinnedReorderActive {
@@ -130,7 +168,9 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
             PreviewSuppress("pinned-reorder", false)
             DllCall("user32\SetCapture", "ptr", hwnd, "ptr")
             StatusKind := "user"
-            StatusText.Text := "在固定项内拖到另一个项目可调整顺序；拖到来源可复制。"
+            StatusText.Text := IsTextWorkspace()
+                ? "在固定项内可调整顺序；独立文本块拖到来源会移动，文件链接会复制。"
+                : "在固定项内拖到另一个项目可调整顺序；拖到来源可复制。"
         }
         return
     }
@@ -155,8 +195,19 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
         StatusKind := "user"
         StatusText.Text := "本次拖拽包含 " existingPaths.Length " 个项目。"
         DllCall("user32\UpdateWindow", "ptr", StatusText.Hwnd)
-        BeginShellDrag(existingPaths, DragSourceHwnd,
-            NormalizeInternalDragItems(existingPaths, itemContexts))
+        if IsTextWorkspace() && AllTextBlockPaths(existingPaths)
+            && !GetKeyState("Alt", "P") {
+            try {
+                text := JoinTextBlocks(existingPaths)
+                BeginTextDrag(text, DragSourceHwnd, existingPaths,
+                    NormalizeInternalDragItems(existingPaths, itemContexts))
+                for path in existingPaths
+                    RecordTextBlockUse(path)
+            } catch as err
+                ShowPanelMsgBox(err.Message, "无法拖出文本块", "Iconx")
+        } else
+            BeginShellDrag(existingPaths, DragSourceHwnd,
+                NormalizeInternalDragItems(existingPaths, itemContexts))
         PreviewRecoverAfterInteraction()
     }
     ; OLE 拖拽返回时原始按键释放通常已被拖放循环消费。
@@ -165,36 +216,49 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
 
 FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
     global FileView, ItemPaths, PinnedReorderActive, PinnedReorderPath
+    global TextSourceReorderActive, TextSourceReorderPath
+    global TextSourceReorderSourceId
     global DragPaths, DragItemContexts, DragStarted, StatusKind, ViewMode
 
-    if !PinnedReorderActive {
+    if !PinnedReorderActive && !TextSourceReorderActive {
         ProcessFilePointerUp(hwnd, lParam)
         DragPaths := []
         DragItemContexts := []
         DragStarted := false
         PinnedReorderPath := ""
+        TextSourceReorderPath := ""
+        TextSourceReorderSourceId := ""
         PreviewRecoverAfterInteraction()
         return
     }
 
+    isSourceReorder := TextSourceReorderActive
     PinnedReorderActive := false
+    TextSourceReorderActive := false
     DllCall("user32\ReleaseCapture")
+    sourcePath := isSourceReorder
+        ? TextSourceReorderPath : PinnedReorderPath
+    sourceId := TextSourceReorderSourceId
     CancelFilePointerGesture()
-    sourcePath := PinnedReorderPath
     PinnedReorderPath := ""
+    TextSourceReorderPath := ""
+    TextSourceReorderSourceId := ""
     DragPaths := []
     DragItemContexts := []
     DragStarted := false
     PreviewRecoverAfterInteraction()
     StatusKind := "default"
-    SetBackgroundStatus("固定项顺序未更改", 1500)
+    SetBackgroundStatus(isSourceReorder
+        ? "文件夹内置顶顺序未更改" : "固定项顺序未更改", 1500)
 
     if !IsObject(FileView) || hwnd != FileView.Hwnd
         return
 
     x := SignedMouseCoordinate(lParam & 0xFFFF)
     y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
-    targetRow := HitTestPinnedReorderRow(hwnd, x, y)
+    targetRow := isSourceReorder
+        ? HitTestTextSourceReorderRow(hwnd, x, y, sourceId)
+        : HitTestPinnedReorderRow(hwnd, x, y)
     if !targetRow || !ItemPaths.Has(targetRow)
         return
 
@@ -205,7 +269,7 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
     NumPut("int", 0, itemRect, 0) ; LVIR_BOUNDS
     if DllCall("user32\SendMessageW", "ptr", hwnd, "uint", 0x100E,
         "ptr", targetRow - 1, "ptr", itemRect.Ptr, "ptr") {
-        if ViewMode = "Thumbnail" {
+        if isSourceReorder || ViewMode = "Thumbnail" {
             left := NumGet(itemRect, 0, "int")
             right := NumGet(itemRect, 8, "int")
             placeAfter := x >= Floor((left + right) / 2)
@@ -216,9 +280,14 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
         }
     }
 
-    if ReorderPinnedPath(sourcePath, targetPath, placeAfter) {
+    saved := isSourceReorder
+        ? ReorderTextSourcePinnedPath(
+            sourceId, sourcePath, targetPath, placeAfter)
+        : ReorderPinnedPath(sourcePath, targetPath, placeAfter)
+    if saved {
         StatusKind := "default"
-        SetBackgroundStatus("已保存固定项顺序", 3000)
+        SetBackgroundStatus(isSourceReorder
+            ? "已保存文件夹内置顶顺序" : "已保存固定项顺序", 3000)
     }
 }
 
@@ -521,6 +590,35 @@ HitTestPinnedReorderRow(hwnd, x, y) {
             return candidateRow
     }
     return 0
+}
+
+HitTestTextSourceReorderRow(hwnd, x, y, sourceId) {
+    global FileView, ItemOpenContexts
+    if !IsObject(FileView) || hwnd != FileView.Hwnd
+        return 0
+    row := HitTestListRow(hwnd, x, y)
+    if IsTextSourcePinnedReorderRow(row, sourceId)
+        return row
+    for candidateRow, context in ItemOpenContexts {
+        if !IsTextSourcePinnedReorderRow(candidateRow, sourceId)
+            continue
+        itemRect := GetListItemBounds(hwnd, candidateRow)
+        if IsObject(itemRect)
+            && x >= itemRect.Left && x < itemRect.Right
+            && y >= itemRect.Top && y < itemRect.Bottom
+            return candidateRow
+    }
+    return 0
+}
+
+IsTextSourcePinnedReorderRow(row, sourceId) {
+    global ItemOpenContexts
+    if !row || !ItemOpenContexts.Has(row)
+        return false
+    context := ItemOpenContexts[row]
+    return context.Area = "Source"
+        && HasProp(context, "FolderPinned") && context.FolderPinned
+        && StrLower(context.SourceId) = StrLower(sourceId)
 }
 
 IsPinnedItemRow(row) {

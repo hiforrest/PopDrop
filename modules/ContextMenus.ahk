@@ -1,7 +1,7 @@
 ; List notifications, source management and selection context menus.
 
 FileViewNotify(wParam, lParam, msg, hwnd) {
-    global FileView, GroupFolderPaths
+    global FileView, GroupFolderPaths, GroupDropTargets
     ; NMHDR structure: hwndFrom, idFrom, code
     if !IsSet(FileView) || !IsObject(FileView)
         return
@@ -11,6 +11,10 @@ FileViewNotify(wParam, lParam, msg, hwnd) {
 
     ; NMHDR structure: hwndFrom, idFrom, code
     code := NumGet(lParam + 0, A_PtrSize * 2, "int")
+    if code = -12
+        return IsTextWorkspace()
+            ? DrawTextBlockCard(lParam)
+            : DrawPinnedFileLinkIcon(lParam)
     ; LVN_GROUPHEADERCLICK = -150 (0xFFFFFF6A)
     if code != -150
         return
@@ -19,10 +23,307 @@ FileViewNotify(wParam, lParam, msg, hwnd) {
     ; NMHDR size = A_PtrSize * 2 + 4
     groupId := NumGet(lParam + A_PtrSize * 2 + 8, "int")
     if GroupFolderPaths.Has(groupId) {
+        if GroupDropTargets.Has(groupId)
+            && GroupDropTargets[groupId].Type = "TextSource"
+            return
         folderPath := GroupFolderPaths[groupId]
         if DirExist(folderPath)
             SetTimer(() => OpenFolderInFileManager(folderPath), -10)
     }
+}
+
+DrawTextBlockCard(customDraw) {
+    global FileView, ItemLabels
+    ; Native tile text consumes the full right edge and offers no independent
+    ; right-padding control. Draw the complete card so both inner edges and
+    ; the requested logical outer margins remain deterministic at every DPI.
+    drawStageOffset := A_PtrSize = 8 ? 24 : 12
+    hdcOffset := A_PtrSize = 8 ? 32 : 16
+    rectOffset := A_PtrSize = 8 ? 40 : 20
+    itemOffset := A_PtrSize = 8 ? 56 : 36
+    stateOffset := A_PtrSize = 8 ? 64 : 40
+    stage := NumGet(customDraw + drawStageOffset, "uint")
+    if stage = 1 ; CDDS_PREPAINT
+        return 0x20 ; CDRF_NOTIFYITEMDRAW
+    if stage != 0x10001 ; CDDS_ITEMPREPAINT
+        return 0
+
+    hdc := NumGet(customDraw + hdcOffset, "ptr")
+    row := NumGet(customDraw + itemOffset, "uptr") + 1
+    title := ItemLabels.Has(row) ? ItemLabels[row] : ""
+    dpi := DllCall("user32\GetDpiForWindow", "ptr", FileView.Hwnd, "uint")
+    if !dpi
+        dpi := 96
+    marginX := Max(1, DllCall("kernel32\MulDiv",
+        "int", 2, "int", dpi, "int", 96, "int"))
+    paddingX := Max(4, DllCall("kernel32\MulDiv",
+        "int", 8, "int", dpi, "int", 96, "int"))
+    paddingY := Max(3, DllCall("kernel32\MulDiv",
+        "int", 5, "int", dpi, "int", 96, "int"))
+    radius := Max(4, DllCall("kernel32\MulDiv",
+        "int", 7, "int", dpi, "int", 96, "int"))
+
+    left := NumGet(customDraw + rectOffset, "int") + marginX
+    top := NumGet(customDraw + rectOffset + 4, "int") + 4
+    right := NumGet(customDraw + rectOffset + 8, "int") - marginX
+    bottom := NumGet(customDraw + rectOffset + 12, "int") - 5
+    if right <= left || bottom <= top
+        return 0x4 ; CDRF_SKIPDEFAULT
+    state := NumGet(customDraw + stateOffset, "uint")
+    ; Some ListView builds omit CDIS_SELECTED while a marquee is changing
+    ; multiple rows. Query the authoritative LVIS_SELECTED bit instead so
+    ; every selected card is painted during and after box selection.
+    selectedState := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x102C, "ptr", row - 1, "ptr", 0x2,
+        "uint") ; LVM_GETITEMSTATE / LVIS_SELECTED
+    selected := !!(selectedState & 0x2)
+    showLinkIcon := IsPinnedLinkRow(row)
+    showPinIcon := IsTextSourcePinnedRow(row)
+    ; COLORREF is BGR: all text blocks share #E6E6E6; selected #E5F1FB.
+    ; Location is expressed only by the pinned reference icon.
+    backgroundColor := selected ? 0x00FBF1E5 : 0x00E6E6E6
+    textIndex := 8 ; COLOR_WINDOWTEXT
+    ; Selected border #0078D7 becomes BGR 0x00D77800.
+    borderColor := selected ? 0x00D77800
+        : DllCall("user32\GetSysColor", "int", 16, "uint")
+    pen := DllCall("gdi32\CreatePen", "int", 0,
+        "int", selected ? 2 : 1,
+        "uint", borderColor, "ptr")
+    if !pen
+        return 0x4
+    brush := DllCall("gdi32\CreateSolidBrush",
+        "uint", backgroundColor, "ptr")
+    if !brush {
+        DllCall("gdi32\DeleteObject", "ptr", pen)
+        return 0x4
+    }
+    oldPen := DllCall("gdi32\SelectObject", "ptr", hdc,
+        "ptr", pen, "ptr")
+    oldBrush := DllCall("gdi32\SelectObject", "ptr", hdc,
+        "ptr", brush, "ptr")
+    DllCall("gdi32\RoundRect", "ptr", hdc, "int", left, "int", top,
+        "int", right, "int", bottom, "int", radius, "int", radius)
+
+    textRect := Buffer(16, 0)
+    NumPut("int", left + paddingX, textRect, 0)
+    NumPut("int", top + paddingY, textRect, 4)
+    badgeIconSize := (showLinkIcon || showPinIcon)
+        ? TextBlockBadgeIconSize(dpi) : 0
+    NumPut("int", right - paddingX
+        - ((showLinkIcon || showPinIcon)
+            ? badgeIconSize + paddingX : 0), textRect, 8)
+    NumPut("int", bottom - paddingY, textRect, 12)
+    oldTextColor := DllCall("gdi32\SetTextColor", "ptr", hdc,
+        "uint", DllCall("user32\GetSysColor", "int", textIndex, "uint"),
+        "uint")
+    oldBkMode := DllCall("gdi32\SetBkMode", "ptr", hdc,
+        "int", 1, "int") ; TRANSPARENT
+    font := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x0031, "ptr", 0, "ptr", 0, "ptr") ; WM_GETFONT
+    oldFont := font
+        ? DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", font, "ptr") : 0
+    DllCall("user32\DrawTextW", "ptr", hdc, "wstr", title, "int", -1,
+        "ptr", textRect.Ptr,
+        "uint", 0x0010 | 0x0800 | 0x40000, "int")
+        ; DT_WORDBREAK | DT_NOPREFIX | DT_WORD_ELLIPSIS
+    if showLinkIcon || showPinIcon {
+        ; The badge is positioned independently from the text padding. Keep
+        ; it close to the card edge, especially horizontally, while retaining
+        ; a small DPI-scaled safety gap from the rounded border.
+        badgeInsetX := Max(1, DllCall("kernel32\MulDiv",
+            "int", 2, "int", dpi, "int", 96, "int"))
+        badgeInsetY := Max(1, DllCall("kernel32\MulDiv",
+            "int", 2, "int", dpi, "int", 96, "int"))
+        if showLinkIcon
+            DrawPinnedLinkIcon(hdc, right, bottom, dpi,
+                badgeInsetX, badgeInsetY)
+        else
+            DrawTextSourcePinIcon(hdc, right, bottom, dpi,
+                badgeInsetX, badgeInsetY)
+    }
+    if state & 0x10 { ; CDIS_FOCUS
+        focusRect := Buffer(16, 0)
+        NumPut("int", left + 2, focusRect, 0)
+        NumPut("int", top + 2, focusRect, 4)
+        NumPut("int", right - 2, focusRect, 8)
+        NumPut("int", bottom - 2, focusRect, 12)
+        DllCall("user32\DrawFocusRect", "ptr", hdc, "ptr", focusRect.Ptr)
+    }
+    if oldFont
+        DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", oldFont, "ptr")
+    DllCall("gdi32\SetBkMode", "ptr", hdc, "int", oldBkMode)
+    DllCall("gdi32\SetTextColor", "ptr", hdc, "uint", oldTextColor)
+    DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", oldBrush, "ptr")
+    DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", oldPen, "ptr")
+    DllCall("gdi32\DeleteObject", "ptr", brush)
+    DllCall("gdi32\DeleteObject", "ptr", pen)
+    return 0x4 ; CDRF_SKIPDEFAULT
+}
+
+DrawPinnedFileLinkIcon(customDraw) {
+    global FileView
+    drawStageOffset := A_PtrSize = 8 ? 24 : 12
+    hdcOffset := A_PtrSize = 8 ? 32 : 16
+    rectOffset := A_PtrSize = 8 ? 40 : 20
+    itemOffset := A_PtrSize = 8 ? 56 : 36
+    stage := NumGet(customDraw + drawStageOffset, "uint")
+    if stage = 1 ; CDDS_PREPAINT
+        return 0x20 ; CDRF_NOTIFYITEMDRAW
+    if stage = 0x10001 { ; CDDS_ITEMPREPAINT
+        row := NumGet(customDraw + itemOffset, "uptr") + 1
+        return IsPinnedLinkRow(row) ? 0x10 : 0 ; CDRF_NOTIFYPOSTPAINT
+    }
+    if stage != 0x10002 ; CDDS_ITEMPOSTPAINT
+        return 0
+
+    row := NumGet(customDraw + itemOffset, "uptr") + 1
+    if !IsPinnedLinkRow(row)
+        return 0
+    hdc := NumGet(customDraw + hdcOffset, "ptr")
+    iconBounds := GetFileViewIconBounds(row)
+    ; NMCUSTOMDRAW's item rectangle includes the wrapped file name. LVIR_ICON
+    ; isolates the thumbnail/file-icon rectangle, so the badge cannot drift
+    ; down onto label text when a name wraps to two lines.
+    right := IsObject(iconBounds)
+        ? iconBounds.Right : NumGet(customDraw + rectOffset + 8, "int")
+    bottom := IsObject(iconBounds)
+        ? iconBounds.Bottom : NumGet(customDraw + rectOffset + 12, "int")
+    dpi := DllCall("user32\GetDpiForWindow", "ptr", FileView.Hwnd, "uint")
+    if !dpi
+        dpi := 96
+    DrawPinnedLinkIcon(hdc, right, bottom, dpi, 0, 0)
+    return 0
+}
+
+GetFileViewIconBounds(row) {
+    global FileView
+    rect := Buffer(16, 0)
+    NumPut("int", 1, rect, 0) ; LVIR_ICON
+    if !DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x100E, "ptr", row - 1, "ptr", rect.Ptr,
+        "ptr") ; LVM_GETITEMRECT
+        return 0
+    left := NumGet(rect, 0, "int")
+    top := NumGet(rect, 4, "int")
+    right := NumGet(rect, 8, "int")
+    bottom := NumGet(rect, 12, "int")
+    if right <= left || bottom <= top
+        return 0
+    return {Left: left, Top: top, Right: right, Bottom: bottom}
+}
+
+IsPinnedLinkRow(row) {
+    global ItemOpenContexts, ItemPaths
+    if !ItemOpenContexts.Has(row)
+        || ItemOpenContexts[row].Area != "Pinned"
+        || !ItemPaths.Has(row)
+        return false
+    ; Every file-workspace pin is a reference. In a text workspace only the
+    ; app-owned inbox item is an entity; all other pinned paths are links.
+    return !IsTextWorkspace() || !IsTextBlockDraftPath(ItemPaths[row])
+}
+
+PinnedLinkIconSize(dpi) {
+    return TextBlockBadgeIconSize(dpi)
+}
+
+TextBlockBadgeIconSize(dpi) {
+    return Max(12, DllCall("kernel32\MulDiv",
+        "int", 14, "int", dpi, "int", 96, "int"))
+}
+
+IsTextSourcePinnedRow(row) {
+    global ItemOpenContexts
+    return ItemOpenContexts.Has(row)
+        && ItemOpenContexts[row].Area = "Source"
+        && HasProp(ItemOpenContexts[row], "FolderPinned")
+        && ItemOpenContexts[row].FolderPinned
+}
+
+GetPinnedLinkIcon(dpi) {
+    global PinnedLinkIconCache
+    size := PinnedLinkIconSize(dpi)
+    if PinnedLinkIconCache.Has(size)
+        return PinnedLinkIconCache[size]
+
+    icon := 0
+    if A_IsCompiled {
+        module := DllCall("kernel32\GetModuleHandleW", "ptr", 0, "ptr")
+        icon := DllCall("user32\LoadImageW", "ptr", module, "ptr", 556,
+            "uint", 1, "int", size, "int", size, "uint", 0, "ptr")
+    }
+    if !icon {
+        path := A_ScriptDir "\assets\icon-lnk.ico"
+        icon := DllCall("user32\LoadImageW", "ptr", 0, "wstr", path,
+            "uint", 1, "int", size, "int", size,
+            "uint", 0x10, "ptr") ; IMAGE_ICON | LR_LOADFROMFILE
+    }
+    if icon
+        PinnedLinkIconCache[size] := icon
+    return icon
+}
+
+DrawPinnedLinkIcon(hdc, right, bottom, dpi, insetX, insetY) {
+    size := PinnedLinkIconSize(dpi)
+    icon := GetPinnedLinkIcon(dpi)
+    if !icon
+        return false
+    x := right - insetX - size
+    y := bottom - insetY - size
+    return DllCall("user32\DrawIconEx", "ptr", hdc,
+        "int", x, "int", y, "ptr", icon,
+        "int", size, "int", size, "uint", 0,
+        "ptr", 0, "uint", 0x3, "int") ; DI_NORMAL
+}
+
+CleanupPinnedLinkIcons() {
+    global PinnedLinkIconCache
+    for _, icon in PinnedLinkIconCache
+        if icon
+            DllCall("user32\DestroyIcon", "ptr", icon)
+    PinnedLinkIconCache.Clear()
+}
+
+GetTextSourcePinIcon(dpi) {
+    global TextSourcePinIconCache
+    size := TextBlockBadgeIconSize(dpi)
+    if TextSourcePinIconCache.Has(size)
+        return TextSourcePinIconCache[size]
+    icon := 0
+    if A_IsCompiled {
+        module := DllCall("kernel32\GetModuleHandleW", "ptr", 0, "ptr")
+        icon := DllCall("user32\LoadImageW", "ptr", module, "ptr", 557,
+            "uint", 1, "int", size, "int", size, "uint", 0, "ptr")
+    }
+    if !icon {
+        path := A_ScriptDir "\assets\pin.ico"
+        icon := DllCall("user32\LoadImageW", "ptr", 0, "wstr", path,
+            "uint", 1, "int", size, "int", size,
+            "uint", 0x10, "ptr")
+    }
+    if icon
+        TextSourcePinIconCache[size] := icon
+    return icon
+}
+
+DrawTextSourcePinIcon(hdc, right, bottom, dpi, insetX, insetY) {
+    size := TextBlockBadgeIconSize(dpi)
+    icon := GetTextSourcePinIcon(dpi)
+    if !icon
+        return false
+    return DllCall("user32\DrawIconEx", "ptr", hdc,
+        "int", right - insetX - size,
+        "int", bottom - insetY - size,
+        "ptr", icon, "int", size, "int", size, "uint", 0,
+        "ptr", 0, "uint", 0x3, "int")
+}
+
+CleanupTextSourcePinIcons() {
+    global TextSourcePinIconCache
+    for _, icon in TextSourcePinIconCache
+        if icon
+            DllCall("user32\DestroyIcon", "ptr", icon)
+    TextSourcePinIconCache.Clear()
 }
 
 FileViewContextMenu(list, row, isRightClick, x, y) {
@@ -88,7 +389,8 @@ IsSourceManagementDescriptor(descriptor) {
         && IsSafeSourceId(descriptor.SourceId)
         && HasProp(descriptor, "Type")
         && (descriptor.Type = "Files"
-            || descriptor.Type = "Launcher")
+            || descriptor.Type = "Launcher"
+            || descriptor.Type = "TextSource")
 }
 
 CloneSourceManagementDescriptor(descriptor) {
@@ -497,7 +799,8 @@ SourceOwnedConfigSections(sourceId) {
         "Source:" sourceId,
         "SourceIgnore:" sourceId,
         "SourceExclude:" sourceId,
-        "SourceAllow:" sourceId
+        "SourceAllow:" sourceId,
+        "TextSourcePinned:" sourceId
     ]
 }
 
@@ -678,6 +981,10 @@ RevealItemsFromPopDropMenu(itemPaths, itemName, itemPos, menuObject) {
 
 ShowPopDropContextMenu(paths, clickedPath, ownerHwnd, x, y) {
     global PinnedPaths, DefaultContextMenu, CONTEXT_MENU_POPDROP
+
+    if IsTextWorkspace()
+        return ShowTextBlockContextMenu(
+            paths, clickedPath, ownerHwnd, x, y)
 
     contextMenu := Menu()
     openText := "打开`tEnter"

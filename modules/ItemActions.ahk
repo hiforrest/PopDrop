@@ -13,6 +13,10 @@ OpenFileViewItem(list, row) {
     path := ItemPaths[row]
     if GetPointerModifierMask() != 0
         return
+    if IsTextWorkspace() && IsTextBlockPath(path) {
+        QuickSendTextBlocks([path])
+        return
+    }
     ; 文件夹始终保持双击激活，不受单击模式影响。
     if IsListItemFolder(list, row, path) {
         OpenFolderInFileManager(path)
@@ -83,7 +87,7 @@ IsListItemFolder(list, row, path := "") {
     return false
 }
 
-OpenItemWithDefaultApplication(path) {
+OpenItemWithDefaultApplication(path, *) {
     CloseExternalQuickPreview()
     if DirExist(path) {
         OpenFolderInFileManager(path)
@@ -111,6 +115,24 @@ InstallPanelHotkeys() {
     Hotkey("^Enter", PanelRevealSelection)
     Hotkey("^c", PanelCopyFileObjects)
     Hotkey("^+c", PanelCopyPaths)
+    Hotkey("F4", PanelEditTextBlock)
+    HotIf(IsPopDropPanelActive)
+    Hotkey("^f", FocusTextBlockSearch)
+    Loop 9
+        Hotkey("^" A_Index, SwitchWorkspaceByPosition.Bind(A_Index))
+    Hotkey("^Tab", CycleWorkspace.Bind(1))
+    Hotkey("^+Tab", CycleWorkspace.Bind(-1))
+    HotIf(CanFocusTextBlockSearch)
+    Hotkey("/", FocusTextBlockSearch)
+    HotIf(IsTextBlockSearchActive)
+    Hotkey("Down", FocusTextBlockResults)
+    Hotkey("Tab", FocusTextBlockResults)
+    HotIf(IsTextBlockSearchResultReady)
+    Hotkey("Enter", ActivateTextBlockSearchResult)
+    ; Ctrl+V is intentionally registered only for the text-card surface and
+    ; the panel container. Editable controls keep the native paste behavior.
+    HotIf(CanPasteClipboardAsPinnedTextBlock)
+    Hotkey("^v", PasteClipboardAsPinnedTextBlock)
     HotIf(IsPanelQuickPreviewAvailable)
     Hotkey("Space", ToggleExternalQuickPreview)
     HotIf(IsPanelQuickPreviewActive)
@@ -119,6 +141,29 @@ InstallPanelHotkeys() {
     Hotkey("Space", ToggleExternalQuickPreview)
     Hotkey("Esc", QuickPreviewEscape)
     HotIf()
+}
+
+IsPopDropPanelActive(*) {
+    global Panel, PanelVisible
+    return PanelVisible && IsObject(Panel)
+        && WinActive("ahk_id " Panel.Hwnd)
+}
+
+SwitchWorkspaceByPosition(position, *) {
+    global Workspaces
+    if position >= 1 && position <= Workspaces.Length
+        ActivateWorkspace(Workspaces[position].Id)
+}
+
+CycleWorkspace(direction, *) {
+    global Workspaces, ActiveWorkspaceId
+    if Workspaces.Length < 2
+        return
+    found := FindWorkspace(ActiveWorkspaceId)
+    current := IsObject(found) ? found.Index : 1
+    next := Mod(current - 1 + direction + Workspaces.Length,
+        Workspaces.Length) + 1
+    ActivateWorkspace(Workspaces[next].Id)
 }
 
 IsPanelFileViewActive(*) {
@@ -152,8 +197,12 @@ GetActiveSelectionContext() {
 PanelOpenSelection(*) {
     PreviewHide("open", true)
     context := GetActiveSelectionContext()
-    if context.Paths.Length
-        OpenSelectedItems(context.Paths)
+    if context.Paths.Length {
+        if IsTextWorkspace()
+            QuickSendTextBlocks(context.Paths)
+        else
+            OpenSelectedItems(context.Paths)
+    }
 }
 
 PanelDeleteSelection(*) {
@@ -170,8 +219,20 @@ PanelRevealSelection(*) {
 
 PanelCopyFileObjects(*) {
     context := GetActiveSelectionContext()
-    if context.Paths.Length
-        CopyFileObjectsToClipboard(context.Paths)
+    if context.Paths.Length {
+        if IsTextWorkspace()
+            CopyTextBlocks(context.Paths)
+        else
+            CopyFileObjectsToClipboard(context.Paths)
+    }
+}
+
+PanelEditTextBlock(*) {
+    if !IsTextWorkspace()
+        return
+    context := GetActiveSelectionContext()
+    if context.Paths.Length = 1
+        OpenTextBlockEditor(context.Paths[1])
 }
 
 PanelCopyPaths(*) {
@@ -311,6 +372,18 @@ RecentContextMenu(list, row, isRightClick, x, y) {
 FileViewItemSelect(list, row, selected) {
     ; A range or marquee selection emits several ItemSelect events. Defer the
     ; summary until the control has finished updating the full selection.
+    ; Owner-drawn text cards need an explicit row invalidation because native
+    ; icon-view marquee updates do not consistently repaint custom draw items.
+    rect := GetListItemRect(list.Hwnd, row)
+    if IsObject(rect) {
+        nativeRect := Buffer(16, 0)
+        NumPut("int", rect.Left, nativeRect, 0)
+        NumPut("int", rect.Top, nativeRect, 4)
+        NumPut("int", rect.Right, nativeRect, 8)
+        NumPut("int", rect.Bottom, nativeRect, 12)
+        DllCall("user32\InvalidateRect", "ptr", list.Hwnd,
+            "ptr", nativeRect.Ptr, "int", 0)
+    }
     SetTimer(UpdateSelectionStatus, -1)
     QuickPreviewScheduleUpdate()
 }
@@ -346,7 +419,8 @@ GetSelectedFileRows() {
 AddPinnedFiles(*) {
     global PinnedPaths
 
-    try selected := SelectPanelFile("M3", , "选择要加入固定项的文件")
+    filter := IsTextWorkspace() ? "文本块 (*.md; *.txt)" : ""
+    try selected := SelectPanelFile("M3", , "选择要加入固定项的文件", filter)
     catch
         return
     if !IsObject(selected)
@@ -356,6 +430,7 @@ AddPinnedFiles(*) {
     for path in selected {
         path := NormalizePath(path)
         if path != ""
+            && (!IsTextWorkspace() || IsTextBlockPath(path))
             && !ArrayContainsPath(PinnedPaths, path)
             && !ArrayContainsPath(newPaths, path)
             newPaths.Push(path)
@@ -391,6 +466,8 @@ AddSelectionToPinned(paths, *) {
 }
 
 RemoveSelectionFromPinned(paths, *) {
+    if IsTextWorkspace()
+        return RemovePinnedTextBlocks(paths)
     global PinnedPaths
     original := PinnedPaths.Clone()
     removed := 0
@@ -435,6 +512,7 @@ PinDroppedFiles(guiObj, guiCtrlObj, fileArray, x, y) {
 
 KeepTemporaryPanelVisibleAfterDrag() {
     global Panel, PanelVisible, WindowMode, WINDOW_MODE_TEMPORARY
+    global AutoHidePanelShownTick, AutoHideNativeShownTick
 
     if WindowMode != WINDOW_MODE_TEMPORARY || !IsObject(Panel)
         return
@@ -447,8 +525,15 @@ KeepTemporaryPanelVisibleAfterDrag() {
         "ptr", Panel.Hwnd,
         "int"
     )
-    if PanelVisible
+    if PanelVisible {
+        ; A queued auto-hide can win while DoDragDrop is unwinding, which
+        ; stops the repeating watchdog. Restoring the panel must restore the
+        ; complete temporary-mode lifecycle, not merely make the HWND visible.
+        AutoHidePanelShownTick := A_TickCount
+        AutoHideNativeShownTick := A_TickCount
+        StartAutoHideWatchdog()
         try WinActivate("ahk_id " Panel.Hwnd)
+    }
 }
 
 PinDroppedItems(fileArray) {
@@ -556,6 +641,14 @@ RemovePinnedFile(*) {
     if !indexes.Length {
         ShowPanelMsgBox("选择的项目中没有固定项。", "移出固定项", "Iconi")
         return
+    }
+    if IsTextWorkspace() {
+        paths := []
+        for row in rows {
+            if FindPathIndex(PinnedPaths, ItemPaths[row])
+                paths.Push(ItemPaths[row])
+        }
+        return RemovePinnedTextBlocks(paths)
     }
     ; Remove from the end so earlier array indexes remain valid.
     Loop indexes.Length {

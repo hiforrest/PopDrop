@@ -1,5 +1,58 @@
 # PopDrop 使用指南
 
+## 文本块工作区
+
+在“设置 → 来源与工作区 → 管理工作区”中新建工作区，类型选择“文本块”。工作区类型
+创建后保持不变；已有配置会自动迁移为文件工作区。文本块工作区不显示文件夹层级，
+而是递归平铺所有来源及子目录中的 `.md`、`.txt` 文件。
+
+### 捕获与固定
+
+| 操作 | 结果 |
+| --- | --- |
+| 从外部拖入选中文字到某个来源 | 在该来源根目录创建 UTF-8 `.md` 文件 |
+| 从外部拖入选中文字到固定项 | 创建应用管理的独立文本块，并置于固定项最前 |
+| 点击“📋+” | 把非空白剪贴板文字创建为独立文本块并固定 |
+| 在卡片区或列表空白处按 `Ctrl+V` | 与“📋+”相同；输入控件中仍为普通粘贴 |
+| 把已有 `.md/.txt` 加入固定项 | 只保存链接；原来源卡片继续显示，固定卡片右下角显示链接图标 |
+| 从固定项移除独立文本块 | 二次确认后把实体文件移入回收站 |
+| 把独立文本块拖到文本来源 | 默认移动实体完成归类并从固定项消失；按住 `Ctrl` 则复制并保留固定项 |
+| 把固定项文件链接拖到文本来源 | 默认复制；按住 `Shift` 时拒绝移动原文件 |
+| 混选独立文本块与文件链接 | 默认拒绝移动；按住 `Ctrl` 可统一复制 |
+
+工具栏把固定项操作置于两条分隔线之间：文件工作区显示“＋固定项 / －固定项”，文本
+工作区显示“＋固定项 / 📋+”。“📋+”仅在剪贴板含非空白文字时可用。`Ctrl+V` 只在
+文本工作区的卡片列表、列表空白区或面板容器接管；搜索框、重命名框、编辑器及其他控件
+不会被拦截。通过按钮或快捷键创建的内容使用与拖入固定项相同的 UTF-8 Markdown、命名、
+去空白、2 MiB 上限及原子固定流程。
+
+新建内容有 24 小时优先展示保护，之后按最近使用、近 30
+天使用次数和历史次数进行智能排序。连续 10 秒的同一文本块重复使用只计一次。
+所有文本块使用相同背景、边框和选中样式，不再显示“未分类”前缀。固定项中的文件链接
+仅通过卡片右下角的轻量链接图标表达；来源区域始终显示实体卡片且不显示该图标。
+
+### 分类内置顶
+
+- 在来源卡片的 PopDrop 右键菜单中选择“在当前文件夹置顶”；已置顶卡片可选择“取消置顶”。
+  多选可一次处理多个来源，每个卡片只修改自己所属来源的状态。
+- 置顶卡片始终排在所属来源的普通卡片之前，并在右下角显示 `pin.ico` 图标；其余背景、
+  边框和文字样式不变。固定项中的链接仍只显示链接图标。
+- 单个置顶卡片在同一来源内拖到另一个置顶卡片，可调整顺序并立即保存；拖离该来源时按
+  原有文本块拖放规则处理，不会把普通卡片误当成排序目标。
+- 每个来源的普通显示数量只限制普通卡片。置顶卡片全部显示，不占普通配额；普通卡片仍
+  使用现有智能排序。搜索结果保留来源身份，可直接执行置顶或取消置顶。
+- 配置按稳定来源 ID 保存为 `[TextSourcePinned:<SourceId>]`。来源内重命名或移动会同步
+  更新路径；移出来源或删除实体文件时会移除该来源的置顶记录。
+
+### 查找、发送与编辑
+
+- 面板内直接打字即可筛选；`/` 或 `Ctrl+F` 聚焦搜索框，`Esc` 先清空搜索。
+- 双击或 `Enter`：复制正文，并粘贴到呼出 PopDrop 前的窗口；无法粘贴时正文仍留在剪贴板。
+- `Ctrl+C`：复制正文；多选时以两个换行连接。
+- 默认拖出：提供 `CF_UNICODETEXT` 正文；按住 `Alt` 拖出：提供真实文件。
+- `F4`：使用内置编辑器编辑；支持 `Ctrl+S`、未保存关闭确认和“另存为副本”，右键菜单也可交给系统默认编辑器。
+- `Ctrl+1`～`Ctrl+9`、`Ctrl+Tab`：切换工作区。设置中还可给每个工作区指定独立快捷键；面板隐藏时，主快捷键单击进入最近文件区、快速双击进入“默认文本区”；面板显示时按主快捷键只关闭面板。
+
 ## 快速开始
 
 ### 安装
@@ -29,8 +82,10 @@ Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之�
 
 ```ini
 [General]
-ConfigVersion=21
+ConfigVersion=27
 Hotkey=F2
+DoubleHotkeyWorkspaceId=workspace-text-default
+LastFileWorkspaceId=workspace-default
 OpenFileMode=DoubleClick
 DefaultContextMenu=PopDrop
 MaxFilesPerFolder=8
@@ -47,6 +102,7 @@ ViewMode=Thumbnail
 ShowRecentSidebar=0
 RecentFileCount=12
 CachePath=
+ConsistencyCheckHours=2
 ThumbnailPolicy=Full
 WindowMode=temporary
 
@@ -56,6 +112,9 @@ Side=Auto
 HoverDelayMs=350
 SwitchDelayMs=120
 LeaveGraceMs=140
+PreviousPreviewHoldMs=500
+BackgroundColor=#000000
+BackgroundOpacity=255
 KeyboardDelayMs=250
 Width=400
 CacheEnabled=1
@@ -82,6 +141,8 @@ PinnedScopeVersion=1
 
 [Workspace:workspace-default]
 Name=默认工作区
+Type=Files
+Hotkey=
 SourceOrder=source-documents,source-downloads
 
 [WorkspacePinned:workspace-default]
@@ -109,6 +170,11 @@ Path=%USERPROFILE%\Downloads
 | `[Folders]` | 每一行是一个分组，格式是 `显示名称=文件夹路径`。路径支持 `%USERPROFILE%` 等环境变量。 |
 | `[Workspaces]` | 保存稳定工作区顺序、当前工作区和固定项作用域迁移标记。 |
 | `[WorkspacePinned:<WorkspaceId>]` | 对应稳定工作区身份的固定项列表，键为 `File001`、`File002` 等。 |
+| `[TextSourcePinned:<SourceId>]` | 文本来源内部置顶顺序，键为 `File001`、`File002` 等；与全局固定项互不替代。 |
+| `Type` | 工作区类型：`Files` 或 `Text`。旧工作区缺失时自动补为 `Files`。 |
+| 工作区 `Hotkey` | 可选的独立呼出快捷键；不得与主快捷键或其他工作区重复。 |
+| `DoubleHotkeyWorkspaceId` | 可选的默认文本区 ID，只能选择文本块工作区。两次主快捷键须在 240 ms 内完成；单击动作提交后手势立即结束，窗口出现后的下一次按键不会继续上一组双击。 |
+| `LastFileWorkspaceId` | 最近使用的文件工作区。主快捷键单击始终进入这里；从文本块工作区按主快捷键也会返回这里。目标失效时回退到首个文件工作区。 |
 | `DisplayScope` | `FilesOnly`=仅当前目录文件；`FilesAndFolders`=当前目录文件和直接子文件夹；`RecursiveFiles`=递归文件平铺。 |
 | `FolderTimeMode` | `DirectoryModified`=文件夹自身时间；`LatestContent`=允许扫描的后代文件最新时间。 |
 | `IncludeSubfolders` | v0.6 及更早版本兼容项；缺少 `DisplayScope` 时，`0` 迁移为 `FilesOnly`，`1` 迁移为 `RecursiveFiles`。 |
@@ -117,11 +183,13 @@ Path=%USERPROFILE%\Downloads
 | `ThumbnailVerticalGap` | 相邻图标行之间的垂直留白，0～128 像素，默认 4。文件名高度由 `ThumbnailTextLines` 另行预留，设为 0 也不会压扁缩略图。 |
 | `ThumbnailTextLines` | 缩略图文件名显示并预留的行数。`1`=单行紧凑，过长名称按图标宽度显示省略号，完整路径仍可在状态栏查看；`2`=双行，默认 2；其他值会自动限制到 1～2。 |
 | `WindowWidth` / `WindowHeight` | 面板打开时的尺寸。 |
+| `TextBlockCardWidth` / `TextBlockCardHeight` | 文本块卡片宽高，单位 DIP；范围分别为 140–640 和 48–320。增大宽度可显示更长的横向文字，增大高度会自动容纳更多行。 |
 | `ViewMode` | `Thumbnail`=缩略图，`List`=文件名+修改时间。也可以从面板顶部“显示 ▾”菜单切换。 |
 | `ShowRecentSidebar` | `1`=显示最近打开侧边栏，`0`=关闭。也可以从“显示 ▾”菜单随时开关。 |
 | `RecentFileCount` | 侧边栏最多显示多少个近期文件，范围 1～100。 |
-| `CachePath` | 扫描结果缓存目录。留空时使用软件目录下的 `cache` 文件夹；不可写时退化为内存缓存。 |
-| `ThumbnailPolicy` | `Full`（默认）允许现场生成缩略图，可能造成短暂停顿；`Fast` 只读取已有 Shell 缩略图缓存，缺失时显示文件类型图标。 |
+| `CachePath` | 运行时索引目录。留空时优先使用软件目录下的 `cache`；目录不可写或位于网络盘时回退到 `%LOCALAPPDATA%\PopDrop\cache`。 |
+| `ConsistencyCheckHours` | 轻量一致性检查间隔（小时），默认 2，`0`=关闭。不启用常驻计时器：呼出窗口时判断是否到期，窗口关闭后只校验未被健康监听覆盖的来源。 |
+| `ThumbnailPolicy` | `Full`（默认）首帧先读取 Shell 缓存或显示类型图标，再逐项增强未缓存缩略图；`Fast` 只使用已有缓存和类型图标。 |
 | `WindowMode` | 窗口显示模式：`temporary`（默认，置顶，切换到其他窗口后自动隐藏）、`always_on_top`（始终置顶）、`normal`（普通窗口，不置顶）。 |
 | `OpenFileMode` | 普通文件的鼠标激活方式：`DoubleClick`（默认）或 `SingleClick`。缺失、空值或未知值都回退为双击。 |
 | `DefaultContextMenu` | 默认右键菜单：`PopDrop`（默认、推荐）或 `System`。缺失、空值或未知值都安全回退为 PopDrop 快捷菜单。 |
@@ -138,6 +206,9 @@ Path=%USERPROFILE%\Downloads
 - 点击当前视图不会重复刷新；切换其他项目会立即生效并持久化；
 - 按钮可通过 Tab 聚焦，并可用 Space/Enter、方向键、Enter 和 Esc 操作。
 
+“显示 ▾”按钮宽度小于固定项按钮，固定项按钮组两侧使用竖向分隔线，避免与刷新、显示、
+设置等独立操作混在一起。
+
 菜单打开时会临时暂停 temporary 模式的自动隐藏并抑制当前预览，关闭后恢复判断。
 设置窗口或配置重载改变状态后，下次打开菜单会按真实运行状态重新同步，而不是沿用
 上一次的菜单勾选。
@@ -152,7 +223,10 @@ WIC 不支持的格式会在后台尝试系统缩略图处理器。其余参数�
 |---|---|
 | `Enabled` | `1` 开启，`0` 关闭；关闭时立即取消当前请求并隐藏窗口。 |
 | `Side` | `Auto`、`Right` 或 `Left`；Auto 在普通文件切换期间锁定侧边，优先放在面板左侧（新文件列表侧），左侧空间不足时才放右侧；面板移动或缩放结束后按新工作区重算。 |
-| `HoverDelayMs` / `SwitchDelayMs` / `LeaveGraceMs` | 首次悬浮、已显示时切换和离开宽限。 |
+| `HoverDelayMs` / `SwitchDelayMs` / `LeaveGraceMs` | 首次悬浮、已显示时切换和未出现预览时的离开宽限。 |
+| `PreviousPreviewHoldMs` | 已有预览时跨过项目空隙或等待下一项加载，旧预览最多继续保留多久；默认 500 ms，范围 0–3000。 |
+| `BackgroundColor` | 预览背景色，必须使用 `#RRGGBB` 格式；默认 `#000000`。 |
+| `BackgroundOpacity` | 背景不透明度，范围 0–255；默认 255，204 等同 80% 不透明。 |
 | `KeyboardDelayMs` | 真实键盘导航改变焦点后的延迟。 |
 | `Width` | 最大内容宽度，单位 DIP，范围 180–640。 |
 | `CacheEnabled` | 只控制写入新缓存；关闭后仍可读取已有有效缓存。 |
@@ -608,9 +682,23 @@ PopDrop 的设计初衷是「按一下出现，用完就走」。`temporary` 模
 
 ## 刷新与缓存
 
-面板会先显示上次扫描得到的结果，然后在独立后台进程中更新文件夹和 Windows 近期文件；新结果完整写出后才一次性刷新界面。缓存默认位于软件目录下的 `cache\scan-cache-v2.ini`，可以通过 `CachePath` 指定其他目录。缓存只保存路径和修改时间，不保存文件内容或缩略图；删除缓存不会删除任何用户文件。软件目录不可写时，程序仍可运行，但本次只使用内存缓存。
+v1.1.0 使用 `cache\index.db` 保存每个工作区的事务快照。留空 `CachePath` 时优先放在
+软件目录；不可写或不是本地磁盘时自动回退到 `%LOCALAPPDATA%\PopDrop\cache`。旧的
+`scan-cache-v4.ini` 只在升级时作为一次性种子，SQLite 不可用时仍可作为安全回退。
+缓存只保存路径、名称、时间和呈现状态，不保存用户文件内容；删除缓存不会删除用户文件。
 
-后台刷新改善的是面板响应体验，目录本身仍需要完整枚举；它不是实时文件系统监听，也不会让大目录扫描消失。
+重复呼出同一工作区且视图未变化时，PopDrop 不清空 ListView、不重建 ImageList，也不
+再次全量扫描。本地来源由异步 `ReadDirectoryChangesW` 监听，50～120 ms 内的连续事件
+合并后只重扫受影响来源。首次无缓存或手动刷新时，各来源按本地优先、配置顺序串行扫描；
+一个来源完成后立即以完整分组提交，其他来源继续扫描。这样机械盘仍保持单路顺序 I/O，
+但首个分组不再等待整个工作区完成。
+
+Windows Recent 是独立结果流。关闭“近期栏”时不扫描、不解析 Recent；启用时监听 Recent
+目录。UNC、WebDAV 和映射网络目标不会在刷新关键路径执行同步存在性检查，因此失效快捷
+方式不会拖住来源呈现。
+
+进程启动、跨日首次呼出、睡眠恢复、监听溢出/句柄错误、来源配置变化和手动刷新会安排
+后台校准。监听失败只使对应来源失效并重建句柄，不清空其他来源的缓存结果。
 
 ---
 
@@ -920,6 +1008,10 @@ ShowCompletionNotifications=1
 点击「＋ 固定项」可以选择一个或多个文件。也可以从资源管理器把文件、文件夹拖到
 固定项分组或「＋ 固定项」按钮；文件夹会作为单独的固定项加入，不会展开或添加其中
 的内容。拖到 Files/Launcher 来源时则按上一节的来源投放规则执行。
+
+文件工作区中的固定文件和固定文件夹均在项目右下角显示链接图标，表示这里是原项目的
+快捷入口。文本块工作区只有指向来源文件的固定卡片显示该图标；PopDrop 管理的独立文本
+块不显示。图标不改变文件类型，也不会在磁盘上额外创建 `.lnk`。
 
 每个工作区拥有独立固定列表，保存在
 `[WorkspacePinned:<WorkspaceId>]`。切换工作区会立即切换固定项；同一路径可以在多个

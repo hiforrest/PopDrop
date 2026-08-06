@@ -3,6 +3,10 @@
 BuildPanel() {
     global Panel, FileView, RecentLabel, RecentView
     global DisplayButton, WindowModeButton, PinnedDropButton, StatusText
+    global ItemCountText
+    global ClipboardPinnedButton, RefreshButton, RemovePinnedButton
+    global PinnedGroupLeftSeparator, PinnedGroupRightSeparator
+    global SettingsButton, CloseButton, TextBlockSearchEdit
     global TransferStatusText
     global APP_VERSION, WorkspaceSelector
     global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
@@ -18,24 +22,39 @@ BuildPanel() {
     WorkspaceSelector := AddUiDropDownList(Panel, "x+2 yp-5 w110", [])
     OffsetGuiControlYPhysical(workspaceLabel, -4)
     WorkspaceSelector.OnEvent("Change", MainWorkspaceChanged)
-    refreshButton := AddUiButton(Panel, "x+6 yp w52", "刷新")
-    refreshButton.OnEvent("Click", RefreshPanel)
-    PinnedDropButton := AddUiButton(Panel, "x+4 yp w70", "＋固定项")
+    RefreshButton := AddUiButton(Panel, "x+6 yp w52", "刷新")
+    RefreshButton.OnEvent("Click", RefreshPanel)
+    PinnedGroupLeftSeparator := Panel.AddText(
+        "x+7 yp+3 w2 h20 +0x11", "") ; SS_ETCHEDVERT
+    PinnedDropButton := AddUiButton(Panel, "x+7 yp-3 w70", "＋固定项")
     PinnedDropButton.OnEvent("Click", AddPinnedFiles)
-    removePinnedButton := AddUiButton(Panel, "x+4 yp w70", "－固定项")
-    removePinnedButton.OnEvent("Click", RemovePinnedFile)
-    DisplayButton := AddUiButton(Panel, "x+4 yp w72", "显示 ▾")
+    RemovePinnedButton := AddUiButton(Panel, "x+4 yp w70", "－固定项")
+    RemovePinnedButton.OnEvent("Click", RemovePinnedFile)
+    ClipboardPinnedButton := AddUiButton(
+        Panel, "x+4 yp w42 Hidden Disabled", "📋+")
+    ClipboardPinnedButton.OnEvent("Click", AddClipboardTextToPinned)
+    PinnedGroupRightSeparator := Panel.AddText(
+        "x+7 yp+3 w2 h20 +0x11", "") ; SS_ETCHEDVERT
+    DisplayButton := AddUiButton(Panel, "x+7 yp-3 w56", "显示 ▾")
     DisplayButton.OnEvent("Click", ShowDisplayMenu)
     BuildDisplayMenu()
-    settingsButton := AddUiButton(Panel, "x+4 yp w52", "设置")
-    settingsButton.OnEvent("Click", OpenConfig)
+    SettingsButton := AddUiButton(Panel, "x+4 yp w52", "设置")
+    SettingsButton.OnEvent("Click", OpenConfig)
     WindowModeButton := AddUiButton(Panel, "x+4 yp w72", "置顶：关")
     WindowModeButton.OnEvent("Click", ToggleWindowMode)
-    closeButton := AddUiButton(Panel, "x+4 yp w48", "关闭")
-    closeButton.OnEvent("Click", HidePanel)
-    ToolbarControls := [workspaceLabel, WorkspaceSelector, refreshButton,
-        PinnedDropButton, removePinnedButton, DisplayButton,
-        settingsButton, WindowModeButton, closeButton]
+    CloseButton := AddUiButton(Panel, "x+4 yp w48", "关闭")
+    CloseButton.OnEvent("Click", HidePanel)
+    ToolbarControls := [workspaceLabel, WorkspaceSelector, RefreshButton,
+        PinnedGroupLeftSeparator, PinnedDropButton, RemovePinnedButton,
+        ClipboardPinnedButton, PinnedGroupRightSeparator, DisplayButton,
+        SettingsButton, WindowModeButton, CloseButton]
+
+    TextBlockSearchEdit := AddUiEdit(Panel,
+        "x184 y8 w196 h26 Hidden", "")
+    TextBlockSearchEdit.OnEvent("Change", TextBlockSearchChanged)
+    DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
+        "uint", 0x1501, "ptr", 1, "wstr", "直接输入以筛选文本块", "ptr")
+    ToolbarControls.Push(TextBlockSearchEdit)
 
     ; Pre-create the compact folder-only drop surface. It occupies the same
     ; toolbar band and never changes the ListView geometry.
@@ -68,8 +87,9 @@ BuildPanel() {
     RecentView.OnEvent("ContextMenu", RecentContextMenu)
     RecentView.OnEvent("ItemSelect", RecentItemSelect)
 
-    StatusText := Panel.AddText("xm y+0 w500 h42 +0xD +0x100", "就绪")
+    StatusText := Panel.AddText("xm y+0 w372 h42 +0xD +0x100", "已是最新")
     StatusText.OnEvent("Click", HandleStatusAction)
+    ItemCountText := Panel.AddText("x+8 yp w112 h42 +0xD +0x100", "共0项")
     TransferStatusText := Panel.AddText(
         "x+8 yp w208 h42 +0xD +0x100", "↓ 下载")
     TransferStatusText.OnEvent("Click", OpenTransferCenter)
@@ -80,6 +100,7 @@ BuildPanel() {
     ; enable WM_DROPFILES: one physical drop must have exactly one owner.
     UpdateWindowModeButton()
     SyncWorkspaceControls()
+    UpdateWorkspaceTypeUi()
 }
 
 SyncWorkspaceControls() {
@@ -101,6 +122,91 @@ SyncWorkspaceControls() {
     }
     if IsObject(SettingsController)
         try RefreshSettingsWorkspaceControls(SettingsController)
+    UpdateWorkspaceTypeUi()
+}
+
+UpdateWorkspaceTypeUi() {
+    global TextBlockSearchEdit, RefreshButton, PinnedDropButton
+    global ClipboardPinnedButton, RemovePinnedButton, TextBlockSearchQuery
+    global PinnedGroupLeftSeparator, PinnedGroupRightSeparator
+    global DisplayButton, SettingsButton, WindowModeButton, CloseButton
+    textMode := IsTextWorkspace()
+    if IsObject(TextBlockSearchEdit) {
+        TextBlockSearchEdit.Visible := textMode
+        if textMode
+            TextBlockSearchEdit.Move(184, 7, 122, 26)
+        if !textMode {
+            TextBlockSearchQuery := ""
+            TextBlockSearchEdit.Value := ""
+        }
+    }
+    if IsObject(RefreshButton)
+        RefreshButton.Visible := !textMode
+    if IsObject(PinnedGroupLeftSeparator) {
+        PinnedGroupLeftSeparator.Visible := true
+        PinnedGroupLeftSeparator.Move(textMode ? 312 : 242, 10, 2, 20)
+    }
+    if IsObject(PinnedDropButton) {
+        PinnedDropButton.Visible := true
+        PinnedDropButton.Text := "＋固定项"
+        PinnedDropButton.Move(textMode ? 320 : 250, 7,
+            textMode ? 72 : 70, 26)
+    }
+    if IsObject(RemovePinnedButton)
+        RemovePinnedButton.Visible := !textMode
+    if IsObject(RemovePinnedButton) && !textMode
+        RemovePinnedButton.Move(324, 7, 70, 26)
+    if IsObject(ClipboardPinnedButton) {
+        ClipboardPinnedButton.Visible := textMode
+        if textMode
+            ClipboardPinnedButton.Move(396, 7, 42, 26)
+    }
+    if IsObject(PinnedGroupRightSeparator) {
+        PinnedGroupRightSeparator.Visible := true
+        PinnedGroupRightSeparator.Move(textMode ? 444 : 400, 10, 2, 20)
+    }
+    if IsObject(DisplayButton)
+        DisplayButton.Move(textMode ? 452 : 408, 7, 56, 26)
+    if IsObject(SettingsButton)
+        SettingsButton.Move(textMode ? 512 : 468, 7, 52, 26)
+    if IsObject(WindowModeButton)
+        WindowModeButton.Move(textMode ? 568 : 524, 7, 72, 26)
+    if IsObject(CloseButton)
+        CloseButton.Move(textMode ? 644 : 600, 7, 48, 26)
+    UpdateClipboardPinnedButton()
+    RedrawPanelToolbar()
+}
+
+RedrawPanelToolbar() {
+    global Panel, PANEL_TOOLBAR_HEIGHT
+    if !IsObject(Panel)
+        return
+    hwnd := Panel.Hwnd
+    if !hwnd || !DllCall("user32\IsWindowVisible", "ptr", hwnd, "int")
+        return
+
+    ; Moving and hiding sibling controls invalidates each child, but Windows
+    ; does not reliably erase their former parent-background rectangles in the
+    ; same event turn. That leaves old button frames visible until WM_MOUSEMOVE
+    ; causes piecemeal painting. Invalidate the toolbar band on the parent and
+    ; synchronously redraw every child only after the final layout is in place.
+    clientRect := Buffer(16, 0)
+    if !DllCall("user32\GetClientRect", "ptr", hwnd,
+        "ptr", clientRect.Ptr, "int")
+        return
+    dpi := DllCall("user32\GetDpiForWindow", "ptr", hwnd, "uint")
+    if !dpi
+        dpi := A_ScreenDPI
+    toolbarBottom := DllCall("kernel32\MulDiv",
+        "int", PANEL_TOOLBAR_HEIGHT, "int", dpi, "int", 96, "int")
+    NumPut("int", 0, clientRect, 0)
+    NumPut("int", 0, clientRect, 4)
+    NumPut("int", Max(0, NumGet(clientRect, 8, "int")), clientRect, 8)
+    NumPut("int", Max(1, toolbarBottom), clientRect, 12)
+    flags := 0x0001 | 0x0004 | 0x0080 | 0x0100
+        ; RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+    DllCall("user32\RedrawWindow", "ptr", hwnd, "ptr", clientRect.Ptr,
+        "ptr", 0, "uint", flags, "int")
 }
 
 MainWorkspaceChanged(control, *) {
@@ -124,7 +230,8 @@ RequestActivateWorkspace(workspaceId, origin := "main") {
 }
 
 ActivateWorkspace(workspaceId) {
-    global ActiveWorkspaceId, PanelVisible, StatusKind
+    global ActiveWorkspaceId, PanelVisible, StatusKind, FileView
+    global LastFileWorkspaceId, WORKSPACE_TYPE_FILES
     found := FindWorkspace(workspaceId)
     if !IsObject(found)
         return false
@@ -132,24 +239,48 @@ ActivateWorkspace(workspaceId) {
         SyncWorkspaceControls()
         return true
     }
-    try AtomicConfigSetValue("Workspaces", "Active", workspaceId, 3)
+    nextLastFileId := LastFileWorkspaceId
+    if ParseWorkspaceType(found.Value.Type) = WORKSPACE_TYPE_FILES
+        nextLastFileId := found.Value.Id
+    try AtomicConfigEdit(
+        WriteActiveWorkspaceState.Bind(workspaceId, nextLastFileId))
     catch as err {
         ShowPanelMsgBox("无法切换工作区：`n" err.Message,
             "工作区切换失败", "Iconx")
         return false
     }
     PreviewSuppress("workspace", false)
+    ClearTextBlockSearch(false)
     LoadSettings()
+    if !ScanResultLoaded
+        LoadDiskScanCache()
+    InstallWorkspaceHotkeys()
     StatusKind := "default"
     PopulatePanel()
     PopulateRecentSidebar()
-    StartBackgroundScan()
+    if PanelVisible && IsObject(FileView) {
+        if IsTextWorkspace()
+            RestoreTextBlockSearchFocus()
+        else
+            FileView.Focus()
+    }
+    ReconcileSourceWatchers(true)
+    StartBackgroundScan(0, "workspace", ShowRecentSidebar)
     return true
 }
 
+WriteActiveWorkspaceState(workspaceId, lastFileWorkspaceId, tempPath) {
+    doc := OpenPopDropConfig(tempPath)
+    doc.SetValue("Workspaces", "Active", workspaceId, 3)
+    doc.SetValue("General", "LastFileWorkspaceId",
+        lastFileWorkspaceId, 1)
+    doc.Save()
+}
+
 ApplyWindowMode() {
-    global Panel, WindowMode
+    global Panel, WindowMode, PanelVisible
     global WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
+    global AutoHideNativeTemporaryEnabled
 
     if !IsObject(Panel)
         return
@@ -165,12 +296,177 @@ ApplyWindowMode() {
             Panel.Opt("+AlwaysOnTop")
     }
     PreviewApplyWindowMode()
+    AutoHideNativeTemporaryEnabled := WindowMode = WINDOW_MODE_TEMPORARY
 
+    if WindowMode = WINDOW_MODE_TEMPORARY && PanelVisible
+        StartAutoHideWatchdog()
+    else
+        StopAutoHideWatchdog()
     if WindowMode != WINDOW_MODE_TEMPORARY
         CancelAutoHideCheck()
 }
 
 ; ──── 临时面板自动隐藏 ────
+
+InitAutoHideNativeWatchdog() {
+    global Panel, AutoHideNativeTimerId, AutoHideNativeTimerCallback
+    global AutoHideNativePanelHwnd, AUTO_HIDE_NATIVE_HIDDEN_MESSAGE
+    if AutoHideNativeTimerId || !IsObject(Panel)
+        return !!AutoHideNativeTimerId
+    AutoHideNativePanelHwnd := Panel.Hwnd
+    OnMessage(AUTO_HIDE_NATIVE_HIDDEN_MESSAGE, AutoHideNativeHidden)
+    AutoHideNativeTimerCallback := CallbackCreate(
+        AutoHideNativeTimerProc, "Fast", 4)
+    ; A Win32 TimerProc remains installed for the process lifetime. Unlike
+    ; AHK SetTimer it is never stopped when the panel hides, so a corrupt
+    ; PanelVisible flag or a terminated AHK timer cannot disable this guard.
+    AutoHideNativeTimerId := DllCall("user32\SetTimer",
+        "ptr", 0, "uptr", 0, "uint", 100,
+        "ptr", AutoHideNativeTimerCallback, "uptr")
+    return !!AutoHideNativeTimerId
+}
+
+CleanupAutoHideNativeWatchdog() {
+    global AutoHideNativeTimerId, AutoHideNativeTimerCallback
+    global AutoHideNativePanelHwnd, AUTO_HIDE_NATIVE_HIDDEN_MESSAGE
+    if AutoHideNativeTimerId
+        DllCall("user32\KillTimer", "ptr", 0,
+            "uptr", AutoHideNativeTimerId, "int")
+    AutoHideNativeTimerId := 0
+    OnMessage(AUTO_HIDE_NATIVE_HIDDEN_MESSAGE, AutoHideNativeHidden, 0)
+    if AutoHideNativeTimerCallback
+        CallbackFree(AutoHideNativeTimerCallback)
+    AutoHideNativeTimerCallback := 0
+    AutoHideNativePanelHwnd := 0
+}
+
+AutoHideNativeTimerProc(hwnd, message, timerId, tick) {
+    global AutoHideNativePanelHwnd, AutoHideNativeTemporaryEnabled
+    global AutoHideNativeShownTick
+    global AUTO_HIDE_NATIVE_HIDDEN_MESSAGE
+    panelHwnd := AutoHideNativePanelHwnd
+    if !AutoHideNativeTemporaryEnabled || !panelHwnd
+        || !DllCall("user32\IsWindowVisible", "ptr", panelHwnd, "int")
+        return
+    if AutoHideNativeShownTick
+        && ElapsedTickMilliseconds(AutoHideNativeShownTick, tick) < 300
+        return
+    ; Mouse-up precedes IDropTarget::Drop. The source application is still
+    ; foreground while PopDrop reads IDataObject and saves the payload, so
+    ; foreground ownership alone is not evidence that the user left.
+    if IncomingDropProtectsAutoHide(tick)
+        return
+    foreground := DllCall("user32\GetForegroundWindow", "ptr")
+    if !foreground || foreground = panelHwnd
+        return
+    ; Same-process popups and any window explicitly owned by the panel are
+    ; legitimate menus/dialogs, not evidence that the user left PopDrop.
+    processId := 0
+    DllCall("user32\GetWindowThreadProcessId", "ptr", foreground,
+        "uint*", &processId, "uint")
+    if processId = DllCall("kernel32\GetCurrentProcessId", "uint")
+        return
+    owner := foreground
+    Loop 16 {
+        owner := DllCall("user32\GetWindow", "ptr", owner,
+            "uint", 4, "ptr") ; GW_OWNER
+        if !owner
+            break
+        if owner = panelHwnd
+            return
+    }
+    ; Do not tear down the drag source/target while a physical gesture is in
+    ; progress. The next 100 ms tick after release makes the final decision.
+    if (DllCall("user32\GetAsyncKeyState", "int", 1, "short") & 0x8000)
+        || (DllCall("user32\GetAsyncKeyState", "int", 2, "short") & 0x8000)
+        || (DllCall("user32\GetAsyncKeyState", "int", 4, "short") & 0x8000)
+        return
+    ; Hide the real HWND first. Internal cleanup is deliberately a second
+    ; phase, so the user's visible result does not depend on any AHK state.
+    DllCall("user32\ShowWindow", "ptr", panelHwnd, "int", 0)
+    DllCall("user32\PostMessageW", "ptr", A_ScriptHwnd,
+        "uint", AUTO_HIDE_NATIVE_HIDDEN_MESSAGE,
+        "ptr", foreground, "ptr", 0, "int")
+}
+
+AutoHideNativeHidden(wParam, lParam, msg, hwnd) {
+    global Panel, PanelVisible
+    if !IsObject(Panel)
+        return
+    ; Synchronize AHK-owned preview, drag and selection state after the native
+    ; guard has already made the panel invisible.
+    if PanelVisible
+        HidePanel()
+    else {
+        CancelAutoHideCheck()
+        StopAutoHideWatchdog()
+        PreviewPanelHidden()
+    }
+}
+
+InitAutoHideForegroundHook() {
+    global AutoHideForegroundHook, AutoHideForegroundCallback
+    global AUTO_HIDE_FOREGROUND_MESSAGE
+    if AutoHideForegroundHook
+        return true
+    OnMessage(AUTO_HIDE_FOREGROUND_MESSAGE,
+        AutoHideExternalForegroundChanged)
+    if !AutoHideForegroundCallback
+        AutoHideForegroundCallback := CallbackCreate(
+            AutoHideForegroundWinEvent, "Fast", 7)
+    ; EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT | SKIPOWNPROCESS.
+    ; This receives a signal for a real switch to another application even
+    ; when WM_ACTIVATE was swallowed by OLE, a menu loop or rapid hotkey work.
+    AutoHideForegroundHook := DllCall("user32\SetWinEventHook",
+        "uint", 0x0003, "uint", 0x0003, "ptr", 0,
+        "ptr", AutoHideForegroundCallback, "uint", 0, "uint", 0,
+        "uint", 0x0000 | 0x0002, "ptr")
+    return !!AutoHideForegroundHook
+}
+
+CleanupAutoHideForegroundHook() {
+    global AutoHideForegroundHook, AutoHideForegroundCallback
+    global AUTO_HIDE_FOREGROUND_MESSAGE
+    if AutoHideForegroundHook
+        DllCall("user32\UnhookWinEvent",
+            "ptr", AutoHideForegroundHook, "int")
+    AutoHideForegroundHook := 0
+    OnMessage(AUTO_HIDE_FOREGROUND_MESSAGE,
+        AutoHideExternalForegroundChanged, 0)
+    if AutoHideForegroundCallback
+        CallbackFree(AutoHideForegroundCallback)
+    AutoHideForegroundCallback := 0
+}
+
+AutoHideForegroundWinEvent(hook, event, hwnd, objectId, childId,
+    eventThread, eventTime) {
+    global AUTO_HIDE_FOREGROUND_MESSAGE
+    if hwnd
+        DllCall("user32\PostMessageW", "ptr", A_ScriptHwnd,
+            "uint", AUTO_HIDE_FOREGROUND_MESSAGE,
+            "ptr", hwnd, "ptr", 0, "int")
+}
+
+AutoHideExternalForegroundChanged(wParam, lParam, msg, hwnd) {
+    global Panel, PanelVisible, WindowMode, WINDOW_MODE_TEMPORARY
+    if WindowMode != WINDOW_MODE_TEMPORARY
+        || !PanelVisible || !IsObject(Panel)
+        return
+    foreground := AutoHideForegroundWindow()
+    if !foreground || foreground = Panel.Hwnd
+        || IsOwnedByPanel(foreground)
+        return
+    CancelUncommittedMainHotkeyGesture()
+    CancelFilePointerGesture()
+    ; Repair a watchdog that an earlier hide/drag race may have stopped, then
+    ; independently queue the decisive foreground check.
+    StartAutoHideWatchdog()
+    ScheduleAutoHideCheck(30)
+}
+
+AutoHideForegroundWindow() {
+    return DllCall("user32\GetForegroundWindow", "ptr")
+}
 
 PanelActivationChanged(wParam, lParam, msg, hwnd) {
     global Panel, WindowMode
@@ -186,6 +482,7 @@ PanelActivationChanged(wParam, lParam, msg, hwnd) {
 
     ; WA_INACTIVE = 0
     if activationState = 0 {
+        CancelUncommittedMainHotkeyGesture()
         CancelFilePointerGesture()
         ScheduleAutoHideCheck(150)
     }
@@ -205,9 +502,51 @@ CancelAutoHideCheck() {
     SetTimer(TryAutoHidePanel, 0)
 }
 
+StartAutoHideWatchdog() {
+    SetTimer(AutoHideWatchdog, 100)
+}
+
+StopAutoHideWatchdog() {
+    SetTimer(AutoHideWatchdog, 0)
+}
+
+AutoHideWatchdog() {
+    global Panel, PanelVisible, WindowMode, WINDOW_MODE_TEMPORARY
+    global CudaTextDragCapture, ActiveDropSession
+    if WindowMode != WINDOW_MODE_TEMPORARY
+        || !PanelVisible || !IsObject(Panel) {
+        StopAutoHideWatchdog()
+        return
+    }
+
+    ; Never infer OLE completion from mouse-up alone: Windows releases the
+    ; button before calling IDropTarget::Drop. Only reap a genuinely abandoned
+    ; hover session after its bounded dispatch lease expires.
+    buttonsDown := GetKeyState("LButton", "P")
+        || GetKeyState("RButton", "P") || GetKeyState("MButton", "P")
+    if !buttonsDown {
+        if IsObject(CudaTextDragCapture)
+            try FinishCudaTextDragCapture(false)
+        if IsObject(ActiveDropSession)
+            && !IncomingDropProtectsAutoHide()
+            try ResetActiveDropSession(true)
+    }
+
+    if IncomingDropProtectsAutoHide()
+        return
+
+    activeHwnd := AutoHideForegroundWindow()
+    if activeHwnd = Panel.Hwnd
+        || (activeHwnd && IsOwnedByPanel(activeHwnd))
+        return
+    ; This independent path does not rely on WM_ACTIVATE arriving. A short
+    ; one-shot delay retains the existing protection for an in-progress click.
+    ScheduleAutoHideCheck(60)
+}
+
 TryAutoHidePanel() {
     global Panel, PanelVisible, WindowMode, AutoHidePauseDepth
-    global WINDOW_MODE_TEMPORARY, QuickViewActive
+    global WINDOW_MODE_TEMPORARY, QuickViewActive, AutoHidePanelShownTick
 
     if WindowMode != WINDOW_MODE_TEMPORARY
         return
@@ -215,18 +554,23 @@ TryAutoHidePanel() {
     if !PanelVisible || !IsObject(Panel)
         return
 
-    if AutoHidePauseDepth > 0
+    if AutoHidePanelShownTick
+        && ElapsedTickMilliseconds(AutoHidePanelShownTick, A_TickCount) < 300 {
+        ScheduleAutoHideCheck(100)
         return
-    if QuickViewActive
+    }
+
+    if IncomingDropProtectsAutoHide() {
+        ScheduleAutoHideCheck(100)
         return
+    }
 
-    ; 焦点已经回到主面板
-    if WinActive("ahk_id " Panel.Hwnd)
+    ; Check actual foreground ownership before consulting pause bookkeeping.
+    ; A menu or owned dialog naturally keeps the panel alive without relying
+    ; on a fragile counter.
+    activeHwnd := AutoHideForegroundWindow()
+    if activeHwnd = Panel.Hwnd
         return
-
-    activeHwnd := WinExist("A")
-
-    ; 当前活动窗口是主面板自己的从属弹窗
     if activeHwnd && IsOwnedByPanel(activeHwnd)
         return
 
@@ -238,7 +582,65 @@ TryAutoHidePanel() {
         return
     }
 
+    ; Only the actual external preview window may retain PopDrop. A stale
+    ; QuickViewActive flag must never protect an unrelated foreground app.
+    if QuickViewActive && IsExternalQuickPreviewFocused() {
+        ScheduleAutoHideCheck(100)
+        return
+    }
+    ; A same-process menu or modal GUI can legitimately own a pause. Once a
+    ; different process is truly foreground and mouse buttons are up, the
+    ; user's intent to leave PopDrop is authoritative and stale bookkeeping
+    ; cannot veto temporary-mode hiding.
+    if AutoHidePauseDepth > 0
+        && AutoHideForegroundBelongsToCurrentProcess(activeHwnd)
+        && AutoHidePauseHasLiveOwner() {
+        ScheduleAutoHideCheck(100)
+        return
+    }
+    ; No live modal/drag owner remains: repair a stale counter rather than
+    ; allowing it to permanently disable the product's core temporary mode.
+    if AutoHidePauseDepth > 0
+        AutoHidePauseDepth := 0
+
     HidePanel()
+}
+
+AutoHideForegroundBelongsToCurrentProcess(hwnd) {
+    if !hwnd
+        return false
+    processId := 0
+    DllCall("user32\GetWindowThreadProcessId", "ptr", hwnd,
+        "uint*", &processId, "uint")
+    return processId
+        && processId = DllCall("kernel32\GetCurrentProcessId", "uint")
+}
+
+AutoHidePauseHasLiveOwner() {
+    global SettingsController, SettingsDialog, SourceRemovalDialog
+    global ActiveDropSession, CudaTextDragCapture, QuickViewActive
+    global ActiveInternalDragContext
+    global ContextMenuDispatchActive, SourceMenuDispatchActive
+    return AutoHideGuiOwnerAlive(SettingsController)
+        || AutoHideGuiOwnerAlive(SettingsDialog)
+        || AutoHideGuiOwnerAlive(SourceRemovalDialog)
+        || IsObject(ActiveDropSession)
+        || IsObject(CudaTextDragCapture)
+        || IsObject(ActiveInternalDragContext)
+        || ContextMenuDispatchActive || SourceMenuDispatchActive
+        || QuickViewActive
+}
+
+AutoHideGuiOwnerAlive(value) {
+    if !IsObject(value)
+        return false
+    candidate := HasProp(value, "Gui") ? value.Gui : value
+    if !IsObject(candidate) || !HasProp(candidate, "Hwnd")
+        return false
+    return candidate.Hwnd
+        && DllCall("user32\IsWindow", "ptr", candidate.Hwnd, "int")
+        && DllCall("user32\IsWindowVisible",
+            "ptr", candidate.Hwnd, "int")
 }
 
 IsOwnedByPanel(hwnd) {
@@ -320,19 +722,274 @@ InstallHotkey(newHotkey) {
     if newHotkey = ActiveHotkey
         return
 
-    try Hotkey(newHotkey, TogglePanel, "On")
+    try Hotkey(newHotkey, HandleMainHotkey, "On")
     catch as err {
         ShowPanelMsgBox("快捷键配置无效：" newHotkey "`n已改用 F2。`n`n" err.Message,
             "PopDrop", "Icon!")
         newHotkey := "F2"
         ConfiguredHotkey := newHotkey
         AtomicConfigSetValue("General", "Hotkey", newHotkey)
-        Hotkey(newHotkey, TogglePanel, "On")
+        Hotkey(newHotkey, HandleMainHotkey, "On")
     }
 
     if ActiveHotkey != ""
         try Hotkey(ActiveHotkey, "Off")
     ActiveHotkey := newHotkey
+}
+
+HandleMainHotkey(*) {
+    global MainHotkeyFirstPressTick, MainHotkeyGestureGeneration
+    global MainHotkeyAwaitRelease, MainHotkeyPhysicalKey, ConfiguredHotkey
+    global MainHotkeyClosedTick, PanelVisible
+    if MainHotkeyAwaitRelease
+        return
+
+    ; Suppress keyboard auto-repeat. A held F2 must never be interpreted as a
+    ; double press; a new gesture is accepted only after the physical key-up.
+    MainHotkeyPhysicalKey := MainHotkeyBaseKey(ConfiguredHotkey)
+    if MainHotkeyPhysicalKey != ""
+        && GetKeyState(MainHotkeyPhysicalKey, "P") {
+        MainHotkeyAwaitRelease := true
+        SetTimer(MainHotkeyReleasePoll, 5)
+    }
+
+    now := A_TickCount
+    ; Gesture routing only exists while the panel is hidden. Once PopDrop is
+    ; visible, the main shortcut has one unambiguous job: close it. Suppress a
+    ; rapid second press so double-F2 on an open panel cannot reopen or switch.
+    if PanelVisible {
+        ResetMainHotkeyGesture()
+        MainHotkeyClosedTick := now
+        HidePanel()
+        return
+    }
+    if MainHotkeyClosedTick {
+        sinceClose := ElapsedTickMilliseconds(MainHotkeyClosedTick, now)
+        if sinceClose <= 400
+            return
+        MainHotkeyClosedTick := 0
+    }
+    tolerance := MainHotkeyDoubleTolerance()
+    elapsed := MainHotkeyFirstPressTick
+        ? ElapsedTickMilliseconds(MainHotkeyFirstPressTick, now)
+        : tolerance + 1
+    if MainHotkeyFirstPressTick && elapsed <= tolerance {
+        ; The pair has exactly one terminal meaning, independent of the
+        ; current workspace and whether the panel is visible or hidden.
+        MainHotkeyFirstPressTick := 0
+        MainHotkeyGestureGeneration += 1
+        RequestMainHotkeyAction("Text")
+        return
+    }
+
+    MainHotkeyFirstPressTick := now
+    MainHotkeyGestureGeneration += 1
+    generation := MainHotkeyGestureGeneration
+    ; The single action waits only for the rapid-pair window. Once committed,
+    ; the gesture is closed before the panel is shown.
+    SetTimer(MainHotkeyCommitSingle.Bind(generation), -tolerance)
+}
+
+MainHotkeyDoubleTolerance() {
+    ; Only a deliberate rapid pair is a double shortcut. Once the single
+    ; action is committed and the panel appears, a later F2 starts a fresh
+    ; single gesture instead of toggling back to Text.
+    return 240
+}
+
+MainHotkeyBaseKey(hotkeyName) {
+    key := RegExReplace(Trim(hotkeyName), "i)\s+Up$")
+    return RegExReplace(key, "^[~*$<>^!+#]+")
+}
+
+MainHotkeyReleasePoll() {
+    global MainHotkeyAwaitRelease, MainHotkeyPhysicalKey
+    if MainHotkeyPhysicalKey != ""
+        && GetKeyState(MainHotkeyPhysicalKey, "P")
+        return
+    MainHotkeyAwaitRelease := false
+    SetTimer(MainHotkeyReleasePoll, 0)
+}
+
+MainHotkeyCommitSingle(generation) {
+    global MainHotkeyGestureGeneration, MainHotkeyFirstPressTick
+    global PanelVisible, Panel
+    if generation != MainHotkeyGestureGeneration
+        || !MainHotkeyFirstPressTick
+        return
+    ; Commit closes the gesture before any potentially slow UI work begins.
+    ; A press after the window appears can therefore never complete this pair.
+    MainHotkeyFirstPressTick := 0
+    ; When the panel is already active in Files, the committed single action
+    ; is already satisfied. Avoid a redundant WinActivate that could race
+    ; with the user's next click into another application.
+    if PanelVisible && !IsTextWorkspace()
+        && WinActive("ahk_id " Panel.Hwnd)
+        return
+    RequestMainHotkeyAction("Files")
+}
+
+CancelUncommittedMainHotkeyGesture() {
+    global MainHotkeyFirstPressTick, MainHotkeyGestureGeneration
+    if !MainHotkeyFirstPressTick
+        return
+    MainHotkeyFirstPressTick := 0
+    MainHotkeyGestureGeneration += 1
+}
+
+RequestMainHotkeyAction(action) {
+    global MainHotkeyRequestedAction
+    ; Text has priority if the second press arrives while Files is loading.
+    if action = "Text" || MainHotkeyRequestedAction = ""
+        MainHotkeyRequestedAction := action
+    SetTimer(ProcessMainHotkeyAction, -1)
+}
+
+ProcessMainHotkeyAction() {
+    global MainHotkeyRequestedAction, MainHotkeyActionRunning
+    if MainHotkeyActionRunning
+        return
+    MainHotkeyActionRunning := true
+    try {
+        Loop 4 {
+            action := MainHotkeyRequestedAction
+            MainHotkeyRequestedAction := ""
+            if action = ""
+                break
+            PresentMainHotkeyWorkspace(action)
+        }
+    } finally {
+        MainHotkeyActionRunning := false
+        if MainHotkeyRequestedAction != ""
+            SetTimer(ProcessMainHotkeyAction, -1)
+    }
+}
+
+PresentMainHotkeyWorkspace(action) {
+    global PanelVisible, Panel, DoubleHotkeyWorkspaceId
+    if !PanelVisible
+        CaptureTextBlockReturnTarget()
+    if action = "Text" {
+        found := FindWorkspace(DoubleHotkeyWorkspaceId)
+        if IsObject(found)
+            ActivateWorkspace(found.Value.Id)
+        else
+            ActivateMainFileWorkspace()
+    } else
+        ActivateMainFileWorkspace()
+    if !PanelVisible
+        ShowAndRefresh()
+    else {
+        try WinRestore("ahk_id " Panel.Hwnd)
+        WinActivate("ahk_id " Panel.Hwnd)
+    }
+}
+
+ResetMainHotkeyGesture(clearRequestedAction := true) {
+    global MainHotkeyFirstPressTick, MainHotkeyGestureGeneration
+    global MainHotkeyRequestedAction
+    MainHotkeyFirstPressTick := 0
+    MainHotkeyGestureGeneration += 1
+    if clearRequestedAction
+        MainHotkeyRequestedAction := ""
+}
+
+ActivateMainFileWorkspace() {
+    global LastFileWorkspaceId, Workspaces, ActiveWorkspaceId
+    targetId := ResolveFileWorkspaceId(
+        LastFileWorkspaceId, Workspaces, ActiveWorkspaceId)
+    if targetId = ""
+        return false
+    if StrLower(targetId) = StrLower(ActiveWorkspaceId)
+        return true
+    return ActivateWorkspace(targetId)
+}
+
+InstallWorkspaceHotkeys() {
+    global ActiveWorkspaceHotkeys, Workspaces, ConfiguredHotkey
+    global WorkspaceHotkeyPressed
+    ; Workspace activation reloads config synchronously. Do not tear down and
+    ; recreate the hotkey whose callback is still processing this key press.
+    if WorkspaceHotkeyPressed.Count {
+        SetTimer(InstallWorkspaceHotkeysAfterRelease, -20)
+        return
+    }
+    for hotkeyName, workspaceId in ActiveWorkspaceHotkeys
+        try Hotkey(hotkeyName, "Off")
+    ActiveWorkspaceHotkeys := Map()
+    for workspace in Workspaces {
+        hotkeyName := Trim(workspace.Hotkey)
+        if hotkeyName = ""
+            continue
+        if StrLower(hotkeyName) = StrLower(ConfiguredHotkey)
+            continue
+        try {
+            Hotkey(hotkeyName,
+                HandleWorkspaceHotkey.Bind(workspace.Id, hotkeyName), "On")
+            ActiveWorkspaceHotkeys[hotkeyName] := workspace.Id
+        }
+    }
+}
+
+InstallWorkspaceHotkeysAfterRelease() {
+    global WorkspaceHotkeyPressed
+    if WorkspaceHotkeyPressed.Count {
+        SetTimer(InstallWorkspaceHotkeysAfterRelease, -20)
+        return
+    }
+    InstallWorkspaceHotkeys()
+}
+
+HandleWorkspaceHotkey(workspaceId, hotkeyName, *) {
+    global WorkspaceHotkeyPressed, WorkspaceHotkeyLastDispatch
+    key := StrLower(Trim(hotkeyName))
+    baseKey := MainHotkeyBaseKey(hotkeyName)
+    now := A_TickCount
+    ; Also reject already-queued repeat callbacks which can run just after the
+    ; physical key was released and therefore no longer satisfy GetKeyState.
+    if WorkspaceHotkeyLastDispatch.Has(key)
+        && ElapsedTickMilliseconds(
+            WorkspaceHotkeyLastDispatch[key], now) < 350
+        return
+    if baseKey != "" && GetKeyState(baseKey, "P") {
+        ; Auto-repeat and callbacks queued before InstallWorkspaceHotkeys()
+        ; rebinds the current hotkey belong to the same physical press.
+        if WorkspaceHotkeyPressed.Has(key)
+            return
+        WorkspaceHotkeyPressed[key] := baseKey
+        SetTimer(WorkspaceHotkeyReleasePoll, 10)
+    }
+    WorkspaceHotkeyLastDispatch[key] := now
+    ShowWorkspaceByHotkey(workspaceId)
+}
+
+WorkspaceHotkeyReleasePoll() {
+    global WorkspaceHotkeyPressed
+    released := []
+    for hotkeyName, baseKey in WorkspaceHotkeyPressed {
+        if !GetKeyState(baseKey, "P")
+            released.Push(hotkeyName)
+    }
+    for hotkeyName in released
+        WorkspaceHotkeyPressed.Delete(hotkeyName)
+    if !WorkspaceHotkeyPressed.Count
+        SetTimer(WorkspaceHotkeyReleasePoll, 0)
+}
+
+ShowWorkspaceByHotkey(workspaceId, *) {
+    global PanelVisible, ActiveWorkspaceId, Panel
+    ResetMainHotkeyGesture()
+    if !PanelVisible
+        CaptureTextBlockReturnTarget()
+    if StrLower(workspaceId) != StrLower(ActiveWorkspaceId)
+        ActivateWorkspace(workspaceId)
+    if !PanelVisible
+        ShowAndRefresh()
+    else {
+        WinActivate("ahk_id " Panel.Hwnd)
+        if IsTextWorkspace()
+            RestoreTextBlockSearchFocus()
+    }
 }
 
 TogglePanel(*) {
@@ -357,29 +1014,43 @@ TogglePanel(*) {
 
 ShowAndRefresh(*) {
     global Panel, PanelVisible, ConfiguredHotkey, ActiveHotkey, WindowWidth, WindowHeight
-    global ScanResultLoaded, StatusKind
+    global ScanResultLoaded, StatusKind, AutoHidePanelShownTick
+    global WindowMode, WINDOW_MODE_TEMPORARY, AutoHidePauseDepth
+    global AutoHideNativeShownTick
     PreviewBeginPanelSession()
     LoadSettings()
+    InstallWorkspaceHotkeys()
     ApplyWindowMode()
     if ConfiguredHotkey != ActiveHotkey {
         InstallHotkey(ConfiguredHotkey)
         BuildTrayMenu()
     }
+    AutoHideNativeShownTick := A_TickCount
     Panel.Show("w" WindowWidth " h" WindowHeight)
     PanelVisible := true
+    ; A hidden panel has no legitimate modal/menu pause owner. Begin every
+    ; visible session clean so no previous session can poison later summons.
+    AutoHidePauseDepth := 0
+    AutoHidePanelShownTick := A_TickCount
+    if WindowMode = WINDOW_MODE_TEMPORARY
+        StartAutoHideWatchdog()
     WinActivate("ahk_id " Panel.Hwnd)
 
     if !ScanResultLoaded
         LoadDiskScanCache()
-    StatusKind := "default"
-    PopulatePanel()
-    PopulateRecentSidebar()
+    if !IsPanelRenderCurrent()
+        PopulatePanel()
+    if !IsRecentRenderCurrent()
+        PopulateRecentSidebar()
     ; 清除 ListView 添加过程中可能因自动选中触发的文件路径更新
     SetTimer(UpdateSelectionStatus, 0)
-    StatusKind := "default"
-    StatusText.Text := "正在加载…"
+    if ScanResultLoaded && !WorkerRunning {
+        StatusKind := "default"
+        StatusText.Text := "已是最新"
+    }
     UpdateWindowModeButton()
-    StartBackgroundScan()
+    CheckRefreshPolicyOnShow()
+    RestoreTextBlockSearchFocus()
 }
 
 ApplyWindowIcon() {
@@ -405,22 +1076,31 @@ ApplyWindowIcon() {
 }
 
 RefreshPanel(*) {
-    ShowAndRefresh()
+    global ShowRecentSidebar
+    StartBackgroundScan(0, "manual", ShowRecentSidebar)
 }
 
 HidePanel(*) {
-    global Panel, PanelVisible, SourceRemovalDialog
-    if IsObject(SourceRemovalDialog) {
+    global Panel, PanelVisible, SourceRemovalDialog, AutoHidePauseDepth
+    if AutoHideGuiOwnerAlive(SourceRemovalDialog) {
         try WinActivate("ahk_id " SourceRemovalDialog.Hwnd)
         return
     }
+    ; A failed/destroyed confirmation callback must not permanently turn the
+    ; panel into an unhideable topmost window.
+    if IsObject(SourceRemovalDialog)
+        SourceRemovalDialog := 0
     CancelFilePointerGesture()
     CloseExternalQuickPreview()
     PreviewPanelHidden()
     CancelAutoHideCheck()
+    StopAutoHideWatchdog()
     ResetActiveDropSession(true)
     Panel.Hide()
     PanelVisible := false
+    AutoHidePauseDepth := 0
+    ClearTextBlockSearch(false)
+    RunPendingConsistencyCheckAfterHide()
 }
 
 HandlePanelClose(*) {
@@ -432,13 +1112,16 @@ HandlePanelEscape(*) {
     global EscapeHidesPanel
     if CloseExternalQuickPreview()
         return true
+    if ClearTextBlockSearch()
+        return true
     if EscapeHidesPanel
         HidePanel()
     return true
 }
 
 ResizePanel(guiObj, minMax, width, height) {
-    global FileView, RecentLabel, RecentView, StatusText, TransferStatusText
+    global FileView, RecentLabel, RecentView, StatusText, ItemCountText
+    global TransferStatusText
     global ShowRecentSidebar, PanelLayoutWidth
     global PANEL_TOOLBAR_HEIGHT, PANEL_FOOTER_HEIGHT
     if minMax = -1
@@ -475,7 +1158,11 @@ ResizePanel(guiObj, minMax, width, height) {
     transferWidth := Min(220, Max(140, Floor(width * 0.22)))
     statusWidth := Max(100, width - transferWidth - 32)
     footerTop := height - PANEL_FOOTER_HEIGHT
-    StatusText.Move(12, footerTop, statusWidth, PANEL_FOOTER_HEIGHT)
+    countWidth := 112
+    stateWidth := Max(100, statusWidth - countWidth - 8)
+    StatusText.Move(12, footerTop, stateWidth, PANEL_FOOTER_HEIGHT)
+    ItemCountText.Move(20 + stateWidth, footerTop, countWidth,
+        PANEL_FOOTER_HEIGHT)
     TransferStatusText.Move(20 + statusWidth, footerTop,
         transferWidth, PANEL_FOOTER_HEIGHT)
 }
@@ -484,6 +1171,10 @@ ResizeFolderDropControls(width) {
     global FolderDropAddSourceButton, FolderDropPinnedButton
     if !IsObject(FolderDropAddSourceButton)
         return
+    if IsTextWorkspace() {
+        FolderDropAddSourceButton.Move(12, 4, Max(160, width - 24), 36)
+        return
+    }
     gap := 8
     available := Max(300, width - 24 - gap)
     primaryWidth := Floor(available * 0.7)
@@ -507,7 +1198,7 @@ ShowFolderDropMode() {
     for control in ToolbarControls
         control.Visible := false
     FolderDropAddSourceButton.Visible := true
-    FolderDropPinnedButton.Visible := true
+    FolderDropPinnedButton.Visible := !IsTextWorkspace()
     FolderDropUiVisible := true
 }
 
@@ -522,6 +1213,7 @@ HideFolderDropMode() {
         FolderDropPinnedButton.Visible := false
     for control in ToolbarControls
         control.Visible := true
+    UpdateWorkspaceTypeUi()
     FolderDropUiVisible := false
 }
 
@@ -701,6 +1393,11 @@ SetRecentSidebarVisible(enabled, persist := true) {
         throw
     }
     try SyncSettingsDisplayStateFromRuntime()
+    if persist {
+        ReconcileSourceWatchers(true)
+        if enabled
+            StartBackgroundScan(Map(), "recent-toggle", true)
+    }
     return true
 }
 
@@ -739,6 +1436,10 @@ UpdateWindowModeButton() {
 
 ApplyViewMode() {
     global FileView, ViewMode
+    if IsTextWorkspace() {
+        ApplyTextBlockCardView()
+        return
+    }
     if ViewMode = "List" {
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x108E,
             "ptr", 1, "ptr", 0, "ptr") ; LVM_SETVIEW, LV_VIEW_DETAILS

@@ -108,12 +108,15 @@ MigrateLegacyConfigToWorkspaces(tempPath) {
     workspaceName := UniqueMigratedWorkspaceName(doc)
     doc.ReplaceKnownKeys("Workspace:" workspaceId, [
         {Key: "Name", Value: workspaceName},
+        {Key: "Type", Value: "Files"},
+        {Key: "Hotkey", Value: ""},
         {Key: "SourceOrder", Value: JoinArray(sourceIds, ",")}
-    ], ["Name", "SourceOrder"], 3)
+    ], ["Name", "Type", "Hotkey", "SourceOrder"], 3)
     legacyPinned := ReadPinnedPathsFromDocument(doc, "PinnedFiles")
     WritePinnedPathsToDocument(doc,
         "WorkspacePinned:" workspaceId, legacyPinned, 3)
     WritePinnedPathsToDocument(doc, "PinnedFiles", [], 2)
+    doc.SetValue("General", "LastFileWorkspaceId", workspaceId, 1)
     doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
     doc.Save()
 }
@@ -294,11 +297,15 @@ NewStableId(prefix) {
 NormalizeConfigDocument(tempPath) {
     global CONFIG_VERSION
     doc := OpenPopDropConfig(tempPath)
+    originalVersion := doc.GetValue("General", "ConfigVersion", "")
     EnsureKnownFolderDefaults(doc)
+    EnsureRefreshConfigDefaults(doc)
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
+    EnsureTextBlockConfigDefaults(doc)
     EnsurePreviewConfigDefaults(doc)
     EnsureQuickPreviewConfigDefaults(doc)
+    EnsureWorkspaceTypeDefaults(doc, originalVersion)
     doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
     doc.Save()
 }
@@ -307,12 +314,76 @@ ConfigLayoutNeedsNormalization() {
     global ConfigPath, CONFIG_VERSION
     doc := OpenPopDropConfig(ConfigPath)
     EnsureKnownFolderDefaults(doc)
+    EnsureRefreshConfigDefaults(doc)
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
+    EnsureTextBlockConfigDefaults(doc)
     EnsurePreviewConfigDefaults(doc)
     EnsureQuickPreviewConfigDefaults(doc)
+    EnsureWorkspaceTypeDefaults(
+        doc, doc.GetValue("General", "ConfigVersion", ""))
     return doc.Dirty
         || doc.GetValue("General", "ConfigVersion", "") != CONFIG_VERSION
+}
+
+EnsureWorkspaceTypeDefaults(doc, originalVersion := "") {
+    order := ParseStableIdOrder(doc.GetValue("Workspaces", "Order", ""))
+    firstFileId := ""
+    firstTextId := ""
+    for workspaceId in order {
+        section := "Workspace:" workspaceId
+        if Trim(doc.GetValue(section, "Type", "")) = ""
+            doc.SetValue(section, "Type", "Files", 3)
+        if !ConfigDocumentContainsKey(doc, section, "Hotkey")
+            doc.SetValue(section, "Hotkey", "", 3)
+        type := ParseWorkspaceType(doc.GetValue(section, "Type", "Files"))
+        if type = "Text" && firstTextId = ""
+            firstTextId := workspaceId
+        else if type = "Files" && firstFileId = ""
+            firstFileId := workspaceId
+    }
+    try oldVersion := Integer(originalVersion)
+    catch
+        oldVersion := 0
+    doubleTarget := Trim(doc.GetValue(
+        "General", "DoubleHotkeyWorkspaceId", ""))
+    if !ConfigDocumentContainsKey(doc, "General", "DoubleHotkeyWorkspaceId")
+        || (oldVersion < 25 && doubleTarget = "" && firstTextId != "")
+        doc.SetValue("General", "DoubleHotkeyWorkspaceId",
+            firstTextId, 1)
+
+    lastFileId := Trim(doc.GetValue(
+        "General", "LastFileWorkspaceId", ""))
+    if !WorkspaceIdHasDocumentType(doc, lastFileId, "Files") {
+        activeId := Trim(doc.GetValue("Workspaces", "Active", ""))
+        lastFileId := WorkspaceIdHasDocumentType(doc, activeId, "Files")
+            ? activeId : firstFileId
+        doc.SetValue("General", "LastFileWorkspaceId", lastFileId, 1)
+    }
+}
+
+WorkspaceIdHasDocumentType(doc, workspaceId, expectedType) {
+    if workspaceId = ""
+        return false
+    order := ParseStableIdOrder(doc.GetValue("Workspaces", "Order", ""))
+    if !ArrayContainsTextInsensitive(order, workspaceId)
+        return false
+    return ParseWorkspaceType(doc.GetValue(
+        "Workspace:" workspaceId, "Type", "Files")) = expectedType
+}
+
+ConfigDocumentContainsKey(doc, section, key) {
+    for entry in doc.GetEntries(section) {
+        if StrLower(entry.Key) = StrLower(key)
+            return true
+    }
+    return false
+}
+
+EnsureRefreshConfigDefaults(doc) {
+    if !ConfigDocumentContainsKey(doc, "General", "ConsistencyCheckHours")
+        doc.SetValue("General", "ConsistencyCheckHours",
+            ConfigDefaultValue("General", "ConsistencyCheckHours", "2"), 1)
 }
 
 EnsureKnownFolderDefaults(doc) {
@@ -389,6 +460,19 @@ EnsureFileManagerConfigDefaults(doc) {
         doc.SetValue("FileManager", "Executable", "", 1)
 }
 
+EnsureTextBlockConfigDefaults(doc) {
+    defaults := [
+        {Key: "TextBlockCardWidth", Value:
+            ConfigDefaultValue("General", "TextBlockCardWidth", "212")},
+        {Key: "TextBlockCardHeight", Value:
+            ConfigDefaultValue("General", "TextBlockCardHeight", "68")}
+    ]
+    for entry in defaults {
+        if !IsObject(GetDocumentEntry(doc, "General", entry.Key))
+            doc.SetValue("General", entry.Key, entry.Value, 1)
+    }
+}
+
 EnsurePreviewConfigDefaults(doc) {
     doc.EnsureCommentBlock("Preview", "; <PopDrop:PreviewHelp>", [
         "; 文件内容预览。高级限制仅建议在排查兼容性问题时修改。",
@@ -400,6 +484,9 @@ EnsurePreviewConfigDefaults(doc) {
         {Key: "HoverDelayMs", Value: ConfigDefaultValue("Preview", "HoverDelayMs", "350")},
         {Key: "SwitchDelayMs", Value: ConfigDefaultValue("Preview", "SwitchDelayMs", "120")},
         {Key: "LeaveGraceMs", Value: ConfigDefaultValue("Preview", "LeaveGraceMs", "140")},
+        {Key: "PreviousPreviewHoldMs", Value: ConfigDefaultValue("Preview", "PreviousPreviewHoldMs", "500")},
+        {Key: "BackgroundColor", Value: ConfigDefaultValue("Preview", "BackgroundColor", "#000000")},
+        {Key: "BackgroundOpacity", Value: ConfigDefaultValue("Preview", "BackgroundOpacity", "255")},
         {Key: "KeyboardDelayMs", Value: ConfigDefaultValue("Preview", "KeyboardDelayMs", "250")},
         {Key: "Width", Value: ConfigDefaultValue("Preview", "Width", "400")},
         {Key: "CacheEnabled", Value: ConfigDefaultValue("Preview", "CacheEnabled", "1")},
@@ -475,14 +562,20 @@ EnsureConfigEncoding() {
 }
 
 LoadSettings(*) {
-    global ConfigPath, ConfiguredHotkey, MaxFilesPerFolder
+    global ConfigPath, ConfiguredHotkey, DoubleHotkeyWorkspaceId
+    global LastFileWorkspaceId
+    global MaxFilesPerFolder
     global IncludeSubfolders, ThumbnailSize, ThumbnailHorizontalGap, ThumbnailVerticalGap
-    global ThumbnailTextLines
-    global FolderSettings, PinnedPaths, Workspaces
-    global ActiveWorkspaceId, ActiveWorkspaceName, LastValidWorkspaceId
+    global ThumbnailTextLines, TextBlockCardWidth, TextBlockCardHeight
+    global FolderSettings, PinnedPaths, Workspaces, TextSourcePinnedPaths
+    global ActiveWorkspaceId, ActiveWorkspaceName, ActiveWorkspaceType
+    global LastValidWorkspaceId
     global WindowWidth, WindowHeight, RecentFileCount
     global ThumbnailPolicy, CachePathSetting, CacheDir, CacheFilePath, CacheWritable
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
+    global CurrentHiddenBySource
+    global WorkspaceScanSnapshots, PanelRenderSignature, RecentRenderSignature
+    global ConsistencyCheckHours
     global ConfigErrors, LastValidFolderSettings
     global ConfigErrorsShown
     global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
@@ -498,6 +591,11 @@ LoadSettings(*) {
     global FileManagerProvider, FileManagerExecutable
     global FILE_MANAGER_WINDOWS_SHELL
     global GlobalNoiseFilter, NOISE_FILTER_INHERIT
+    FlushPendingScanCacheWrite()
+    previousWorkspaceId := ActiveWorkspaceId
+    previousFingerprint := CurrentConfigFingerprint
+    previousResult := CurrentScanResult
+    previousLoaded := ScanResultLoaded
     settingErrors := []
     LoadPreviewSettings(settingErrors)
     LoadQuickPreviewSettings(settingErrors)
@@ -505,6 +603,10 @@ LoadSettings(*) {
     ConfiguredHotkey := Trim(IniRead(ConfigPath, "General", "Hotkey", "F2"))
     if ConfiguredHotkey = ""
         ConfiguredHotkey := "F2"
+    DoubleHotkeyWorkspaceId := Trim(IniRead(
+        ConfigPath, "General", "DoubleHotkeyWorkspaceId", ""))
+    LastFileWorkspaceId := Trim(IniRead(
+        ConfigPath, "General", "LastFileWorkspaceId", ""))
 
     ; 缺失、空值和未知值都必须保持旧版的双击行为。
     GlobalOpenFileMode := ParseGlobalOpenFileMode(
@@ -558,6 +660,16 @@ LoadSettings(*) {
     catch
         ThumbnailTextLines := 2
     ThumbnailTextLines := Max(1, Min(ThumbnailTextLines, 2))
+    try TextBlockCardWidth := Integer(
+        IniRead(ConfigPath, "General", "TextBlockCardWidth", "212"))
+    catch
+        TextBlockCardWidth := 212
+    TextBlockCardWidth := Max(140, Min(TextBlockCardWidth, 640))
+    try TextBlockCardHeight := Integer(
+        IniRead(ConfigPath, "General", "TextBlockCardHeight", "68"))
+    catch
+        TextBlockCardHeight := 68
+    TextBlockCardHeight := Max(48, Min(TextBlockCardHeight, 320))
 
     try WindowWidth := Integer(IniRead(ConfigPath, "General", "WindowWidth", "766"))
     catch
@@ -584,6 +696,11 @@ LoadSettings(*) {
         ConfigPath, "General", "ThumbnailPolicy", "Full"))) = "full"
         ? "Full" : "Fast"
     CachePathSetting := Trim(IniRead(ConfigPath, "General", "CachePath", ""))
+    try ConsistencyCheckHours := Integer(IniRead(
+        ConfigPath, "General", "ConsistencyCheckHours", "2"))
+    catch
+        ConsistencyCheckHours := 2
+    ConsistencyCheckHours := Max(0, Min(ConsistencyCheckHours, 168))
     LastOpenProgramDir := NormalizePath(
         IniRead(ConfigPath, "General", "LastOpenProgramDir", ""))
     LastTransferTargetDir := NormalizePath(
@@ -614,11 +731,14 @@ LoadSettings(*) {
     ; 工作区管理来源和固定项。其他共享设置已经在上方读取一次；
     ; 每个来源仍只继承共享默认值，不增加工作区级默认层。
     Workspaces := LoadWorkspaceDefinitions()
+    TextSourcePinnedPaths := LoadTextSourcePinnedState(Workspaces)
     ActiveWorkspaceId := ReadActiveWorkspaceId(Workspaces)
+    LastFileWorkspaceId := ResolveFileWorkspaceId(
+        LastFileWorkspaceId, Workspaces, ActiveWorkspaceId)
     activeWorkspace := 0
     for workspace in Workspaces {
         FolderSettings := workspace.SourceRefs
-        workspaceResult := ValidateConfig()
+        workspaceResult := ValidateConfig(workspace.Type)
         workspace.Sources := workspaceResult.Settings
         workspace.Errors := workspaceResult.Errors
         workspace.Valid := workspaceResult.Valid
@@ -628,6 +748,7 @@ LoadSettings(*) {
     if !IsObject(activeWorkspace)
         throw Error("找不到当前工作区。")
     ActiveWorkspaceName := activeWorkspace.Name
+    ActiveWorkspaceType := activeWorkspace.Type
     FolderSettings := activeWorkspace.SourceRefs
     PinnedPaths := activeWorkspace.PinnedPaths
     result := {
@@ -655,15 +776,31 @@ LoadSettings(*) {
         }
     }
 
+    if previousLoaded && previousWorkspaceId != "" {
+        WorkspaceScanSnapshots[StrLower(previousWorkspaceId)] := {
+            Fingerprint: previousFingerprint, Result: previousResult}
+    }
     CacheDir := ResolveCacheDirectory(CachePathSetting)
-    CacheFilePath := CacheDir "\scan-cache-v4.ini"
     CacheWritable := EnsureCacheDirectory(CacheDir)
+    InitializeRuntimeIndex()
     newFingerprint := ComputeConfigFingerprint(LastValidFolderSettings)
+    CacheFilePath := CacheDir "\workspace-"
+        . HashString(StrLower(ActiveWorkspaceId)) ".ini"
     if CurrentConfigFingerprint != newFingerprint {
         CurrentConfigFingerprint := newFingerprint
-        CurrentScanResult := {
-            Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
-        ScanResultLoaded := false
+        CurrentHiddenBySource := Map()
+        snapshotKey := StrLower(ActiveWorkspaceId)
+        if WorkspaceScanSnapshots.Has(snapshotKey)
+            && WorkspaceScanSnapshots[snapshotKey].Fingerprint = newFingerprint {
+            CurrentScanResult := WorkspaceScanSnapshots[snapshotKey].Result
+            ScanResultLoaded := true
+        } else {
+            CurrentScanResult := {
+                Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
+            ScanResultLoaded := false
+        }
+        PanelRenderSignature := ""
+        RecentRenderSignature := ""
     }
 
     OpenApps := LoadOpenApps()
@@ -690,13 +827,16 @@ LoadSettings(*) {
 }
 
 LoadWorkspaceDefinitions() {
-    global ConfigPath
+    global ConfigPath, WORKSPACE_TYPE_FILES
     result := []
     ids := ParseStableIdOrder(IniRead(
         ConfigPath, "Workspaces", "Order", ""))
     for id in ids {
         section := "Workspace:" id
         name := Trim(IniRead(ConfigPath, section, "Name", ""))
+        type := ParseWorkspaceType(IniRead(
+            ConfigPath, section, "Type", WORKSPACE_TYPE_FILES))
+        hotkey := Trim(IniRead(ConfigPath, section, "Hotkey", ""))
         refs := []
         for sourceId in ParseStableIdOrder(IniRead(
             ConfigPath, section, "SourceOrder", "")) {
@@ -707,10 +847,12 @@ LoadWorkspaceDefinitions() {
                 ConfigPath, sourceSection, "Path", ""))
             if sourceName != "" && sourcePath != ""
                 refs.Push({Name: sourceName, Path: sourcePath,
-                    SourceId: sourceId, WorkspaceId: id})
+                    SourceId: sourceId, WorkspaceId: id,
+                    WorkspaceType: type})
         }
         pinnedPaths := LoadWorkspacePinnedPaths(id)
-        result.Push({Id: id, Name: name, SourceRefs: refs,
+        result.Push({Id: id, Name: name, Type: type, Hotkey: hotkey,
+            SourceRefs: refs,
             PinnedPaths: pinnedPaths,
             Sources: [], Errors: [], Valid: true})
     }
@@ -752,6 +894,25 @@ FindWorkspace(workspaceId, workspaceList := 0) {
             return {Index: index, Value: workspace}
     }
     return 0
+}
+
+ResolveFileWorkspaceId(preferredId, workspaceList := 0, fallbackId := "") {
+    global Workspaces, WORKSPACE_TYPE_FILES
+    if !IsObject(workspaceList)
+        workspaceList := Workspaces
+    preferred := FindWorkspace(preferredId, workspaceList)
+    if IsObject(preferred)
+        && ParseWorkspaceType(preferred.Value.Type) = WORKSPACE_TYPE_FILES
+        return preferred.Value.Id
+    fallback := FindWorkspace(fallbackId, workspaceList)
+    if IsObject(fallback)
+        && ParseWorkspaceType(fallback.Value.Type) = WORKSPACE_TYPE_FILES
+        return fallback.Value.Id
+    for workspace in workspaceList {
+        if ParseWorkspaceType(workspace.Type) = WORKSPACE_TYPE_FILES
+            return workspace.Id
+    }
+    return ""
 }
 
 ; ──── 配置验证与筛选函数 ────
@@ -969,13 +1130,13 @@ MigrateOpenFileModeConfig(folders) {
             ParseGlobalOpenFileMode(rawGlobal), entries))
 }
 
-ValidateConfig() {
+ValidateConfig(workspaceType := "Files") {
     global ConfigPath, ConfigErrors, FolderSettings
-    global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_SMART
     global MODE_FILES, MODE_LAUNCHER
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
-    global NOISE_FILTER_INHERIT
+    global NOISE_FILTER_INHERIT, WORKSPACE_TYPE_TEXT
 
     errors := []
     tempGlobalFilter := {Mode: "All", Extensions: []}
@@ -1175,6 +1336,9 @@ ValidateConfig() {
                         folderSortMode := SORT_MODIFIED_DESC
                     else if rawSortV = StrLower(SORT_NAME_ASC)
                         folderSortMode := SORT_NAME_ASC
+                    else if rawSortV = StrLower(SORT_SMART)
+                        && ParseWorkspaceType(workspaceType) = WORKSPACE_TYPE_TEXT
+                        folderSortMode := SORT_SMART
                     else if rawSortV = "inherit"
                         folderSortMode := tempGlobalSortMode
                     else
@@ -1263,6 +1427,18 @@ ValidateConfig() {
         for patternError in resolvedNoiseFilter.PatternErrors
             errors.Push("来源“" f.Name "”" patternError)
 
+        if ParseWorkspaceType(workspaceType) = WORKSPACE_TYPE_TEXT {
+            folderMode := MODE_FILES
+            folderRecursive := true
+            folderDisplayScope := SCOPE_RECURSIVE_FILES
+            folderFilter := {Mode: "Include", Extensions: [".md", ".txt"]}
+            if !ValueInArray(folderSortMode,
+                [SORT_SMART, SORT_MODIFIED_DESC, SORT_NAME_ASC])
+                folderSortMode := SORT_SMART
+            folderStripOrderPrefix := 0
+            folderHideExtensions := 1
+        }
+
         resolved.Push({
             Name: f.Name,
             Path: f.Path,
@@ -1284,7 +1460,8 @@ ValidateConfig() {
             ExcludedPaths: LoadConfiguredSourcePaths(
                 "SourceExclude:" sourceId, f.Path),
             AllowedExcludedPaths: LoadConfiguredSourcePaths(
-                "SourceAllow:" sourceId, f.Path)
+                "SourceAllow:" sourceId, f.Path),
+            WorkspaceType: ParseWorkspaceType(workspaceType)
         })
     }
 

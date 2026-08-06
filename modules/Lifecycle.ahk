@@ -6,9 +6,23 @@ Cleanup(*) {
     global FileOperationSinkCallbacks, DropTargetCallbacks
     global OpenAppActionSerialTasks
     global SourceRemovalDialog
+    StopAutoHideWatchdog()
+    CancelAutoHideCheck()
+    SetTimer(WorkspaceHotkeyReleasePoll, 0)
+    SetTimer(InstallWorkspaceHotkeysAfterRelease, 0)
+    CleanupAutoHideNativeWatchdog()
+    CleanupAutoHideForegroundHook()
     SetTimer(PollWorkerResult, 0)
+    SetTimer(EnhanceNextThumbnail, 0)
+    FlushPendingScanCacheWrite()
+    CleanupSourceWatchers()
+    ShutdownRuntimeIndex()
+    FinishCudaTextDragCapture(false)
+    RestoreCudaTextNoDropCursor()
     CleanupQuickPreview()
     CleanupPreview()
+    CleanupPinnedLinkIcons()
+    CleanupTextSourcePinIcons()
     for taskId, task in OpenAppActionSerialTasks {
         try SetTimer(task.PollCallback, 0)
         if task.ProcessHandle
@@ -22,9 +36,11 @@ Cleanup(*) {
     if WorkerRunning && WorkerPid && ProcessExist(WorkerPid)
         try ProcessClose(WorkerPid)
     try FileDelete(WorkerRequestPath)
-    try FileDelete(WorkerReadyPath)
-    try FileDelete(WorkerReadyPath ".writing")
+    if WorkerReadyPath != ""
+        && RegExMatch(WorkerReadyPath, "i)\\ready-[0-9A-F-]+$")
+        try DirDelete(WorkerReadyPath, true)
     ResetActiveDropSession(false)
+    EndIncomingDropGesture(true)
     RevokePanelDropTargets()
     for callbackPtr in DropCallbacks
         CallbackFree(callbackPtr)

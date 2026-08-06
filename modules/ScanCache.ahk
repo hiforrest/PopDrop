@@ -5,18 +5,27 @@ PopulatePanel() {
     global ItemKinds, ItemOpenContexts
     global PinnedPaths, FolderSettings, StatusText
     global IncludeSubfolders, MaxFilesPerFolder, SortMode
-    global ThumbnailSize, ThumbnailImageList, SelectedFilePaths, LastValidFolderSettings, ConfigErrors
+    global ThumbnailSize, ThumbnailImageList, ThumbnailImageListEdge
+    global ThumbnailIconCache, SelectedFilePaths, LastValidFolderSettings, ConfigErrors
     global CurrentScanResult, ScanResultLoaded, StatusKind
     global ConfigErrorsShown, MODE_FILES, GroupFolderPaths, GroupDropTargets
     global SCOPE_FILES_ONLY, SCOPE_RECURSIVE_FILES, FOLDER_TIME_MODIFIED
     global PendingFileOperationRefresh, PendingRefresh
-    global ActiveWorkspaceId
+    global ActiveWorkspaceId, PinnedPaths
     global NOISE_FILTER_INHERIT
+    global PanelRenderSignature, PanelRenderedWorkspaceId
+    global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
+    global ItemCountText
 
+    stableViewState := PanelRenderedWorkspaceId != ""
+        && StrLower(PanelRenderedWorkspaceId) = StrLower(ActiveWorkspaceId)
+        && ItemPaths.Count ? CaptureViewState([]) : 0
     CancelFilePointerGesture()
     PreviewInvalidateList("main")
     SetDropGroupHighlight(0)
     SelectedFilePaths := []
+    ThumbnailEnhanceQueue := []
+    ThumbnailEnhanceGeneration += 1
     FileView.Opt("-Redraw")
     FileView.Delete()
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x10A0,
@@ -24,14 +33,27 @@ PopulatePanel() {
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x109D,
         "ptr", 1, "ptr", 0, "ptr") ; LVM_ENABLEGROUPVIEW
 
-    newImageList := DllCall("comctl32\ImageList_Create", "int", ThumbnailSize,
-        "int", ThumbnailSize, "uint", 0x21, "int", 24, "int", 12, "ptr")
-    if !newImageList
-        throw Error("无法创建缩略图列表。")
-    oldImageList := FileView.SetImageList(newImageList, 0)
-    ThumbnailImageList := newImageList
-    if oldImageList && oldImageList != newImageList
-        DllCall("comctl32\ImageList_Destroy", "ptr", oldImageList)
+    ; Tile view reserves the image-list dimensions even when an item has no
+    ; icon. Text cards use a deliberately small 8-DIP spacer: enough left
+    ; inset for readable card copy without recreating the old 96-DIP phantom
+    ; icon column.
+    imageEdge := IsTextWorkspace() ? 8 : ThumbnailSize
+    imageCapacity := IsTextWorkspace() ? 1 : 24
+    if !ThumbnailImageList || ThumbnailImageListEdge != imageEdge
+        || ThumbnailIconCache.Count > 2048 {
+        newImageList := DllCall("comctl32\ImageList_Create", "int", imageEdge,
+            "int", imageEdge, "uint", 0x21, "int", imageCapacity,
+            "int", IsTextWorkspace() ? 1 : 12, "ptr")
+        if !newImageList
+            throw Error("无法创建缩略图列表。")
+        oldImageList := FileView.SetImageList(newImageList, 0)
+        ThumbnailImageList := newImageList
+        ThumbnailImageListEdge := imageEdge
+        ThumbnailIconCache := Map()
+        if oldImageList && oldImageList != newImageList
+            DllCall("comctl32\ImageList_Destroy", "ptr", oldImageList)
+    } else
+        FileView.SetImageList(ThumbnailImageList, 0)
     ItemPaths := Map()
     ItemLabels := Map()
     ItemFolderPaths := Map()
@@ -43,18 +65,25 @@ PopulatePanel() {
     unavailableCount := 0
     groupId := 1
 
-    if PinnedPaths.Length {
-        InsertListGroup(groupId, "固定项  (" PinnedPaths.Length ")")
+    visiblePinnedPaths := IsTextWorkspace()
+        ? PreparePinnedTextBlockPaths(PinnedPaths) : PinnedPaths
+    if visiblePinnedPaths.Length {
+        InsertListGroup(groupId, "固定项  (" visiblePinnedPaths.Length ")")
         GroupDropTargets[groupId] := {
-            Type: "Pinned", SourceId: "", Name: "固定项",
+            Type: IsTextWorkspace() ? "TextPinned" : "Pinned",
+            SourceId: "", Name: "固定项",
             Path: "", Mode: "", GroupId: groupId,
             WorkspaceId: ActiveWorkspaceId}
-        for path in PinnedPaths {
+        for path in visiblePinnedPaths {
             exists := FileExist(path)
-            label := GetFileName(path)
-            if !exists
-                label .= "  [项目不存在]"
-            row := AddFileTile(path, label, "", groupId)
+            if IsTextWorkspace() && HasTextBlockExtension(path)
+                row := AddTextBlockTile(path, groupId)
+            else {
+                label := GetFileName(path)
+                if !exists
+                    label .= "  [项目不存在]"
+                row := AddFileTile(path, label, "", groupId)
+            }
             ItemPaths[row] := path
             ItemKinds[row] := DirExist(path) ? "Folder" : "File"
             ItemOpenContexts[row] := {Area: "Pinned", GroupId: groupId}
@@ -97,6 +126,9 @@ PopulatePanel() {
         scan := FindFolderScanResult(CurrentScanResult.Folders, folder.Path, folder.Name, index)
         state := IsObject(scan) ? scan.State : "Pending"
         files := IsObject(scan) ? scan.Files : []
+        if IsTextWorkspace()
+            files := PrepareTextBlockFiles(files, folder,
+                folder.MaxFilesPerFolder)
         filterMode := folder.Filter.Mode
         if state = "Unavailable"
             suffix := " [目录不可用]"
@@ -110,7 +142,7 @@ PopulatePanel() {
         InsertListGroup(groupId, groupHeader)
         GroupFolderPaths[groupId] := folder.Path
         GroupDropTargets[groupId] := {
-            Type: folder.Mode,
+            Type: IsTextWorkspace() ? "TextSource" : folder.Mode,
             SourceId: folder.SourceId,
             Name: folder.Name,
             Path: folder.Path,
@@ -160,7 +192,9 @@ PopulatePanel() {
                 ? "" : FormatTime(file.Modified, "yyyy-MM-dd HH:mm")
             if file.IsDirectory && file.TimeKind = "Content"
                 modifiedText := "内容更新于 " modifiedText
-            row := AddFileTile(file.Path, displayName, modifiedText, groupId)
+            row := IsTextWorkspace()
+                ? AddTextBlockTile(file.Path, groupId)
+                : AddFileTile(file.Path, displayName, modifiedText, groupId)
             ItemPaths[row] := file.Path
             ItemFolderPaths[row] := folder.Path
             ItemKinds[row] := file.IsDirectory ? "Folder" : "File"
@@ -169,7 +203,9 @@ PopulatePanel() {
                 SourceId: folder.SourceId,
                 SourcePath: folder.Path,
                 SourceMode: folder.Mode,
-                GroupId: groupId
+                GroupId: groupId,
+                FolderPinned: IsTextWorkspace()
+                    && IsTextSourcePathPinned(folder.SourceId, file.Path)
             }
             displayedCount += 1
         }
@@ -183,18 +219,34 @@ PopulatePanel() {
             "将文件夹拖到顶部“添加为来源”，或前往设置添加。", groupId)
     }
 
-    ApplyViewMode()
+    if IsTextWorkspace()
+        ApplyTextBlockCardView()
+    else
+        ApplyViewMode()
     FileView.Opt("+Redraw")
+    if IsTextWorkspace()
+        SelectDefaultTextBlockSearchResult()
     UpdateTransferGroupHeaders()
-    status := "共显示 " displayedCount " 个项目"
-    if unavailableCount
-        status .= "；" unavailableCount " 个目录不可用"
-    if ConfigErrors.Length
-        status .= "。配置有 " ConfigErrors.Length " 处问题"
-    if !ScanResultLoaded
-        status := "正在加载文件…"
-    StatusKind := "default"
-    StatusText.Text := status
+    ; Paint the committed rows before publishing their count in the footer.
+    DllCall("user32\RedrawWindow", "ptr", FileView.Hwnd, "ptr", 0, "ptr", 0,
+        "uint", 0x0001 | 0x0080 | 0x0100, "int")
+    if IsObject(ItemCountText) {
+        countText := "共" displayedCount "项"
+        if unavailableCount
+            countText .= " · " unavailableCount "不可用"
+        ItemCountText.Text := countText
+    }
+    if !ScanResultLoaded {
+        StatusKind := "background"
+        StatusText.Text := "正在加载"
+    } else if StatusKind != "background" {
+        StatusKind := "default"
+        StatusText.Text := "已是最新"
+    }
+    PanelRenderSignature := ComputePanelRenderSignature()
+    PanelRenderedWorkspaceId := ActiveWorkspaceId
+    if ThumbnailEnhanceQueue.Length
+        SetTimer(EnhanceNextThumbnail, -120)
 
     ; 在 GUI 完全更新后显示错误对话框
     if ConfigErrors.Length
@@ -202,6 +254,32 @@ PopulatePanel() {
 
     if PendingFileOperationRefresh && !PendingRefresh
         ApplyPendingViewRestore()
+    else if IsObject(stableViewState)
+        RestoreStableScanViewState(stableViewState)
+}
+
+RestoreStableScanViewState(restore) {
+    global FileView, ItemPaths
+    FileView.Modify(0, "-Select -Focus")
+    selectedRows := []
+    focusRow := 0
+    for row, path in ItemPaths {
+        if ArrayContainsPath(restore.Selected, path) {
+            FileView.Modify(row, "Select")
+            selectedRows.Push(row)
+        }
+        if restore.FocusedPath != "" && PathsEqual(path, restore.FocusedPath)
+            focusRow := row
+    }
+    if !focusRow && selectedRows.Length
+        focusRow := selectedRows[1]
+    if focusRow
+        FileView.Modify(focusRow, "Focus")
+    if ItemPaths.Count {
+        topRow := Max(1, Min(restore.TopRow, ItemPaths.Count))
+        DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+            "uint", 0x1013, "ptr", topRow - 1, "ptr", 0, "ptr")
+    }
 }
 
 InsertListGroup(groupId, header) {
@@ -227,12 +305,15 @@ SetListItemGroup(row, groupId) {
 }
 
 AddFileTile(path, label, modifiedText, groupId) {
-    global FileView, ItemLabels
-    imageIndex := AddShellThumbnail(path)
-    options := imageIndex ? "Icon" imageIndex : ""
+    global FileView, ItemLabels, ThumbnailPolicy
+    cacheKey := PathKey(path) "|" modifiedText
+    thumbnail := AddShellThumbnail(path, cacheKey)
+    options := thumbnail.Index ? "Icon" thumbnail.Index : ""
     row := FileView.Add(options, label, modifiedText)
     ItemLabels[row] := label
     SetListItemGroup(row, groupId)
+    if ThumbnailPolicy = "Full" && !thumbnail.Cached
+        QueueThumbnailEnhancement(path, row, cacheKey)
     return row
 }
 
@@ -244,12 +325,31 @@ AddPlaceholderTile(label, groupId) {
     return row
 }
 
-AddShellThumbnail(path) {
-    global ThumbnailSize, ThumbnailImageList, ThumbnailPolicy
+AddShellThumbnail(path, cacheKey := "") {
+    global ThumbnailSize, ThumbnailImageList, ThumbnailIconCache
+    if cacheKey != "" && ThumbnailIconCache.Has(cacheKey)
+        return ThumbnailIconCache[cacheKey]
     ; Folders are pinned as single shortcuts. Always use their Shell icon
     ; instead of asking Windows to inspect their contents for a thumbnail.
-    if DirExist(path)
-        return AddShellFileIcon(path)
+    if DirExist(path) {
+        result := {Index: AddShellFileIcon(path), Cached: true}
+        if cacheKey != "" && result.Index
+            ThumbnailIconCache[cacheKey] := result
+        return result
+    }
+
+    imageIndex := AddShellThumbnailBitmap(path, true)
+    if imageIndex
+        result := {Index: imageIndex, Cached: true}
+    else
+        result := {Index: AddShellFileIcon(path), Cached: false}
+    if cacheKey != "" && result.Index
+        ThumbnailIconCache[cacheKey] := result
+    return result
+}
+
+AddShellThumbnailBitmap(path, cacheOnly := true) {
+    global ThumbnailSize, ThumbnailImageList
 
     factory := 0
     bitmap := 0
@@ -260,7 +360,7 @@ AddShellThumbnail(path) {
             requestedSize := (ThumbnailSize & 0xFFFFFFFF) | (ThumbnailSize << 32)
             ; SIIGBF_INCACHEONLY (0x10) prevents an uncached thumbnail from
             ; triggering synchronous decoding on the UI thread.
-            imageFlags := 0x20 | (ThumbnailPolicy = "Fast" ? 0x10 : 0)
+            imageFlags := 0x20 | (cacheOnly ? 0x10 : 0)
             try ComCall(3, factory, "int64", requestedSize, "uint", imageFlags,
                 "ptr*", &bitmap)
         }
@@ -276,7 +376,36 @@ AddShellThumbnail(path) {
         if imageIndex >= 0
             return imageIndex + 1
     }
-    return AddShellFileIcon(path)
+    return 0
+}
+
+QueueThumbnailEnhancement(path, row, cacheKey := "") {
+    global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
+    if IsPotentiallyRemotePath(path)
+        return
+    ThumbnailEnhanceQueue.Push({Path: path, Row: row, CacheKey: cacheKey,
+        Generation: ThumbnailEnhanceGeneration})
+}
+
+EnhanceNextThumbnail() {
+    global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
+    global ItemPaths, FileView, PanelVisible, ThumbnailIconCache
+    if !PanelVisible || !ThumbnailEnhanceQueue.Length
+        return
+    task := ThumbnailEnhanceQueue.RemoveAt(1)
+    if task.Generation = ThumbnailEnhanceGeneration
+        && ItemPaths.Has(task.Row)
+        && PathKey(ItemPaths[task.Row]) = PathKey(task.Path) {
+        imageIndex := AddShellThumbnailBitmap(task.Path, false)
+        if imageIndex {
+            FileView.Modify(task.Row, "Icon" imageIndex)
+            if task.CacheKey != ""
+                ThumbnailIconCache[task.CacheKey] := {
+                    Index: imageIndex, Cached: true}
+        }
+    }
+    if ThumbnailEnhanceQueue.Length
+        SetTimer(EnhanceNextThumbnail, -15)
 }
 
 AddShellFileIcon(path) {
@@ -301,12 +430,14 @@ AddShellFileIcon(path) {
 
 PopulateRecentSidebar() {
     global RecentView, RecentLabel, RecentItemPaths, ShowRecentSidebar, CurrentScanResult
+    global RecentRenderSignature
     PreviewInvalidateList("recent")
     RecentView.Opt("-Redraw")
     RecentView.Delete()
     RecentItemPaths := Map()
     if !ShowRecentSidebar {
         RecentView.Opt("+Redraw")
+        RecentRenderSignature := ComputeRecentRenderSignature()
         return
     }
 
@@ -321,6 +452,38 @@ PopulateRecentSidebar() {
     RecentView.ModifyCol(1, 230)
     RecentView.Modify(0, "-Select -Focus")
     RecentView.Opt("+Redraw")
+    DllCall("user32\RedrawWindow", "ptr", RecentView.Hwnd, "ptr", 0, "ptr", 0,
+        "uint", 0x0001 | 0x0080 | 0x0100, "int")
+    RecentRenderSignature := ComputeRecentRenderSignature()
+}
+
+ComputePanelRenderSignature() {
+    global ActiveWorkspaceId, CurrentConfigFingerprint, CurrentScanResult
+    global PinnedPaths, ViewMode, ThumbnailSize
+    return StrLower(ActiveWorkspaceId) "|" CurrentConfigFingerprint
+        . "|" ResultSignature({Folders: CurrentScanResult.Folders, Recent: []})
+        . "|p=" JoinNormalizedPaths(PinnedPaths)
+        . "|v=" ViewMode "|t=" ThumbnailSize
+}
+
+IsPanelRenderCurrent() {
+    global PanelRenderSignature
+    return PanelRenderSignature != ""
+        && PanelRenderSignature = ComputePanelRenderSignature()
+}
+
+ComputeRecentRenderSignature() {
+    global ActiveWorkspaceId, CurrentScanResult, ShowRecentSidebar
+    signature := StrLower(ActiveWorkspaceId) "|" (ShowRecentSidebar ? 1 : 0)
+    for item in CurrentScanResult.Recent
+        signature .= "|" item.Path "@" item.Modified
+    return signature
+}
+
+IsRecentRenderCurrent() {
+    global RecentRenderSignature
+    return RecentRenderSignature != ""
+        && RecentRenderSignature = ComputeRecentRenderSignature()
 }
 
 GetWindowsRecentFiles(limit) {
@@ -353,9 +516,16 @@ GetWindowsRecentFiles(limit) {
         try target := Trim(shell.CreateShortcut(link.Path).TargetPath)
         catch
             continue
-        attributes := target != "" ? FileExist(target) : ""
-        if !attributes || InStr(attributes, "D")
+        if target = ""
             continue
+        ; Never probe an UNC/WebDAV/mapped-network target on the scan critical
+        ; path. A disconnected provider can hold FileExist for many seconds.
+        ; The shortcut remains useful and is validated only when opened.
+        if !IsPotentiallyRemotePath(target) {
+            attributes := FileExist(target)
+            if !attributes || InStr(attributes, "D")
+                continue
+        }
         key := StrLower(target)
         if seen.Has(key)
             continue
@@ -365,6 +535,17 @@ GetWindowsRecentFiles(limit) {
             break
     }
     return results
+}
+
+IsPotentiallyRemotePath(path) {
+    if SubStr(path, 1, 2) = "\\"
+        return true
+    if RegExMatch(path, "i)^[A-Z]:\\") {
+        driveType := DllCall("kernel32\GetDriveTypeW", "wstr", SubStr(path, 1, 3),
+            "uint")
+        return driveType = 4 ; DRIVE_REMOTE
+    }
+    return RegExMatch(path, "i)^(?:https?|ftp|webdav):") != 0
 }
 
 GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode,
@@ -716,13 +897,23 @@ RunScanWorkerMode() {
     readyPath := A_Args[3]
     try {
         request := ReadWorkerRequest(requestPath)
-        diagnostics := {Count: 0, Items: [], Seen: Map()}
         pinnedSet := BuildPathSet(request.PinnedPaths)
-        result := {Version: 4, Generation: request.Generation,
-            Fingerprint: request.Fingerprint,
-            WorkspaceId: request.WorkspaceId, Folders: [], Recent: [],
-            HiddenCount: 0, HiddenItems: []}
-        for folder in request.Folders {
+        if !DirExist(readyPath)
+            DirCreate(readyPath)
+        scannedCount := 0
+        scanOrder := []
+        for index, folder in request.Folders {
+            if folder.Scan && !IsPotentiallyRemotePath(folder.Path)
+                scanOrder.Push({Index: index, Folder: folder})
+        }
+        for index, folder in request.Folders {
+            if folder.Scan && IsPotentiallyRemotePath(folder.Path)
+                scanOrder.Push({Index: index, Folder: folder})
+        }
+        for task in scanOrder {
+            index := task.Index
+            folder := task.Folder
+            diagnostics := {Count: 0, Items: [], Seen: Map()}
             state := DirExist(folder.Path) ? "OK" : "Unavailable"
             files := state = "OK" ? GetSortedItems(folder.Path,
                 folder.MaxFilesPerFolder, folder.DisplayScope, folder.SortMode,
@@ -730,13 +921,27 @@ RunScanWorkerMode() {
                 request.GlobalExcludedNames, folder.ExcludedPaths,
                 folder.AllowedExcludedPaths, folder.NoiseFilter,
                 pinnedSet, folder.Name, diagnostics) : []
-            result.Folders.Push({Name: folder.Name, Path: folder.Path,
-                State: state, Files: files})
+            partial := {Version: 5, Generation: request.Generation,
+                Fingerprint: request.Fingerprint,
+                WorkspaceId: request.WorkspaceId, SourceIndex: index,
+                Kind: "Source", Folders: [{Name: folder.Name,
+                    Path: folder.Path, State: state, Files: files}], Recent: [],
+                HiddenCount: diagnostics.Count, HiddenItems: diagnostics.Items}
+            WriteScanResultAtomic(partial, readyPath "\source-"
+                . Format("{:04}", index) ".ini")
+            scannedCount += 1
         }
-        result.Recent := GetWindowsRecentFiles(request.RecentFileCount)
-        result.HiddenCount := diagnostics.Count
-        result.HiddenItems := diagnostics.Items
-        WriteScanResultAtomic(result, readyPath)
+        if request.IncludeRecent {
+            recentResult := {Version: 5, Generation: request.Generation,
+                Fingerprint: request.Fingerprint,
+                WorkspaceId: request.WorkspaceId, SourceIndex: 0,
+                Kind: "Recent", Folders: [],
+                Recent: GetWindowsRecentFiles(request.RecentFileCount),
+                HiddenCount: 0, HiddenItems: []}
+            WriteScanResultAtomic(recentResult, readyPath "\recent.ini")
+        }
+        WriteWorkerCompletionAtomic(readyPath "\complete.ini", request,
+            scannedCount)
     } catch as err {
         try {
             logPath := A_ScriptDir "\worker-error.txt"
@@ -747,7 +952,7 @@ RunScanWorkerMode() {
                 . "  File: " err.File "`n"
                 . "  Line: " err.Line "`n`n", logPath)
         }
-        try FileDelete(readyPath ".writing")
+        try FileDelete(readyPath "\complete.ini.writing")
     }
 }
 
@@ -756,12 +961,13 @@ ReadWorkerRequest(path) {
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     version := Integer(IniRead(path, "Meta", "Version", "0"))
-    if version != 5
+    if version != 6
         throw Error("unsupported request version")
     request := {Generation: IniRead(path, "Meta", "Generation", ""),
         Fingerprint: IniRead(path, "Meta", "Fingerprint", ""),
         WorkspaceId: IniRead(path, "Meta", "WorkspaceId", ""), Folders: [],
         RecentFileCount: Integer(IniRead(path, "Meta", "RecentFileCount", "12")),
+        IncludeRecent: IniRead(path, "Meta", "IncludeRecent", "0") = "1",
         GlobalExcludedNames: [], PinnedPaths: []}
     globalNameCount := Integer(
         IniRead(path, "Meta", "GlobalExcludedNameCount", "0"))
@@ -868,20 +1074,29 @@ ReadWorkerRequest(path) {
             Filter: filter,
             NoiseFilter: noiseFilter,
             ExcludedPaths: excludedPaths,
-            AllowedExcludedPaths: allowedPaths
+            AllowedExcludedPaths: allowedPaths,
+            Scan: IniRead(path, section, "Scan", "1") = "1"
         })
     }
     return request
 }
 
 WriteScanResultAtomic(result, readyPath, includeDiagnostics := true) {
+    global CurrentConfigFingerprint, ActiveWorkspaceId
     tempPath := readyPath ".writing"
     try FileDelete(tempPath)
     try FileDelete(readyPath)
-    IniWrite("4", tempPath, "Meta", "Version")
-    IniWrite(result.Generation, tempPath, "Meta", "Generation")
-    IniWrite(result.Fingerprint, tempPath, "Meta", "Fingerprint")
-    IniWrite(result.WorkspaceId, tempPath, "Meta", "WorkspaceId")
+    IniWrite("5", tempPath, "Meta", "Version")
+    IniWrite(HasProp(result, "Generation") ? result.Generation : "cache",
+        tempPath, "Meta", "Generation")
+    IniWrite(HasProp(result, "Fingerprint") ? result.Fingerprint
+        : CurrentConfigFingerprint, tempPath, "Meta", "Fingerprint")
+    IniWrite(HasProp(result, "WorkspaceId") ? result.WorkspaceId
+        : ActiveWorkspaceId, tempPath, "Meta", "WorkspaceId")
+    IniWrite(HasProp(result, "Kind") ? result.Kind : "Snapshot",
+        tempPath, "Meta", "Kind")
+    IniWrite(HasProp(result, "SourceIndex") ? result.SourceIndex : 0,
+        tempPath, "Meta", "SourceIndex")
     IniWrite(A_Now, tempPath, "Meta", "CompletedAt")
     IniWrite(result.Folders.Length, tempPath, "Meta", "FolderCount")
     IniWrite(result.Recent.Length, tempPath, "Meta", "RecentCount")
@@ -921,9 +1136,37 @@ WriteScanResultAtomic(result, readyPath, includeDiagnostics := true) {
     FileMove(tempPath, readyPath, 1)
 }
 
+WriteWorkerCompletionAtomic(path, request, scannedCount) {
+    tempPath := path ".writing"
+    try FileDelete(tempPath)
+    IniWrite("1", tempPath, "Meta", "Version")
+    IniWrite(request.Generation, tempPath, "Meta", "Generation")
+    IniWrite(request.Fingerprint, tempPath, "Meta", "Fingerprint")
+    IniWrite(request.WorkspaceId, tempPath, "Meta", "WorkspaceId")
+    IniWrite(scannedCount, tempPath, "Meta", "ScannedCount")
+    IniWrite(A_Now, tempPath, "Meta", "CompletedAt")
+    FileMove(tempPath, path, 1)
+}
+
 ResolveCacheDirectory(setting) {
     setting := NormalizePath(setting)
-    return setting = "" ? A_ScriptDir "\cache" : setting
+    candidates := []
+    if setting != ""
+        candidates.Push(setting)
+    else
+        candidates.Push(A_ScriptDir "\cache")
+    localAppData := EnvGet("LOCALAPPDATA")
+    if localAppData = ""
+        localAppData := A_AppData
+    fallback := localAppData "\PopDrop\cache"
+    if !ArrayContainsPath(candidates, fallback)
+        candidates.Push(fallback)
+    for candidate in candidates {
+        ; Keep the transactional runtime cache off UNC/mapped network drives.
+        if !IsPotentiallyRemotePath(candidate) && EnsureCacheDirectory(candidate)
+            return candidate
+    }
+    return fallback
 }
 
 EnsureCacheDirectory(path) {
@@ -941,8 +1184,9 @@ EnsureCacheDirectory(path) {
 
 ComputeConfigFingerprint(settings) {
     global RecentFileCount, GlobalExcludedFolderNames, GlobalNoiseFilter, PinnedPaths
-    global ActiveWorkspaceId
-    raw := "v5|workspace=" ActiveWorkspaceId "|recent=" RecentFileCount
+    global ActiveWorkspaceId, ActiveWorkspaceType
+    raw := "v6|workspace=" ActiveWorkspaceId "|type=" ActiveWorkspaceType
+        . "|recent=" RecentFileCount
         . "|excludedNames=" JoinArray(GlobalExcludedFolderNames, ",")
         . "|noiseEnabled=" (GlobalNoiseFilter.Enabled ? 1 : 0)
         . "|hidden=" (GlobalNoiseFilter.HideHidden ? 1 : 0)
@@ -979,15 +1223,32 @@ HashString(text) {
 
 LoadDiskScanCache() {
     global CacheFilePath, CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
-    global ActiveWorkspaceId
-    if !FileExist(CacheFilePath)
-        return false
-    result := ReadScanResult(CacheFilePath, "", CurrentConfigFingerprint,
+    global ActiveWorkspaceId, CacheDir
+    indexed := RuntimeIndexLoadSnapshot(ActiveWorkspaceId,
+        CurrentConfigFingerprint)
+    if IsObject(indexed) {
+        CurrentScanResult := indexed
+        ScanResultLoaded := true
+        RememberCurrentWorkspaceSnapshot()
+        return true
+    }
+    candidatePath := CacheFilePath
+    if !FileExist(candidatePath) {
+        legacyPath := CacheDir "\scan-cache-v4.ini"
+        if FileExist(legacyPath)
+            candidatePath := legacyPath
+        else
+            return false
+    }
+    result := ReadScanResult(candidatePath, "", CurrentConfigFingerprint,
         ActiveWorkspaceId)
     if !IsObject(result)
         return false
     CurrentScanResult := result
     ScanResultLoaded := true
+    RememberCurrentWorkspaceSnapshot()
+    if candidatePath != CacheFilePath
+        WriteCurrentScanCache()
     return true
 }
 
@@ -995,7 +1256,7 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "",
     expectedWorkspaceId := "") {
     try {
         version := Integer(IniRead(path, "Meta", "Version", "0"))
-        if version != 4
+        if version != 4 && version != 5
             return 0
         generation := IniRead(path, "Meta", "Generation", "")
         fingerprint := IniRead(path, "Meta", "Fingerprint", "")
@@ -1009,6 +1270,8 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "",
             return 0
         result := {Version: version, Generation: generation,
             Fingerprint: fingerprint, WorkspaceId: workspaceId,
+            Kind: IniRead(path, "Meta", "Kind", "Snapshot"),
+            SourceIndex: Integer(IniRead(path, "Meta", "SourceIndex", "0")),
             Folders: [], Recent: [], HiddenCount: Integer(
                 IniRead(path, "Meta", "HiddenCount", "0")), HiddenItems: []}
         folderCount := Integer(IniRead(path, "Meta", "FolderCount", "0"))
@@ -1020,7 +1283,8 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "",
             folder := {Name: IniRead(path, section, "Name", ""),
                 Path: IniRead(path, section, "Path", ""),
                 State: IniRead(path, section, "State", "Unavailable"), Files: []}
-            if folder.Path = "" || (folder.State != "OK" && folder.State != "Unavailable")
+            if folder.Path = "" || (folder.State != "OK"
+                && folder.State != "Unavailable" && folder.State != "Pending")
                 return 0
             ; v1 cache had a 100-item limit. v2 allows any count.
             ; Keep a defensive sanity check against malicious/corrupt cache (10000).
@@ -1067,16 +1331,18 @@ ReadScanResult(path, expectedGeneration := "", expectedFingerprint := "",
     }
 }
 
-WriteScanRequest(path, generation) {
+WriteScanRequest(path, generation, sourceKeys := 0, includeRecent := false) {
     global LastValidFolderSettings, CurrentConfigFingerprint, RecentFileCount
     global GlobalExcludedFolderNames, PinnedPaths, ActiveWorkspaceId
+    global ActiveWorkspaceType, WORKSPACE_TYPE_TEXT
     try FileDelete(path)
-    IniWrite("5", path, "Meta", "Version")
+    IniWrite("6", path, "Meta", "Version")
     IniWrite(generation, path, "Meta", "Generation")
     IniWrite(CurrentConfigFingerprint, path, "Meta", "Fingerprint")
     IniWrite(ActiveWorkspaceId, path, "Meta", "WorkspaceId")
     IniWrite(LastValidFolderSettings.Length, path, "Meta", "FolderCount")
     IniWrite(RecentFileCount, path, "Meta", "RecentFileCount")
+    IniWrite(includeRecent ? "1" : "0", path, "Meta", "IncludeRecent")
     IniWrite(GlobalExcludedFolderNames.Length, path,
         "Meta", "GlobalExcludedNameCount")
     for index, name in GlobalExcludedFolderNames
@@ -1087,12 +1353,18 @@ WriteScanRequest(path, generation) {
         IniWrite(pinnedPath, path, "Meta", "PinnedPath" Format("{:03}", index))
     for index, folder in LastValidFolderSettings {
         section := "Folder" Format("{:03}", index)
+        sourceKey := folder.SourceId != "" ? folder.SourceId
+            : ResolveFolderSourceId(folder.Name, folder.Path)
+        shouldScan := !IsObject(sourceKeys) || sourceKeys.Has(sourceKey)
+        IniWrite(shouldScan ? "1" : "0", path, section, "Scan")
         IniWrite(folder.Name, path, section, "Name")
         IniWrite(folder.Path, path, section, "Path")
         IniWrite(folder.IncludeSubfolders ? "1" : "0", path, section, "IncludeSubfolders")
         IniWrite(folder.DisplayScope, path, section, "DisplayScope")
         IniWrite(folder.FolderTimeMode, path, section, "FolderTimeMode")
-        IniWrite(folder.MaxFilesPerFolder, path, section, "MaxFilesPerFolder")
+        IniWrite(ActiveWorkspaceType = WORKSPACE_TYPE_TEXT
+            ? 0 : folder.MaxFilesPerFolder,
+            path, section, "MaxFilesPerFolder")
         IniWrite(folder.SortMode, path, section, "SortMode")
         IniWrite(folder.Filter.Mode, path, section, "FilterMode")
         IniWrite(JoinArray(folder.Filter.Extensions, ","), path, section, "FileExtensions")
@@ -1155,104 +1427,265 @@ StartScanWorkerProcess(requestPath, readyPath) {
     return pid
 }
 
-StartBackgroundScan() {
-    global WorkerRunning, PendingRefresh, ScanGeneration, WorkerGeneration
+StartBackgroundScan(sourceKeys := 0, reason := "auto", includeRecent := -1) {
+    global WorkerRunning, PendingRefresh, PendingFullRefresh
+    global PendingScanSourceKeys, PendingIncludeRecent
+    global ScanGeneration, WorkerGeneration, WorkerWorkspaceId
     global WorkerRequestPath, WorkerReadyPath, WorkerPid, CacheDir, CacheWritable
+    global WorkerAppliedSourceIndexes, WorkerRecentApplied, WorkerChanged
+    global WorkerStatusToken, ActiveWorkspaceId, ShowRecentSidebar
+    ReconcileSourceWatchers()
+    if includeRecent = -1
+        includeRecent := ShowRecentSidebar
+    if WorkerRunning && StrLower(WorkerWorkspaceId) != StrLower(ActiveWorkspaceId) {
+        if WorkerPid && ProcessExist(WorkerPid)
+            try ProcessClose(WorkerPid)
+        FinishWorker(false)
+        PendingRefresh := false
+        PendingFullRefresh := false
+        PendingScanSourceKeys := Map()
+        PendingIncludeRecent := false
+    }
     if WorkerRunning {
         PendingRefresh := true
+        if !IsObject(sourceKeys)
+            PendingFullRefresh := true
+        else {
+            for key, value in sourceKeys
+                PendingScanSourceKeys[key] := true
+        }
+        PendingIncludeRecent := PendingIncludeRecent || includeRecent
         return
     }
+    if IsObject(sourceKeys) && !sourceKeys.Count && !includeRecent
+        return
+    EnsureCurrentScanSkeleton()
     ipcDir := CacheWritable ? CacheDir : A_Temp "\PopDrop"
     try DirCreate(ipcDir)
     generation := Format("{:016X}-{:08X}", A_TickCount, ++ScanGeneration)
     requestPath := ipcDir "\request-" generation ".ini"
-    readyPath := ipcDir "\ready-" generation ".ini"
+    readyPath := ipcDir "\ready-" generation
     try FileDelete(requestPath)
-    try FileDelete(readyPath)
+    try DirDelete(readyPath, true)
     try {
-        WriteScanRequest(requestPath, generation)
+        DirCreate(readyPath)
+        WriteScanRequest(requestPath, generation, sourceKeys, includeRecent)
         WorkerPid := StartScanWorkerProcess(requestPath, readyPath)
     } catch {
-        SetBackgroundStatus("更新失败，正在显示上次结果")
+        SetBackgroundStatus("更新失败", 1200)
         return
     }
     WorkerRunning := true
-    PendingRefresh := false
     WorkerGeneration := generation
+    WorkerWorkspaceId := ActiveWorkspaceId
     WorkerRequestPath := requestPath
     WorkerReadyPath := readyPath
-    SetBackgroundStatus(ScanResultLoaded ? "正在更新" : "正在加载")
-    SetTimer(PollWorkerResult, 100)
+    WorkerAppliedSourceIndexes := Map()
+    WorkerRecentApplied := false
+    WorkerChanged := false
+    token := ++WorkerStatusToken
+    SetTimer(() => ShowWorkerBusyStatus(token), -180)
+    SetTimer(PollWorkerResult, 75)
+}
+
+ShowWorkerBusyStatus(token) {
+    global WorkerRunning, WorkerStatusToken, ScanResultLoaded
+    if WorkerRunning && token = WorkerStatusToken
+        SetBackgroundStatus(ScanResultLoaded ? "更新中" : "正在加载")
+}
+
+EnsureCurrentScanSkeleton() {
+    global CurrentScanResult, LastValidFolderSettings
+    if !IsObject(CurrentScanResult)
+        CurrentScanResult := {Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
+    for index, folder in LastValidFolderSettings {
+        existing := index <= CurrentScanResult.Folders.Length
+            ? CurrentScanResult.Folders[index] : 0
+        if IsObject(existing)
+            && StrLower(RTrim(existing.Path, "\")) = StrLower(RTrim(folder.Path, "\"))
+            && StrLower(existing.Name) = StrLower(folder.Name)
+            continue
+        pending := {Name: folder.Name, Path: folder.Path,
+            State: "Pending", Files: []}
+        if index <= CurrentScanResult.Folders.Length
+            CurrentScanResult.Folders[index] := pending
+        else
+            CurrentScanResult.Folders.Push(pending)
+    }
+    while CurrentScanResult.Folders.Length > LastValidFolderSettings.Length
+        CurrentScanResult.Folders.Pop()
 }
 
 PollWorkerResult() {
-    global WorkerRunning, WorkerPid, WorkerReadyPath, WorkerRequestPath, WorkerGeneration
-    global PendingRefresh, CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
-    global PendingFileOperationRefresh
-    global CacheFilePath, CacheWritable, CacheWriteWarningShown
-    global Panel, PanelVisible, StatusKind, ActiveWorkspaceId
+    global WorkerRunning, WorkerPid, WorkerReadyPath, WorkerGeneration
+    global WorkerAppliedSourceIndexes, WorkerRecentApplied, WorkerChanged
+    global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
+    global CurrentHiddenBySource
+    global LastValidFolderSettings
+    global PendingFileOperationRefresh, Panel, PanelVisible, ActiveWorkspaceId
+    appliedSource := false
+    appliedRecent := false
     if !WorkerRunning {
         SetTimer(PollWorkerResult, 0)
         return
     }
-    if FileExist(WorkerReadyPath) {
-        result := ReadScanResult(WorkerReadyPath, WorkerGeneration,
+    Loop Files, WorkerReadyPath "\source-*.ini", "F" {
+        if !RegExMatch(A_LoopFileName, "i)^source-(\d+)\.ini$", &match)
+            continue
+        sourceIndex := Integer(match[1])
+        if WorkerAppliedSourceIndexes.Has(sourceIndex)
+            continue
+        partial := ReadScanResult(A_LoopFileFullPath, WorkerGeneration,
             CurrentConfigFingerprint, ActiveWorkspaceId)
-        if IsObject(result) {
-            changed := !ScanResultsEqual(CurrentScanResult, result)
-            CurrentScanResult := result
-            ScanResultLoaded := true
-            if (changed || PendingFileOperationRefresh)
-                && IsObject(Panel) && PanelVisible {
-                PopulatePanel()
-                PopulateRecentSidebar()
-                SetTimer(UpdateSelectionStatus, 0)
-                StatusKind := "default"
-            }
-            if CacheWritable {
-                try {
-                    cacheTemp := CacheFilePath ".writing"
-                    WriteScanResultAtomic(result, cacheTemp, false)
-                    FileMove(cacheTemp, CacheFilePath, 1)
-                } catch {
-                    CacheWritable := false
-                }
-            }
-            if !CacheWritable && !CacheWriteWarningShown {
-                CacheWriteWarningShown := true
-                SetBackgroundStatus("无法保存缓存，本次将仅使用内存缓存")
-            } else if changed
-                SetBackgroundStatus("已更新", 500)
-            else
-                SetBackgroundStatus("已是最新", 200)
-        } else {
-            SetBackgroundStatus("更新失败，正在显示上次结果")
+        if sourceIndex < 1 || sourceIndex > LastValidFolderSettings.Length
+            continue
+        if !IsObject(partial) || partial.Kind != "Source"
+            || partial.SourceIndex != sourceIndex
+            continue
+        WorkerAppliedSourceIndexes[sourceIndex] := true
+        if partial.SourceIndex < 1 || !partial.Folders.Length
+            continue
+        before := sourceIndex <= CurrentScanResult.Folders.Length
+            ? ResultSignature({Folders: [CurrentScanResult.Folders[sourceIndex]], Recent: []}) : ""
+        while CurrentScanResult.Folders.Length < sourceIndex
+            CurrentScanResult.Folders.Push({Name: "", Path: "", State: "Pending", Files: []})
+        CurrentScanResult.Folders[sourceIndex] := partial.Folders[1]
+        CurrentHiddenBySource[sourceIndex] := {
+            Count: partial.HiddenCount, Items: partial.HiddenItems}
+        RebuildCurrentHiddenDiagnostics()
+        after := ResultSignature({Folders: [partial.Folders[1]], Recent: []})
+        if before != after
+            WorkerChanged := true
+        ScanResultLoaded := true
+        appliedSource := true
+    }
+    recentPath := WorkerReadyPath "\recent.ini"
+    if !WorkerRecentApplied && FileExist(recentPath) {
+        partial := ReadScanResult(recentPath, WorkerGeneration,
+            CurrentConfigFingerprint, ActiveWorkspaceId)
+        if IsObject(partial) && partial.Kind = "Recent" {
+            WorkerRecentApplied := true
+            if ResultSignature({Folders: [], Recent: CurrentScanResult.Recent})
+                != ResultSignature({Folders: [], Recent: partial.Recent})
+                WorkerChanged := true
+            CurrentScanResult.Recent := partial.Recent
+            appliedRecent := true
         }
+    }
+    if appliedSource || appliedRecent {
+        RememberCurrentWorkspaceSnapshot()
+        QueueCurrentScanCacheWrite()
+        if IsObject(Panel) && PanelVisible {
+            if appliedSource || PendingFileOperationRefresh
+                PopulatePanel()
+            if appliedRecent
+                PopulateRecentSidebar()
+            SetTimer(UpdateSelectionStatus, 0)
+        }
+    }
+    completePath := WorkerReadyPath "\complete.ini"
+    if FileExist(completePath) {
+        validComplete := IniRead(completePath, "Meta", "Generation", "")
+            = WorkerGeneration
+        if validComplete {
+            ScanResultLoaded := true
+            RememberCurrentWorkspaceSnapshot()
+            FlushPendingScanCacheWrite()
+            SetBackgroundStatus(WorkerChanged ? "已更新" : "已是最新",
+                WorkerChanged ? 700 : 250)
+        } else
+            SetBackgroundStatus("更新失败", 1200)
         FinishWorker()
         return
     }
     if WorkerPid && !ProcessExist(WorkerPid) {
-        SetBackgroundStatus("更新失败，正在显示上次结果")
+        FlushPendingScanCacheWrite()
+        SetBackgroundStatus("更新失败", 1200)
         FinishWorker()
     }
 }
 
-FinishWorker() {
-    global WorkerRunning, WorkerPid, WorkerRequestPath, WorkerReadyPath, PendingRefresh
+RebuildCurrentHiddenDiagnostics() {
+    global CurrentScanResult, CurrentHiddenBySource, NOISE_DIAGNOSTIC_LIMIT
+    count := 0
+    items := []
+    for sourceIndex, diagnostics in CurrentHiddenBySource {
+        count += diagnostics.Count
+        for item in diagnostics.Items {
+            if items.Length >= NOISE_DIAGNOSTIC_LIMIT
+                break
+            items.Push(item)
+        }
+    }
+    CurrentScanResult.HiddenCount := count
+    CurrentScanResult.HiddenItems := items
+}
+
+RememberCurrentWorkspaceSnapshot() {
+    global WorkspaceScanSnapshots, ActiveWorkspaceId
+    global CurrentConfigFingerprint, CurrentScanResult
+    if ActiveWorkspaceId != ""
+        WorkspaceScanSnapshots[StrLower(ActiveWorkspaceId)] := {
+            Fingerprint: CurrentConfigFingerprint, Result: CurrentScanResult}
+}
+
+WriteCurrentScanCache() {
+    global CacheWritable, CacheFilePath, CurrentScanResult
+    if !CacheWritable
+        return false
+    if RuntimeIndexSaveSnapshot(CurrentScanResult)
+        return true
+    try {
+        cacheTemp := CacheFilePath ".writing"
+        WriteScanResultAtomic(CurrentScanResult, cacheTemp, false)
+        FileMove(cacheTemp, CacheFilePath, 1)
+        return true
+    } catch {
+        CacheWritable := false
+        return false
+    }
+}
+
+QueueCurrentScanCacheWrite() {
+    global ScanCacheWritePending
+    ScanCacheWritePending := true
+    SetTimer(FlushPendingScanCacheWrite, -250)
+}
+
+FlushPendingScanCacheWrite() {
+    global ScanCacheWritePending
+    SetTimer(FlushPendingScanCacheWrite, 0)
+    if !ScanCacheWritePending
+        return
+    ScanCacheWritePending := false
+    WriteCurrentScanCache()
+}
+
+FinishWorker(startPending := true) {
+    global WorkerRunning, WorkerPid, WorkerRequestPath, WorkerReadyPath
+    global PendingRefresh, WorkerStatusToken
     SetTimer(PollWorkerResult, 0)
+    ++WorkerStatusToken
     try FileDelete(WorkerRequestPath)
-    try FileDelete(WorkerReadyPath)
-    try FileDelete(WorkerReadyPath ".writing")
+    if WorkerReadyPath != ""
+        && RegExMatch(WorkerReadyPath, "i)\\ready-[0-9A-F-]+$")
+        try DirDelete(WorkerReadyPath, true)
     WorkerRunning := false
     WorkerPid := 0
-    if PendingRefresh {
+    if startPending && PendingRefresh {
         PendingRefresh := false
         SetTimer(StartPendingRefresh, -50)
     }
 }
 
 StartPendingRefresh() {
-    StartBackgroundScan()
+    global PendingFullRefresh, PendingScanSourceKeys, PendingIncludeRecent
+    sourceKeys := PendingFullRefresh ? 0 : PendingScanSourceKeys
+    includeRecent := PendingIncludeRecent
+    PendingFullRefresh := false
+    PendingScanSourceKeys := Map()
+    PendingIncludeRecent := false
+    StartBackgroundScan(sourceKeys, "pending", includeRecent)
 }
 
 ScanResultsEqual(left, right) {
@@ -1266,10 +1699,11 @@ ResultSignature(result) {
     for folder in result.Folders {
         signature .= "F|" folder.Path "|" folder.State "|"
         for item in folder.Files
-            signature .= item.Path "@" item.Modified "|"
+            signature .= item.Path "@" item.Modified "@" item.Name "@"
+                . (item.IsDirectory ? 1 : 0) "@" item.TimeKind "|"
     }
     for item in result.Recent
-        signature .= "R|" item.Path "@" item.Modified "|"
+        signature .= "R|" item.Path "@" item.Modified "@" item.Name "|"
     return signature
 }
 

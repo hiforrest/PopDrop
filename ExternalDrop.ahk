@@ -68,6 +68,8 @@ GetDropClipboardFormats() {
             "wstr", "FileGroupDescriptorW", "ushort"),
         FileContents: DllCall("user32\RegisterClipboardFormatW",
             "wstr", "FileContents", "ushort"),
+        ShellIdList: DllCall("user32\RegisterClipboardFormatW",
+            "wstr", "Shell IDList Array", "ushort"),
         Png: DllCall("user32\RegisterClipboardFormatW",
             "wstr", "PNG", "ushort"),
         InetUrlW: DllCall("user32\RegisterClipboardFormatW",
@@ -83,7 +85,7 @@ GetDropClipboardFormats() {
 ClassifyDataObject(dataObject) {
     global DROP_ADAPTER_HDROP, DROP_ADAPTER_VIRTUAL
     global DROP_ADAPTER_PNG, DROP_ADAPTER_DIBV5, DROP_ADAPTER_DIB
-    global DROP_ADAPTER_URL, DROP_ADAPTER_UNSUPPORTED
+    global DROP_ADAPTER_URL, DROP_ADAPTER_TEXT, DROP_ADAPTER_UNSUPPORTED
     formats := GetDropClipboardFormats()
     available := Map(
         "HDrop", DataObjectSupportsFormat(dataObject, 15, 1, -1),
@@ -91,18 +93,29 @@ ClassifyDataObject(dataObject) {
             dataObject, formats.FileDescriptorW, 1, -1),
         "FileContents", DataObjectSupportsFormat(
             dataObject, formats.FileContents, 5, 0),
+        "ShellIdList", DataObjectSupportsFormat(
+            dataObject, formats.ShellIdList, 1, -1),
         "Png", DataObjectSupportsFormat(dataObject, formats.Png, 1, -1),
         "DibV5", DataObjectSupportsFormat(dataObject, 17, 1, -1),
         "Dib", DataObjectSupportsFormat(dataObject, 8, 1, -1),
         "Url", DataObjectSupportsFormat(dataObject, formats.InetUrlW, 1, -1)
             || DataObjectSupportsFormat(dataObject, formats.InetUrlA, 1, -1)
-            || DataObjectSupportsFormat(dataObject, formats.UriList, 1, -1))
+            || DataObjectSupportsFormat(dataObject, formats.UriList, 1, -1),
+        "UnicodeText", DataObjectSupportsFormat(dataObject, 13, 1, -1),
+        "AnsiText", DataObjectSupportsFormat(dataObject, 1, 1, -1))
     decision := ClassifyAvailableDropFormats(available)
     decision.HasExplicitUrl := available["Url"]
+    ; FILEDESCRIPTOR and FILECONTENTS are a pair for virtual-file transfer.
+    ; Explorer may expose a descriptor-like auxiliary format for a real
+    ; folder without a readable contents stream; that must not override an
+    ; authoritative CF_HDROP path list.
     decision.HasVirtualFiles := available["FileDescriptor"]
-        || available["FileContents"]
+        && available["FileContents"]
+    decision.HasShellIdList := available["ShellIdList"]
     decision.HasImagePayload := available["Png"]
         || available["DibV5"] || available["Dib"]
+    decision.HasUnicodeText := available["UnicodeText"]
+    decision.HasAnsiText := available["AnsiText"]
 
     if TransferInspectEnabled {
         decision.Formats := EnumerateDataObjectFormats(dataObject)
@@ -153,7 +166,7 @@ DedupeWebHDropPaths(paths) {
 ClassifyAvailableDropFormats(available) {
     global DROP_ADAPTER_HDROP, DROP_ADAPTER_VIRTUAL
     global DROP_ADAPTER_PNG, DROP_ADAPTER_DIBV5, DROP_ADAPTER_DIB
-    global DROP_ADAPTER_URL, DROP_ADAPTER_UNSUPPORTED
+    global DROP_ADAPTER_URL, DROP_ADAPTER_TEXT, DROP_ADAPTER_UNSUPPORTED
     if available.Has("HDrop") && available["HDrop"]
         adapter := DROP_ADAPTER_HDROP
     else if available.Has("FileDescriptor") && available["FileDescriptor"]
@@ -167,6 +180,9 @@ ClassifyAvailableDropFormats(available) {
         adapter := DROP_ADAPTER_DIB
     else if available.Has("Url") && available["Url"]
         adapter := DROP_ADAPTER_URL
+    else if (available.Has("UnicodeText") && available["UnicodeText"])
+        || (available.Has("AnsiText") && available["AnsiText"])
+        adapter := DROP_ADAPTER_TEXT
     else
         adapter := DROP_ADAPTER_UNSUPPORTED
     return {
@@ -317,12 +333,19 @@ CanPreloadHDropForFolderFeedback(decision, asyncInfo, sourceKind) {
     ; needed and classification is always safe.
     if sourceKind != "External"
         return true
-    ; A plain HDROP from Explorer must be inspected during DragEnter so the
-    ; folder-only toolbar can appear before Drop. Some Windows Sandbox and
-    ; Explorer builds advertise IDataObjectAsyncCapability even for ordinary
-    ; filesystem folders; rejecting those objects leaves no visual target.
-    ; Virtual/image/URL payloads remain deferred because they may be delayed
-    ; browser renders rather than stable filesystem paths.
+    ; CFSTR_SHELLIDLIST identifies a Windows Shell object selection. Explorer
+    ; can advertise async capability and auxiliary descriptor formats even
+    ; for ordinary file-system folders. The Shell ID list makes this case
+    ; distinguishable from a browser's delayed-render CF_HDROP, so it is safe
+    ; to read paths during DragEnter and show the folder toolbar.
+    if HasProp(decision, "HasShellIdList") && decision.HasShellIdList
+        return true
+    ; Unknown async sources stay Drop-only: Chromium may start one download
+    ; for every CF_HDROP GetData request.
+    if IsObject(asyncInfo) && asyncInfo.Supported
+        return false
+    ; Virtual/image/URL payloads may also be delayed browser renders rather
+    ; than stable local paths.
     if HasProp(decision, "HasExplicitUrl") && decision.HasExplicitUrl
         return false
     if HasProp(decision, "HasVirtualFiles") && decision.HasVirtualFiles
@@ -333,18 +356,33 @@ CanPreloadHDropForFolderFeedback(decision, asyncInfo, sourceKind) {
 }
 
 ExternalAdapterAllowedAtTarget(adapter, target) {
-    global DROP_ADAPTER_HDROP
+    global DROP_ADAPTER_HDROP, DROP_ADAPTER_TEXT
     if adapter = DROP_ADAPTER_HDROP
         return true
+    if adapter = DROP_ADAPTER_TEXT
+        return IsObject(target)
+            && (target.Type = "TextSource" || target.Type = "TextPinned")
     return IsObject(target) && target.Type = "Files"
 }
 
+SelectDropAdapterForTarget(decision, target) {
+    global DROP_ADAPTER_TEXT
+    if IsObject(target)
+        && (target.Type = "TextSource" || target.Type = "TextPinned")
+        && ((HasProp(decision, "HasUnicodeText") && decision.HasUnicodeText)
+            || (HasProp(decision, "HasAnsiText") && decision.HasAnsiText))
+        return DROP_ADAPTER_TEXT
+    return decision.Adapter
+}
+
 ExternalAdapterTargetReason(adapter, target) {
-    global DROP_ADAPTER_HDROP
+    global DROP_ADAPTER_HDROP, DROP_ADAPTER_TEXT
     if adapter = DROP_ADAPTER_HDROP
         return ""
     if !IsObject(target)
         return "此区域不能接收外部内容。"
+    if adapter = DROP_ADAPTER_TEXT
+        return "文字只能投放到文本来源或固定项。"
     if target.Type = "Launcher"
         return "网络或虚拟内容不能直接投放到启动器分组，请拖到普通文件夹。"
     if target.Type = "Pinned"
@@ -352,6 +390,40 @@ ExternalAdapterTargetReason(adapter, target) {
     if target.Type != "Files"
         return "此区域不能接收外部内容。"
     return ""
+}
+
+ReadDataObjectText(dataObject) {
+    text := ReadDataObjectStringFormat(dataObject, 13, "UTF-16")
+    if text = ""
+        text := ReadDataObjectStringFormat(dataObject, 1, "CP0")
+    return StrReplace(StrReplace(text, "`r`n", "`n"), "`r", "`n")
+}
+
+ReadDataObjectStringFormat(dataObject, clipFormat, encoding) {
+    if !DataObjectSupportsFormat(dataObject, clipFormat, 1, -1)
+        return ""
+    formatSize := A_PtrSize = 8 ? 32 : 20
+    mediumSize := A_PtrSize = 8 ? 24 : 12
+    unionOffset := A_PtrSize = 8 ? 8 : 4
+    formatEtc := Buffer(formatSize, 0)
+    medium := Buffer(mediumSize, 0)
+    FillFormatEtc(formatEtc.Ptr, clipFormat, 1, -1)
+    hr := ComCall(3, dataObject, "ptr", formatEtc.Ptr,
+        "ptr", medium.Ptr, "int")
+    if !HResultSucceeded(hr)
+        return ""
+    try {
+        handle := NumGet(medium, unionOffset, "ptr")
+        if !handle
+            return ""
+        pointer := DllCall("kernel32\GlobalLock", "ptr", handle, "ptr")
+        if !pointer
+            return ""
+        try return StrGet(pointer, encoding)
+        finally DllCall("kernel32\GlobalUnlock", "ptr", handle)
+    } finally {
+        DllCall("ole32\ReleaseStgMedium", "ptr", medium.Ptr)
+    }
 }
 
 CreateExternalTransfer(dataObject, adapter, target) {

@@ -4,7 +4,9 @@
 
 ;@Ahk2Exe-SetMainIcon assets\app.ico
 ;@Ahk2Exe-AddResource assets\tray.ico, 555
-;@Ahk2Exe-SetVersion 1.0.0.0
+;@Ahk2Exe-AddResource assets\icon-lnk.ico, 556
+;@Ahk2Exe-AddResource assets\pin.ico, 557
+;@Ahk2Exe-SetVersion 1.1.0.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -15,8 +17,13 @@
 ; ──── 排序模式常量 ────
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
-global APP_VERSION := "1.0.0"
-global CONFIG_VERSION := "23"
+global SORT_SMART := "Smart"
+global APP_VERSION := "1.1.0"
+global CONFIG_VERSION := "27"
+
+; ──── 工作区类型 ────
+global WORKSPACE_TYPE_FILES := "Files"
+global WORKSPACE_TYPE_TEXT := "Text"
 
 ; ──── 文件管理器适配器 ────
 global FILE_MANAGER_WINDOWS_SHELL := "WindowsShell"
@@ -71,6 +78,7 @@ global DROP_ADAPTER_PNG := "Png"
 global DROP_ADAPTER_DIBV5 := "DibV5"
 global DROP_ADAPTER_DIB := "Dib"
 global DROP_ADAPTER_URL := "Url"
+global DROP_ADAPTER_TEXT := "Text"
 global DROP_ADAPTER_UNSUPPORTED := "Unsupported"
 
 if A_Args.Length && A_Args[1] = "--self-test" {
@@ -115,25 +123,37 @@ global DisplayButton := 0
 global DisplayMenu := 0
 global WindowModeButton := 0
 global PinnedDropButton := 0
+global ClipboardPinnedButton := 0
+global RefreshButton := 0
+global RemovePinnedButton := 0
+global PinnedGroupLeftSeparator := 0
+global PinnedGroupRightSeparator := 0
+global SettingsButton := 0
+global CloseButton := 0
 global ToolbarControls := []
 global FolderDropAddSourceButton := 0
 global FolderDropPinnedButton := 0
 global FolderDropUiVisible := false
 global PanelLayoutWidth := 766
 global StatusText := 0
+global ItemCountText := 0
 global TransferStatusText := 0
 global ItemPaths := Map()
 global ItemLabels := Map()
 global ItemKinds := Map()
 global ItemOpenContexts := Map()
+global PinnedLinkIconCache := Map()
+global TextSourcePinIconCache := Map()
 global RecentItemPaths := Map()
 global PinnedPaths := []
+global TextSourcePinnedPaths := Map()
 global FolderSettings := []
 global Workspaces := []
 global ActiveWorkspaceId := ""
 global ActiveWorkspaceName := ""
 global WorkspaceSelector := 0
 global WorkspaceSelectorIds := []
+global ActiveWorkspaceType := WORKSPACE_TYPE_FILES
 global SettingsController := 0
 global MaxFilesPerFolder := 8
 global IncludeSubfolders := false
@@ -141,7 +161,11 @@ global ThumbnailSize := 96
 global ThumbnailHorizontalGap := 24
 global ThumbnailVerticalGap := 4
 global ThumbnailTextLines := 2
+global TextBlockCardWidth := 212
+global TextBlockCardHeight := 68
 global ThumbnailImageList := 0
+global ThumbnailImageListEdge := 0
+global ThumbnailIconCache := Map()
 global WindowWidth := 766
 global WindowHeight := 576
 global ViewMode := "Thumbnail"
@@ -169,6 +193,22 @@ global UiDropDownParentSubclassCallback := 0
 global UiDropDownSubclassedParents := Map()
 global ConfiguredHotkey := "F2"
 global ActiveHotkey := ""
+global ActiveWorkspaceHotkeys := Map()
+global WorkspaceHotkeyPressed := Map()
+global WorkspaceHotkeyLastDispatch := Map()
+global DoubleHotkeyWorkspaceId := ""
+global LastFileWorkspaceId := ""
+; The main shortcut is parsed as a gesture independently from panel state.
+; Keeping input collection separate from UI work prevents a fast second press
+; from being dropped while the first press is loading a workspace.
+global MainHotkeyFirstPressTick := 0
+global MainHotkeyGestureGeneration := 0
+global MainHotkeyRequestedAction := ""
+global MainHotkeyActionRunning := false
+global MainHotkeyAwaitRelease := false
+global MainHotkeyPhysicalKey := ""
+global MainHotkeyClosedTick := 0
+global CudaTextSystemCursorOverridden := false
 global PanelVisible := false
 global DragPaths := []
 global SelectedFilePaths := []
@@ -180,6 +220,9 @@ global DragItemContexts := []
 global ActiveInternalDragContext := 0
 global PinnedReorderActive := false
 global PinnedReorderPath := ""
+global TextSourceReorderActive := false
+global TextSourceReorderPath := ""
+global TextSourceReorderSourceId := ""
 global DropVTable := 0
 global DropCallbacks := []
 global DataVTable := 0
@@ -192,6 +235,13 @@ global DropTargetRegisteredHwnds := Map()
 global DropTargetRegistrationErrors := []
 global ActiveDropSession := 0
 global DropLeaveGeneration := 0
+; Incoming OLE drag/drop has a short gap after the mouse button is released
+; but before IDropTarget::Drop finishes.  Keep this state separate from the
+; generic auto-hide pause counter so native and AHK guards can distinguish a
+; real transfer from stale UI bookkeeping.
+global IncomingDropGestureActive := false
+global IncomingDropCommitActive := false
+global IncomingDropLastEventTick := 0
 global GroupDropTargets := Map()
 global DropFolderValidationCache := Map()
 global ActiveDropHighlightedGroup := 0
@@ -206,19 +256,52 @@ global CacheDir := ""
 global CacheFilePath := ""
 global CacheWritable := false
 global CacheWriteWarningShown := false
+global ScanCacheWritePending := false
+global RuntimeIndexModule := 0
+global RuntimeIndexDb := 0
+global RuntimeIndexPath := ""
+global RuntimeIndexAvailable := false
 global CurrentConfigFingerprint := ""
 global CurrentScanResult := {
     Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
+global CurrentHiddenBySource := Map()
 global ScanResultLoaded := false
+global WorkspaceScanSnapshots := Map()
+global PanelRenderSignature := ""
+global PanelRenderedWorkspaceId := ""
+global RecentRenderSignature := ""
 global WorkerRunning := false
 global WorkerPid := 0
 global WorkerGeneration := ""
+global WorkerWorkspaceId := ""
 global WorkerRequestPath := ""
 global WorkerReadyPath := ""
 global PendingRefresh := false
+global PendingFullRefresh := false
+global PendingScanSourceKeys := Map()
+global PendingIncludeRecent := false
+global WorkerAppliedSourceIndexes := Map()
+global WorkerRecentApplied := false
+global WorkerChanged := false
+global WorkerStatusToken := 0
 global ScanGeneration := 0
 global StatusKind := "default"
 global StatusTimerToken := 0
+global ConsistencyCheckHours := 2
+global ProcessStartedAt := A_Now
+global LastConsistencyBucket := 0
+global ConsistencyCheckPending := false
+global LastDailyCalibrationDate := ""
+global StartupCalibrationPending := true
+global SourceWatchers := Map()
+global SourceWatcherDefinitions := Map()
+global SourceWatcherSignature := ""
+global SourceWatcherDirtyKeys := Map()
+global SourceWatcherRecentDirty := false
+global SourceWatcherRefreshPending := false
+global SourceWatcherReopenDue := false
+global ThumbnailEnhanceQueue := []
+global ThumbnailEnhanceGeneration := 0
 global PanelIconHandle := 0
 global OpenApps := []
 global TransferFavorites := []
@@ -258,6 +341,15 @@ global SourceMenuDispatchActive := false
 global SourceRemovalDialog := 0
 global SettingsDialog := 0
 global EscapeHidesPanel := true
+global TextBlockSearchEdit := 0
+global TextBlockSearchQuery := ""
+global TextBlockSearchIndex := Map()
+global TextBlockSearchQueue := []
+global TextBlockSearchRefreshPending := false
+global TextBlockUsage := Map()
+global TextBlockReturnWindow := 0
+global TextBlockReturnFocus := 0
+global CudaTextDragCapture := 0
 
 #Include ConfigDocument.ahk
 #Include FileManager.ahk
@@ -285,22 +377,37 @@ global WINDOW_MODE_NORMAL        := "normal"
 
 global WindowMode := WINDOW_MODE_ALWAYS_ON_TOP
 global AutoHidePauseDepth := 0
+global AutoHidePanelShownTick := 0
+global AutoHideForegroundHook := 0
+global AutoHideForegroundCallback := 0
+global AUTO_HIDE_FOREGROUND_MESSAGE := 0x8031
+global AutoHideNativeTimerId := 0
+global AutoHideNativeTimerCallback := 0
+global AutoHideNativePanelHwnd := 0
+global AutoHideNativeTemporaryEnabled := false
+global AutoHideNativeShownTick := 0
+global AUTO_HIDE_NATIVE_HIDDEN_MESSAGE := 0x8032
 
 EnsureConfig()
 EnsureWorkspaceConfig()
 LoadSettings()
+InitTextBlocks()
 OnMessage(0x002B, DrawUiDropDownItem) ; WM_DRAWITEM
 OnMessage(0x002C, MeasureUiDropDownItem) ; WM_MEASUREITEM
 BuildPanel()
+OnClipboardChange(UpdateClipboardPinnedButton)
+UpdateClipboardPinnedButton()
 ApplyWindowIcon()
 ApplyWindowMode()
 InstallHotkey(ConfiguredHotkey)
+InstallWorkspaceHotkeys()
 BuildTrayMenu()
 InitDropSource()
 InitDropTarget()
 InitFileOperationProgressSink()
 InitExternalDrop()
 InstallPanelHotkeys()
+InitCudaTextIntegration()
 OnMessage(0x004A, QuickPreviewCopyData) ; WM_COPYDATA (Seer)
 OnMessage(0x0201, FileViewLeftButtonDown) ; WM_LBUTTONDOWN
 OnMessage(0x0200, FileViewMouseMove)      ; WM_MOUSEMOVE
@@ -308,6 +415,8 @@ OnMessage(0x0202, FileViewLeftButtonUp)   ; WM_LBUTTONUP
 OnMessage(0x0204, FileViewRightButtonDown) ; WM_RBUTTONDOWN
 OnMessage(0x0100, FileViewContextMenuKeyDown) ; WM_KEYDOWN
 OnMessage(0x0104, FileViewContextMenuKeyDown) ; WM_SYSKEYDOWN
+OnMessage(0x0102, TextBlockCharInput)          ; WM_CHAR direct filtering
+OnMessage(0x010D, TextBlockImeStart)           ; WM_IME_STARTCOMPOSITION
 OnMessage(0x020A, FileViewCancelInteraction) ; WM_MOUSEWHEEL
 OnMessage(0x020E, FileViewCancelInteraction) ; WM_MOUSEHWHEEL
 OnMessage(0x0114, FileViewCancelInteraction) ; WM_HSCROLL
@@ -317,6 +426,9 @@ OnMessage(0x001F, FileViewCancelMode)      ; WM_CANCELMODE
 OnMessage(0x0215, FileViewCaptureChanged)  ; WM_CAPTURECHANGED
 OnMessage(0x0008, FileViewKillFocus)       ; WM_KILLFOCUS
 OnMessage(0x0006, PanelActivationChanged) ; WM_ACTIVATE
+OnMessage(0x0218, PanelPowerBroadcast)    ; WM_POWERBROADCAST
+InitAutoHideForegroundHook()
+InitAutoHideNativeWatchdog()
 OnMessage(0x0216, PanelMovingOrSizing)      ; WM_MOVING
 OnMessage(0x0214, PanelMovingOrSizing)      ; WM_SIZING
 OnMessage(0x0232, PanelExitMoveSize)        ; WM_EXITSIZEMOVE
@@ -329,7 +441,11 @@ OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 #Include modules\OpenApps.ahk
 #Include modules\CoreUtilities.ahk
 #Include modules\UiControls.ahk
+#Include modules\TextBlocks.ahk
+#Include modules\CudaTextIntegration.ahk
 #Include modules\PanelUi.ahk
+#Include modules\SourceWatch.ahk
+#Include modules\RuntimeIndex.ahk
 #Include modules\ScanCache.ahk
 #Include modules\ItemActions.ahk
 #Include modules\ContextMenus.ahk

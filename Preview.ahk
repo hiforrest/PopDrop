@@ -17,6 +17,9 @@ global PreviewSide := "Auto"
 global PreviewHoverDelayMs := 350
 global PreviewSwitchDelayMs := 120
 global PreviewLeaveGraceMs := 140
+global PreviewPreviousHoldMs := 500
+global PreviewBackgroundColor := 0x00000000
+global PreviewBackgroundOpacity := 255
 global PreviewKeyboardDelayMs := 250
 global PreviewWidthDip := 400
 global PreviewCacheEnabled := true
@@ -65,6 +68,12 @@ global PreviewShutdownEvent := 0
 global PreviewHelperPid := 0
 global PreviewJobHandle := 0
 global PreviewObjectBase := ""
+; AutoHotkey low-numbered OnMessage callbacks may re-enter a timer even while
+; it is Critical. Keep the mapping alive explicitly while a header/pixel copy
+; is in progress; helper shutdown is deferred until the last reader leaves.
+global PreviewMapAccessDepth := 0
+global PreviewHelperClosePending := 0
+global PreviewHelperCloseRunning := false
 
 global PreviewWindow := 0
 global PreviewCanvasDc := 0
@@ -122,7 +131,9 @@ PreviewLooksLikeDocument(path) {
 LoadPreviewSettings(settingErrors := 0) {
     global ConfigPath
     global PreviewEnabled, PreviewSide, PreviewHoverDelayMs
-    global PreviewSwitchDelayMs, PreviewLeaveGraceMs, PreviewKeyboardDelayMs
+    global PreviewSwitchDelayMs, PreviewLeaveGraceMs, PreviewPreviousHoldMs
+    global PreviewBackgroundColor, PreviewBackgroundOpacity
+    global PreviewKeyboardDelayMs
     global PreviewWidthDip, PreviewCacheEnabled
     global PreviewCacheStartAfterHiddenSeconds, PreviewCacheMaxMB
     global PreviewCacheMaxItems, PreviewCacheItemMaxKB
@@ -136,6 +147,8 @@ LoadPreviewSettings(settingErrors := 0) {
     previousPdfEnabled := PreviewPdfEnabled
     previousSide := PreviewSide
     previousCacheEnabled := PreviewCacheEnabled
+    previousBackgroundColor := PreviewBackgroundColor
+    previousBackgroundOpacity := PreviewBackgroundOpacity
     rawSide := StrLower(Trim(IniRead(ConfigPath, "Preview", "Side",
         ConfigDefaultValue("Preview", "Side", "Auto"))))
     if rawSide = "right"
@@ -156,6 +169,18 @@ LoadPreviewSettings(settingErrors := 0) {
     PreviewLeaveGraceMs := PreviewReadInteger(
         "LeaveGraceMs", ConfigDefaultInteger("Preview", "LeaveGraceMs", 140),
         0, 1000, settingErrors)
+    PreviewPreviousHoldMs := PreviewReadInteger(
+        "PreviousPreviewHoldMs",
+        ConfigDefaultInteger("Preview", "PreviousPreviewHoldMs", 500),
+        0, 3000, settingErrors)
+    PreviewBackgroundColor := PreviewReadColor(
+        "BackgroundColor",
+        ConfigDefaultValue("Preview", "BackgroundColor", "#000000"),
+        settingErrors)
+    PreviewBackgroundOpacity := PreviewReadInteger(
+        "BackgroundOpacity",
+        ConfigDefaultInteger("Preview", "BackgroundOpacity", 255),
+        0, 255, settingErrors)
     PreviewKeyboardDelayMs := PreviewReadInteger(
         "KeyboardDelayMs", ConfigDefaultInteger("Preview", "KeyboardDelayMs", 250),
         50, 2000, settingErrors)
@@ -208,6 +233,8 @@ LoadPreviewSettings(settingErrors := 0) {
     if !enabledChanged
         && (previousSide != PreviewSide
             || previousCacheEnabled != PreviewCacheEnabled
+            || previousBackgroundColor != PreviewBackgroundColor
+            || previousBackgroundOpacity != PreviewBackgroundOpacity
             || previousDocumentEnabled != PreviewDocumentEnabled
             || previousPdfEnabled != PreviewPdfEnabled)
         PreviewSettingsChanged()
@@ -241,6 +268,27 @@ PreviewReadInteger(key, defaultValue, minimum, maximum, settingErrors := 0) {
         return defaultValue
     }
     return value
+}
+
+PreviewReadColor(key, defaultValue, settingErrors := 0) {
+    global ConfigPath
+    raw := Trim(IniRead(ConfigPath, "Preview", key, defaultValue))
+    color := PreviewColorRefFromText(raw, -1)
+    if color >= 0
+        return color
+    if IsObject(settingErrors)
+        settingErrors.Push("[Preview] " key
+            . " 必须为 #RRGGBB 格式，已恢复默认值。")
+    return PreviewColorRefFromText(defaultValue, 0x00000000)
+}
+
+PreviewColorRefFromText(text, fallback := 0x00000000) {
+    if !RegExMatch(Trim(text), "i)^#([0-9a-f]{6})$", &match)
+        return fallback
+    rgb := Integer("0x" match[1])
+    return ((rgb & 0x0000FF) << 16)
+        | (rgb & 0x00FF00)
+        | ((rgb & 0xFF0000) >> 16)
 }
 
 PreviewSettingsChanged() {
@@ -339,7 +387,9 @@ PreviewHandleMouseMove(hwnd, lParam) {
     y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
     screen := ClientToScreenPoint(hwnd, x, y)
     if !PreviewScreenPointHitsList(hwnd, screen.X, screen.Y) {
-        PreviewHide("covered", true)
+        ; A transient child/overlay hit while crossing card boundaries should
+        ; behave like list whitespace, not synchronously blank the preview.
+        PreviewScheduleLeave()
         return
     }
     row := HitTestListItemBounds(hwnd, x, y)
@@ -367,8 +417,11 @@ FileViewMouseLeave(wParam, lParam, msg, hwnd) {
 }
 
 PreviewScheduleLeave() {
-    global PreviewLeaveGraceMs
-    SetTimer(PreviewLeaveExpired, -PreviewLeaveGraceMs)
+    global PreviewLeaveGraceMs, PreviewPreviousHoldMs, PreviewSession
+    delay := PreviewLeaveGraceMs
+    if PreviewSession.State = "Visible" || PreviewSession.VisiblePath != ""
+        delay := Max(delay, PreviewPreviousHoldMs)
+    SetTimer(PreviewLeaveExpired, -Max(1, delay))
 }
 
 PreviewLeaveExpired() {
@@ -397,6 +450,7 @@ PreviewArmCandidate(path, hwnd, row, authority) {
     global PreviewSession, PreviewGeneration, PreviewListInstance
     global PreviewPanelSession, PreviewHoverDelayMs, PreviewSwitchDelayMs
     global PreviewKeyboardDelayMs, PreviewNegativeCache
+    global PreviewPreviousHoldMs
     if path = ""
         return
     if PreviewDocumentKindIgnoringSettings(path) != ""
@@ -435,7 +489,10 @@ PreviewArmCandidate(path, hwnd, row, authority) {
     delay := PreviewCandidateDelay(wasVisible, authority)
     SetTimer(PreviewIssueArmedRequest, -Max(1, delay))
     if wasVisible
-        SetTimer(PreviewExpireStaleContent, -150)
+        ; Keep the old frame until the replacement is ready, with a bounded
+        ; maximum so a failed/slow request cannot leave misleading content.
+        SetTimer(PreviewExpireStaleContent,
+            -Max(1, PreviewPreviousHoldMs))
 }
 
 PreviewFileStamp(path) {
@@ -622,10 +679,16 @@ PreviewEnsureHelper() {
     global PreviewResponseEvent, PreviewShutdownEvent, PreviewObjectBase
     global PreviewHelperPid, PreviewJobHandle, PREVIEW_MAP_BYTES
     global PREVIEW_PROTOCOL_VERSION, PreviewSessionDisabled
+    global PreviewMapAccessDepth, PreviewHelperCloseRunning
     if PreviewSessionDisabled
         return false
     if PreviewHelperPid && ProcessExist(PreviewHelperPid)
         return true
+    ; Never replace the global mapping while an interrupted response handler
+    ; still owns the previous one. Its deferred retry will start a helper once
+    ; that bounded access has completed.
+    if PreviewMapAccessDepth > 0 || PreviewHelperCloseRunning
+        return false
     PreviewCloseHelperObjects(false)
     token := Format("{:08X}{:08X}", A_TickCount,
         DllCall("kernel32\GetCurrentProcessId", "uint"))
@@ -652,10 +715,18 @@ PreviewEnsureHelper() {
         PreviewCloseHelperObjects(false)
         return false
     }
-    DllCall("ntdll\RtlZeroMemory", "ptr", PreviewMapView,
-        "uptr", PREVIEW_MAP_BYTES)
-    NumPut("uint", 0x56504450, PreviewMapView, 0) ; PDPV
-    NumPut("uint", PREVIEW_PROTOCOL_VERSION, PreviewMapView, 4)
+    access := PreviewBeginMapAccess()
+    try {
+        if !IsObject(access)
+            return false
+        mapView := access.View
+        if !mapView
+            return false
+        DllCall("ntdll\RtlZeroMemory", "ptr", mapView,
+            "uptr", PREVIEW_MAP_BYTES)
+        NumPut("uint", 0x56504450, mapView, 0) ; PDPV
+        NumPut("uint", PREVIEW_PROTOCOL_VERSION, mapView, 4)
+    } finally PreviewEndMapAccess(access)
     helperPath := A_ScriptDir "\native\bin\"
         . (A_PtrSize = 8 ? "x64" : "x86") "\PopDropPreview.exe"
     if !FileExist(helperPath) {
@@ -722,44 +793,52 @@ PreviewSendRequest(command, path) {
         NumGet(panelRect, 12, "int") - NumGet(panelRect, 4, "int"))
     requestedWidth := DllCall("kernel32\MulDiv",
         "int", PreviewWidthDip, "int", dpi, "int", 96, "int")
-    NumPut("uint", command, PreviewMapView, 8)
-    NumPut("uint", 0, PreviewMapView, 12)
-    NumPut("int64", PreviewGeneration, PreviewMapView, 16)
-    NumPut("int64", PreviewListInstance, PreviewMapView, 24)
-    NumPut("int64", PreviewPanelSession, PreviewMapView, 32)
-    NumPut("int64", requestId, PreviewMapView, 40)
     cacheEdge := Min(1024, panelHeight)
-    NumPut("uint", command != 1 ? cacheEdge : Min(1024, requestedWidth),
-        PreviewMapView, 48)
-    NumPut("uint", command != 1 ? cacheEdge : Min(1024, panelHeight),
-        PreviewMapView, 52)
-    NumPut("uint", PreviewDirectImageMaxFileMB, PreviewMapView, 56)
-    NumPut("uint", PreviewDirectImageMaxEdge, PreviewMapView, 60)
-    NumPut("uint", PreviewDirectImageMaxPixelsMP, PreviewMapView, 64)
-    NumPut("uint", PreviewDirectImageMaxExpandedMB, PreviewMapView, 68)
-    NumPut("uint", PreviewCacheEnabled ? 1 : 0, PreviewMapView, 72)
-    NumPut("uint", PreviewCacheMaxMB, PreviewMapView, 76)
-    NumPut("uint", PreviewCacheMaxItems, PreviewMapView, 80)
-    NumPut("uint", PreviewCacheItemMaxKB, PreviewMapView, 84)
-    NumPut("uint", PreviewCacheUnreferencedDays, PreviewMapView, 88)
-    NumPut("uint", cacheEdge, PreviewMapView, 92)
-    NumPut("uint", dpi, PreviewMapView, 96)
-    NumPut("uint", PreviewDocumentThemeVersion, PreviewMapView, 100)
-    StrPut(path, PreviewMapView + PREVIEW_PATH_OFFSET,
-        PREVIEW_PATH_CHARS, "UTF-16")
-    StrPut(CacheDir "\preview-cache-v1",
-        PreviewMapView + PREVIEW_CACHE_ROOT_OFFSET,
-        PREVIEW_CACHE_ROOT_CHARS, "UTF-16")
-    DllCall("kernel32\ResetEvent", "ptr", PreviewResponseEvent)
-    PreviewSession.State := command = 3 ? "DocumentGenerating" : "Loading"
-    PreviewSession.RequestId := requestId
-    PreviewSession.RequestStarted := A_TickCount
-    PreviewSession.Generation := PreviewGeneration
-    PreviewSession.ListInstance := PreviewListInstance
-    PreviewSession.PanelSession := PreviewPanelSession
-    PreviewSession.CacheCommand := command = 2
-    PreviewSession.DocumentGeneration := command = 3
-    DllCall("kernel32\SetEvent", "ptr", PreviewRequestEvent)
+    access := PreviewBeginMapAccess()
+    try {
+        if !IsObject(access)
+            return false
+        mapView := access.View
+        if !mapView || !PreviewResponseEvent || !PreviewRequestEvent
+            return false
+        NumPut("uint", command, mapView, 8)
+        NumPut("uint", 0, mapView, 12)
+        NumPut("int64", PreviewGeneration, mapView, 16)
+        NumPut("int64", PreviewListInstance, mapView, 24)
+        NumPut("int64", PreviewPanelSession, mapView, 32)
+        NumPut("int64", requestId, mapView, 40)
+        NumPut("uint", command != 1 ? cacheEdge : Min(1024, requestedWidth),
+            mapView, 48)
+        NumPut("uint", command != 1 ? cacheEdge : Min(1024, panelHeight),
+            mapView, 52)
+        NumPut("uint", PreviewDirectImageMaxFileMB, mapView, 56)
+        NumPut("uint", PreviewDirectImageMaxEdge, mapView, 60)
+        NumPut("uint", PreviewDirectImageMaxPixelsMP, mapView, 64)
+        NumPut("uint", PreviewDirectImageMaxExpandedMB, mapView, 68)
+        NumPut("uint", PreviewCacheEnabled ? 1 : 0, mapView, 72)
+        NumPut("uint", PreviewCacheMaxMB, mapView, 76)
+        NumPut("uint", PreviewCacheMaxItems, mapView, 80)
+        NumPut("uint", PreviewCacheItemMaxKB, mapView, 84)
+        NumPut("uint", PreviewCacheUnreferencedDays, mapView, 88)
+        NumPut("uint", cacheEdge, mapView, 92)
+        NumPut("uint", dpi, mapView, 96)
+        NumPut("uint", PreviewDocumentThemeVersion, mapView, 100)
+        StrPut(path, mapView + PREVIEW_PATH_OFFSET,
+            PREVIEW_PATH_CHARS, "UTF-16")
+        StrPut(CacheDir "\preview-cache-v1",
+            mapView + PREVIEW_CACHE_ROOT_OFFSET,
+            PREVIEW_CACHE_ROOT_CHARS, "UTF-16")
+        DllCall("kernel32\ResetEvent", "ptr", PreviewResponseEvent)
+        PreviewSession.State := command = 3 ? "DocumentGenerating" : "Loading"
+        PreviewSession.RequestId := requestId
+        PreviewSession.RequestStarted := A_TickCount
+        PreviewSession.Generation := PreviewGeneration
+        PreviewSession.ListInstance := PreviewListInstance
+        PreviewSession.PanelSession := PreviewPanelSession
+        PreviewSession.CacheCommand := command = 2
+        PreviewSession.DocumentGeneration := command = 3
+        DllCall("kernel32\SetEvent", "ptr", PreviewRequestEvent)
+    } finally PreviewEndMapAccess(access)
     SetTimer(PreviewPollResponse, 15)
     if command = 1 && PreviewLooksLikeDocument(path) {
         SetTimer(PreviewShowDocumentStatus, -120)
@@ -775,13 +854,13 @@ PreviewPollResponse() {
         SetTimer(PreviewPollResponse, 0)
         return
     }
-    if DllCall("kernel32\WaitForSingleObject",
-        "ptr", PreviewResponseEvent, "uint", 0, "uint") = 0 {
+    response := PreviewTakeResponseSnapshot()
+    if IsObject(response) {
         SetTimer(PreviewPollResponse, 0)
-        requestId := NumGet(PreviewMapView, 40, "int64")
-        generation := NumGet(PreviewMapView, 16, "int64")
-        listInstance := NumGet(PreviewMapView, 24, "int64")
-        panelSession := NumGet(PreviewMapView, 32, "int64")
+        requestId := response.RequestId
+        generation := response.Generation
+        listInstance := response.ListInstance
+        panelSession := response.PanelSession
         if requestId != PreviewSession.RequestId
             return
         if !PreviewGenerationMatches(
@@ -792,7 +871,7 @@ PreviewPollResponse() {
             }
             return
         }
-        status := NumGet(PreviewMapView, 12, "uint")
+        status := response.Status
         if PreviewSession.DocumentGeneration {
             PreviewFinishDocumentGeneration(status)
             return
@@ -815,17 +894,17 @@ PreviewPollResponse() {
             return
         }
         PreviewStopDocumentStatusTimers()
-        width := NumGet(PreviewMapView, 128, "uint")
-        height := NumGet(PreviewMapView, 132, "uint")
-        stride := NumGet(PreviewMapView, 136, "uint")
-        if !width || !height || stride < width * 4
-            || stride * height > PREVIEW_MAX_PIXEL_BYTES {
+        width := response.Width
+        height := response.Height
+        stride := response.Stride
+        if !IsObject(response.Pixels) {
             PreviewRememberFailure(PreviewSession.Path)
             PreviewHide("invalid-result", false)
             return
         }
-        sourceKind := NumGet(PreviewMapView, 140, "uint")
-        if PreviewPresentPixels(width, height, stride, sourceKind) {
+        sourceKind := response.SourceKind
+        if PreviewPresentPixels(
+            width, height, stride, sourceKind, response.Pixels) {
             PreviewSession.State := "Visible"
             PreviewSession.VisiblePath := PreviewSession.Path
             PreviewQueueHoverCache(PreviewSession.Path, sourceKind)
@@ -854,6 +933,61 @@ PreviewPollResponse() {
             PreviewHide("timeout", true)
         }
     }
+}
+
+PreviewTakeResponseSnapshot() {
+    global PreviewResponseEvent, PREVIEW_MAP_BYTES, PREVIEW_PIXEL_OFFSET
+    global PREVIEW_MAX_PIXEL_BYTES
+    access := PreviewBeginMapAccess()
+    try {
+        if !IsObject(access)
+            return 0
+        mapView := access.View
+        if !mapView || !PreviewResponseEvent
+            return 0
+        if DllCall("kernel32\WaitForSingleObject",
+            "ptr", PreviewResponseEvent, "uint", 0, "uint") != 0
+            return 0
+        response := {
+            Status: NumGet(mapView, 12, "uint"),
+            Generation: NumGet(mapView, 16, "int64"),
+            ListInstance: NumGet(mapView, 24, "int64"),
+            PanelSession: NumGet(mapView, 32, "int64"),
+            RequestId: NumGet(mapView, 40, "int64"),
+            Width: NumGet(mapView, 128, "uint"),
+            Height: NumGet(mapView, 132, "uint"),
+            Stride: NumGet(mapView, 136, "uint"),
+            SourceKind: NumGet(mapView, 140, "uint"),
+            Pixels: 0
+        }
+        if response.Status != 2
+            return response
+        if !PreviewPixelLayoutIsValid(
+            response.Width, response.Height, response.Stride)
+            return response
+        pixelBytes := response.Stride * response.Height
+        pixels := Buffer(pixelBytes, 0)
+        DllCall("ntdll\RtlMoveMemory", "ptr", pixels.Ptr,
+            "ptr", mapView + PREVIEW_PIXEL_OFFSET, "uptr", pixelBytes)
+        response.Pixels := pixels
+        return response
+    } finally PreviewEndMapAccess(access)
+}
+
+PreviewPixelLayoutIsValid(width, height, stride) {
+    global PREVIEW_MAX_PIXEL_BYTES, PREVIEW_MAP_BYTES, PREVIEW_PIXEL_OFFSET
+    if !width || !height || !stride
+        return false
+    ; Division-first bounds avoid trusting products derived from helper-owned
+    ; metadata, even though AutoHotkey uses signed 64-bit integers here.
+    if width > Floor(PREVIEW_MAX_PIXEL_BYTES / 4)
+        return false
+    widthBytes := width * 4
+    if stride < widthBytes
+        return false
+    available := Min(PREVIEW_MAX_PIXEL_BYTES,
+        PREVIEW_MAP_BYTES - PREVIEW_PIXEL_OFFSET)
+    return height <= Floor(available / stride)
 }
 
 PreviewRememberFailure(path, status := 3) {
@@ -1167,7 +1301,8 @@ PreviewBuildStatusCanvas(width, height, dpi, line1, line2, animated) {
     return true
 }
 
-PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride, sourceKind := 0) {
+PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride,
+    sourceKind := 0, sourcePixels := 0) {
     global Panel, PreviewSide, PreviewSession, PreviewWidthDip
     global PreviewMapView, PREVIEW_PIXEL_OFFSET, PreviewWindow
     global PreviewStatusRect
@@ -1235,7 +1370,8 @@ PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride, sourceKind := 0) {
         : panelLeft - gap - windowWidth
     y := Max(workTop, Min(panelTop, workBottom - windowHeight))
     if !PreviewBuildCanvas(windowWidth, windowHeight, padding,
-        drawWidth, drawHeight, sourceWidth, sourceHeight, sourceStride)
+        drawWidth, drawHeight, sourceWidth, sourceHeight, sourceStride,
+        sourcePixels, x, y)
         return false
     PreviewStatusRect := {X: x, Y: y, Width: windowWidth,
         Height: windowHeight, Dpi: dpi}
@@ -1251,95 +1387,238 @@ PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride, sourceKind := 0) {
 }
 
 PreviewBuildCanvas(windowWidth, windowHeight, padding, drawWidth, drawHeight,
-    sourceWidth, sourceHeight, sourceStride) {
-    global PreviewMapView, PREVIEW_PIXEL_OFFSET
+    sourceWidth, sourceHeight, sourceStride, sourcePixels, screenX, screenY) {
     global PreviewCanvasDc, PreviewCanvasBitmap, PreviewCanvasOldBitmap
     global PreviewCanvasWidth, PreviewCanvasHeight
-    PreviewReleaseCanvas()
-    screenDc := DllCall("user32\GetDC", "ptr", 0, "ptr")
-    PreviewCanvasDc := DllCall("gdi32\CreateCompatibleDC",
-        "ptr", screenDc, "ptr")
-    PreviewCanvasBitmap := DllCall("gdi32\CreateCompatibleBitmap",
-        "ptr", screenDc, "int", windowWidth, "int", windowHeight, "ptr")
-    DllCall("user32\ReleaseDC", "ptr", 0, "ptr", screenDc)
-    if !PreviewCanvasDc || !PreviewCanvasBitmap
+    global PreviewBackgroundColor, PreviewBackgroundOpacity
+    if !IsObject(sourcePixels)
         return false
-    PreviewCanvasOldBitmap := DllCall("gdi32\SelectObject",
-        "ptr", PreviewCanvasDc, "ptr", PreviewCanvasBitmap, "ptr")
-    PreviewCanvasWidth := windowWidth
-    PreviewCanvasHeight := windowHeight
-    rect := Buffer(16, 0)
-    NumPut("int", windowWidth, rect, 8)
-    NumPut("int", windowHeight, rect, 12)
-    background := DllCall("gdi32\CreateSolidBrush",
-        "uint", 0x00262626, "ptr")
-    DllCall("user32\FillRect", "ptr", PreviewCanvasDc,
-        "ptr", rect.Ptr, "ptr", background)
-    DllCall("gdi32\DeleteObject", "ptr", background)
-    imageX := Floor((windowWidth - drawWidth) / 2)
-    imageY := Floor((windowHeight - drawHeight) / 2)
-    tile := Max(6, Floor(padding))
-    row := 0
-    while row < drawHeight {
-        col := 0
-        while col < drawWidth {
-            color := (Mod(Floor(row / tile) + Floor(col / tile), 2) = 0)
-                ? 0x00D8D8D8 : 0x00B8B8B8
-            brush := DllCall("gdi32\CreateSolidBrush", "uint", color, "ptr")
-            cell := Buffer(16, 0)
-            NumPut("int", imageX + col, cell, 0)
-            NumPut("int", imageY + row, cell, 4)
-            NumPut("int", imageX + Min(drawWidth, col + tile), cell, 8)
-            NumPut("int", imageY + Min(drawHeight, row + tile), cell, 12)
-            DllCall("user32\FillRect", "ptr", PreviewCanvasDc,
-                "ptr", cell.Ptr, "ptr", brush)
-            DllCall("gdi32\DeleteObject", "ptr", brush)
-            col += tile
+    canvasDc := 0
+    canvasBitmap := 0
+    canvasOldBitmap := 0
+    sourceDc := 0
+    sourceBitmap := 0
+    oldSource := 0
+    patternDc := 0
+    patternBitmap := 0
+    patternOldBitmap := 0
+    checkerBrush := 0
+    lightBrush := 0
+    darkBrush := 0
+    border := 0
+    try {
+        screenDc := DllCall("user32\GetDC", "ptr", 0, "ptr")
+        canvasDc := DllCall("gdi32\CreateCompatibleDC",
+            "ptr", screenDc, "ptr")
+        canvasBitmap := DllCall("gdi32\CreateCompatibleBitmap",
+            "ptr", screenDc, "int", windowWidth, "int", windowHeight, "ptr")
+        DllCall("user32\ReleaseDC", "ptr", 0, "ptr", screenDc)
+        if !canvasDc || !canvasBitmap
+            return false
+        canvasOldBitmap := DllCall("gdi32\SelectObject",
+            "ptr", canvasDc, "ptr", canvasBitmap, "ptr")
+
+        ; Prepare the replacement image completely while the old frame stays
+        ; visible. Only the final desktop sample and composition occur during
+        ; the bounded hidden interval.
+        sourceInfo := Buffer(40, 0)
+        NumPut("uint", 40, sourceInfo, 0)
+        NumPut("int", sourceWidth, sourceInfo, 4)
+        NumPut("int", -sourceHeight, sourceInfo, 8)
+        NumPut("ushort", 1, sourceInfo, 12)
+        NumPut("ushort", 32, sourceInfo, 14)
+        NumPut("uint", 0, sourceInfo, 16)
+        sourceDc := DllCall("gdi32\CreateCompatibleDC",
+            "ptr", canvasDc, "ptr")
+        sourceBits := 0
+        sourceBitmap := DllCall("gdi32\CreateDIBSection", "ptr", sourceDc,
+            "ptr", sourceInfo.Ptr, "uint", 0, "ptr*", &sourceBits,
+            "ptr", 0, "uint", 0, "ptr")
+        if !sourceBitmap || !sourceBits
+            return false
+        oldSource := DllCall("gdi32\SelectObject",
+            "ptr", sourceDc, "ptr", sourceBitmap, "ptr")
+        destinationStride := sourceWidth * 4
+        Loop sourceHeight {
+            rowOffset := A_Index - 1
+            DllCall("ntdll\RtlMoveMemory",
+                "ptr", sourceBits + rowOffset * destinationStride,
+                "ptr", sourcePixels.Ptr + rowOffset * sourceStride,
+                "uptr", destinationStride)
         }
-        row += tile
-    }
-    sourceInfo := Buffer(40, 0)
-    NumPut("uint", 40, sourceInfo, 0)
-    NumPut("int", sourceWidth, sourceInfo, 4)
-    NumPut("int", -sourceHeight, sourceInfo, 8)
-    NumPut("ushort", 1, sourceInfo, 12)
-    NumPut("ushort", 32, sourceInfo, 14)
-    NumPut("uint", 0, sourceInfo, 16)
-    sourceDc := DllCall("gdi32\CreateCompatibleDC",
-        "ptr", PreviewCanvasDc, "ptr")
-    sourceBits := 0
-    sourceBitmap := DllCall("gdi32\CreateDIBSection", "ptr", sourceDc,
-        "ptr", sourceInfo.Ptr, "uint", 0, "ptr*", &sourceBits,
-        "ptr", 0, "uint", 0, "ptr")
-    if !sourceBitmap || !sourceBits {
+
+        ; Build one reusable 2x2 checker tile before hiding the old frame.
+        ; Filling the image area with a pattern brush is one GDI operation,
+        ; replacing thousands of per-cell FillRect calls in the hidden phase.
+        tile := Max(6, Floor(padding))
+        patternSize := tile * 2
+        patternDc := DllCall("gdi32\CreateCompatibleDC",
+            "ptr", canvasDc, "ptr")
+        patternBitmap := DllCall("gdi32\CreateCompatibleBitmap",
+            "ptr", canvasDc, "int", patternSize, "int", patternSize, "ptr")
+        if !patternDc || !patternBitmap
+            return false
+        patternOldBitmap := DllCall("gdi32\SelectObject",
+            "ptr", patternDc, "ptr", patternBitmap, "ptr")
+        lightBrush := DllCall("gdi32\CreateSolidBrush",
+            "uint", 0x00D8D8D8, "ptr")
+        darkBrush := DllCall("gdi32\CreateSolidBrush",
+            "uint", 0x00B8B8B8, "ptr")
+        patternRect := Buffer(16, 0)
+        NumPut("int", patternSize, patternRect, 8)
+        NumPut("int", patternSize, patternRect, 12)
+        DllCall("user32\FillRect", "ptr", patternDc,
+            "ptr", patternRect.Ptr, "ptr", lightBrush)
+        for cellOrigin in [{X: tile, Y: 0}, {X: 0, Y: tile}] {
+            cell := Buffer(16, 0)
+            NumPut("int", cellOrigin.X, cell, 0)
+            NumPut("int", cellOrigin.Y, cell, 4)
+            NumPut("int", cellOrigin.X + tile, cell, 8)
+            NumPut("int", cellOrigin.Y + tile, cell, 12)
+            DllCall("user32\FillRect", "ptr", patternDc,
+                "ptr", cell.Ptr, "ptr", darkBrush)
+        }
+        checkerBrush := DllCall("gdi32\CreatePatternBrush",
+            "ptr", patternBitmap, "ptr")
+        if !checkerBrush
+            return false
+
+        ; Opaque mode never samples the desktop and therefore never hides the
+        ; old preview during a switch. Translucent compatibility mode must
+        ; briefly hide it to avoid recursively capturing the preview itself.
+        if PreviewBackgroundOpacity < 255
+            PreviewHideWindowOnly()
+        PreviewPaintConfiguredBackground(canvasDc,
+            windowWidth, windowHeight, screenX, screenY,
+            PreviewBackgroundColor, PreviewBackgroundOpacity)
+        imageX := Floor((windowWidth - drawWidth) / 2)
+        imageY := Floor((windowHeight - drawHeight) / 2)
+        imageRect := Buffer(16, 0)
+        NumPut("int", imageX, imageRect, 0)
+        NumPut("int", imageY, imageRect, 4)
+        NumPut("int", imageX + drawWidth, imageRect, 8)
+        NumPut("int", imageY + drawHeight, imageRect, 12)
+        DllCall("user32\FillRect", "ptr", canvasDc,
+            "ptr", imageRect.Ptr, "ptr", checkerBrush)
+        blend := Buffer(4, 0)
+        NumPut("uchar", 255, blend, 2)
+        NumPut("uchar", 1, blend, 3) ; AC_SRC_ALPHA
+        DllCall("msimg32\AlphaBlend", "ptr", canvasDc,
+            "int", imageX, "int", imageY, "int", drawWidth, "int", drawHeight,
+            "ptr", sourceDc, "int", 0, "int", 0,
+            "int", sourceWidth, "int", sourceHeight,
+            "uint", NumGet(blend, 0, "uint"))
+        rect := Buffer(16, 0)
+        NumPut("int", windowWidth, rect, 8)
+        NumPut("int", windowHeight, rect, 12)
+        border := DllCall("gdi32\CreateSolidBrush",
+            "uint", 0x00505050, "ptr")
+        DllCall("user32\FrameRect", "ptr", canvasDc,
+            "ptr", rect.Ptr, "ptr", border)
+
+        ; Atomic canvas swap: WM_PAINT sees either the complete old frame or
+        ; the complete new frame, never a partially constructed bitmap.
+        previousCanvasDc := PreviewCanvasDc
+        previousCanvasBitmap := PreviewCanvasBitmap
+        previousCanvasOldBitmap := PreviewCanvasOldBitmap
+        PreviewCanvasDc := canvasDc
+        PreviewCanvasBitmap := canvasBitmap
+        PreviewCanvasOldBitmap := canvasOldBitmap
+        PreviewCanvasWidth := windowWidth
+        PreviewCanvasHeight := windowHeight
+        canvasDc := 0
+        canvasBitmap := 0
+        canvasOldBitmap := 0
+        PreviewReleaseCanvasObjects(previousCanvasDc,
+            previousCanvasBitmap, previousCanvasOldBitmap)
+        return true
+    } finally {
+        if sourceDc && oldSource
+            DllCall("gdi32\SelectObject", "ptr", sourceDc,
+                "ptr", oldSource)
+        if sourceBitmap
+            DllCall("gdi32\DeleteObject", "ptr", sourceBitmap)
         if sourceDc
             DllCall("gdi32\DeleteDC", "ptr", sourceDc)
-        return false
+        if patternDc && patternOldBitmap
+            DllCall("gdi32\SelectObject", "ptr", patternDc,
+                "ptr", patternOldBitmap)
+        if checkerBrush {
+            DllCall("gdi32\DeleteObject", "ptr", checkerBrush)
+            checkerBrush := 0
+        }
+        if patternBitmap
+            DllCall("gdi32\DeleteObject", "ptr", patternBitmap)
+        if patternDc
+            DllCall("gdi32\DeleteDC", "ptr", patternDc)
+        for object in [checkerBrush, lightBrush, darkBrush, border] {
+            if object
+                DllCall("gdi32\DeleteObject", "ptr", object)
+        }
+        if canvasDc && canvasOldBitmap
+            DllCall("gdi32\SelectObject", "ptr", canvasDc,
+                "ptr", canvasOldBitmap)
+        if canvasBitmap
+            DllCall("gdi32\DeleteObject", "ptr", canvasBitmap)
+        if canvasDc
+            DllCall("gdi32\DeleteDC", "ptr", canvasDc)
     }
-    oldSource := DllCall("gdi32\SelectObject",
-        "ptr", sourceDc, "ptr", sourceBitmap, "ptr")
-    DllCall("ntdll\RtlMoveMemory", "ptr", sourceBits,
-        "ptr", PreviewMapView + PREVIEW_PIXEL_OFFSET,
-        "uptr", sourceStride * sourceHeight)
+}
+
+PreviewPaintConfiguredBackground(targetDc, width, height,
+    screenX, screenY, color, opacity) {
+    rect := Buffer(16, 0)
+    NumPut("int", width, rect, 8)
+    NumPut("int", height, rect, 12)
+    fallbackBrush := DllCall("gdi32\CreateSolidBrush",
+        "uint", color, "ptr")
+    DllCall("user32\FillRect", "ptr", targetDc,
+        "ptr", rect.Ptr, "ptr", fallbackBrush)
+    DllCall("gdi32\DeleteObject", "ptr", fallbackBrush)
+    if opacity >= 255
+        return
+
+    screenDc := DllCall("user32\GetDC", "ptr", 0, "ptr")
+    if screenDc {
+        DllCall("gdi32\BitBlt", "ptr", targetDc,
+            "int", 0, "int", 0, "int", width, "int", height,
+            "ptr", screenDc, "int", screenX, "int", screenY,
+            "uint", 0x40CC0020, "int") ; SRCCOPY | CAPTUREBLT
+        DllCall("user32\ReleaseDC", "ptr", 0, "ptr", screenDc)
+    }
+
+    shadeDc := DllCall("gdi32\CreateCompatibleDC",
+        "ptr", targetDc, "ptr")
+    shadeBitmap := shadeDc
+        ? DllCall("gdi32\CreateCompatibleBitmap", "ptr", targetDc,
+            "int", 1, "int", 1, "ptr") : 0
+    if !shadeDc || !shadeBitmap {
+        if shadeBitmap
+            DllCall("gdi32\DeleteObject", "ptr", shadeBitmap)
+        if shadeDc
+            DllCall("gdi32\DeleteDC", "ptr", shadeDc)
+        return
+    }
+    oldShade := DllCall("gdi32\SelectObject", "ptr", shadeDc,
+        "ptr", shadeBitmap, "ptr")
+    pixelRect := Buffer(16, 0)
+    NumPut("int", 1, pixelRect, 8)
+    NumPut("int", 1, pixelRect, 12)
+    shadeBrush := DllCall("gdi32\CreateSolidBrush",
+        "uint", color, "ptr")
+    DllCall("user32\FillRect", "ptr", shadeDc,
+        "ptr", pixelRect.Ptr, "ptr", shadeBrush)
+    DllCall("gdi32\DeleteObject", "ptr", shadeBrush)
     blend := Buffer(4, 0)
-    NumPut("uchar", 0, blend, 0)
-    NumPut("uchar", 0, blend, 1)
-    NumPut("uchar", 255, blend, 2)
-    NumPut("uchar", 1, blend, 3) ; AC_SRC_ALPHA
-    blendValue := NumGet(blend, 0, "uint")
-    DllCall("msimg32\AlphaBlend", "ptr", PreviewCanvasDc,
-        "int", imageX, "int", imageY, "int", drawWidth, "int", drawHeight,
-        "ptr", sourceDc, "int", 0, "int", 0,
-        "int", sourceWidth, "int", sourceHeight, "uint", blendValue)
-    DllCall("gdi32\SelectObject", "ptr", sourceDc, "ptr", oldSource)
-    DllCall("gdi32\DeleteObject", "ptr", sourceBitmap)
-    DllCall("gdi32\DeleteDC", "ptr", sourceDc)
-    border := DllCall("gdi32\CreateSolidBrush",
-        "uint", 0x00505050, "ptr")
-    DllCall("user32\FrameRect", "ptr", PreviewCanvasDc,
-        "ptr", rect.Ptr, "ptr", border)
-    DllCall("gdi32\DeleteObject", "ptr", border)
-    return true
+    NumPut("uchar", Max(0, Min(255, opacity)), blend, 2)
+    DllCall("msimg32\AlphaBlend", "ptr", targetDc,
+        "int", 0, "int", 0, "int", width, "int", height,
+        "ptr", shadeDc, "int", 0, "int", 0, "int", 1, "int", 1,
+        "uint", NumGet(blend, 0, "uint"), "int")
+    DllCall("gdi32\SelectObject", "ptr", shadeDc,
+        "ptr", oldShade, "ptr")
+    DllCall("gdi32\DeleteObject", "ptr", shadeBitmap)
+    DllCall("gdi32\DeleteDC", "ptr", shadeDc)
 }
 
 PreviewEnsureWindow() {
@@ -1397,18 +1676,23 @@ PreviewHideWindowOnly() {
 PreviewReleaseCanvas() {
     global PreviewCanvasDc, PreviewCanvasBitmap, PreviewCanvasOldBitmap
     global PreviewCanvasWidth, PreviewCanvasHeight
-    if PreviewCanvasDc && PreviewCanvasOldBitmap
-        DllCall("gdi32\SelectObject", "ptr", PreviewCanvasDc,
-            "ptr", PreviewCanvasOldBitmap)
-    if PreviewCanvasBitmap
-        DllCall("gdi32\DeleteObject", "ptr", PreviewCanvasBitmap)
-    if PreviewCanvasDc
-        DllCall("gdi32\DeleteDC", "ptr", PreviewCanvasDc)
+    PreviewReleaseCanvasObjects(PreviewCanvasDc,
+        PreviewCanvasBitmap, PreviewCanvasOldBitmap)
     PreviewCanvasDc := 0
     PreviewCanvasBitmap := 0
     PreviewCanvasOldBitmap := 0
     PreviewCanvasWidth := 0
     PreviewCanvasHeight := 0
+}
+
+PreviewReleaseCanvasObjects(canvasDc, canvasBitmap, oldBitmap) {
+    if canvasDc && oldBitmap
+        DllCall("gdi32\SelectObject", "ptr", canvasDc,
+            "ptr", oldBitmap)
+    if canvasBitmap
+        DllCall("gdi32\DeleteObject", "ptr", canvasBitmap)
+    if canvasDc
+        DllCall("gdi32\DeleteDC", "ptr", canvasDc)
 }
 
 PreviewQueueHoverCache(path, sourceKind) {
@@ -1530,25 +1814,23 @@ PreviewCancelCacheHard(requestId) {
 PreviewCloseHelperObjects(signalShutdown := true) {
     global PreviewMapHandle, PreviewMapView, PreviewRequestEvent
     global PreviewResponseEvent, PreviewShutdownEvent, PreviewHelperPid
-    global PreviewJobHandle
-    if signalShutdown && PreviewShutdownEvent
-        DllCall("kernel32\SetEvent", "ptr", PreviewShutdownEvent)
-    if signalShutdown && PreviewHelperPid {
-        process := DllCall("kernel32\OpenProcess",
-            "uint", 0x00100000, "int", 0, "uint", PreviewHelperPid, "ptr")
-        if process {
-            DllCall("kernel32\WaitForSingleObject",
-                "ptr", process, "uint", 300, "uint")
-            DllCall("kernel32\CloseHandle", "ptr", process)
-        }
+    global PreviewJobHandle, PreviewMapAccessDepth
+    global PreviewHelperClosePending, PreviewHelperCloseRunning
+    if PreviewMapAccessDepth > 0 || PreviewHelperCloseRunning {
+        PreviewHelperClosePending := Max(PreviewHelperClosePending,
+            signalShutdown ? 2 : 1)
+        return
     }
-    if PreviewMapView
-        DllCall("kernel32\UnmapViewOfFile", "ptr", PreviewMapView)
-    for handle in [PreviewRequestEvent, PreviewResponseEvent,
-        PreviewShutdownEvent, PreviewMapHandle, PreviewJobHandle] {
-        if handle
-            DllCall("kernel32\CloseHandle", "ptr", handle)
-    }
+    PreviewHelperCloseRunning := true
+    ; Publish the detached state before any Win32 cleanup. Re-entrant mouse
+    ; messages can no longer begin an access to handles being destroyed.
+    mapView := PreviewMapView
+    requestEvent := PreviewRequestEvent
+    responseEvent := PreviewResponseEvent
+    shutdownEvent := PreviewShutdownEvent
+    mapHandle := PreviewMapHandle
+    jobHandle := PreviewJobHandle
+    helperPid := PreviewHelperPid
     PreviewMapHandle := 0
     PreviewMapView := 0
     PreviewRequestEvent := 0
@@ -1556,6 +1838,55 @@ PreviewCloseHelperObjects(signalShutdown := true) {
     PreviewShutdownEvent := 0
     PreviewHelperPid := 0
     PreviewJobHandle := 0
+    if signalShutdown && shutdownEvent
+        DllCall("kernel32\SetEvent", "ptr", shutdownEvent)
+    if signalShutdown && helperPid {
+        process := DllCall("kernel32\OpenProcess",
+            "uint", 0x00100000, "int", 0, "uint", helperPid, "ptr")
+        if process {
+            DllCall("kernel32\WaitForSingleObject",
+                "ptr", process, "uint", 300, "uint")
+            DllCall("kernel32\CloseHandle", "ptr", process)
+        }
+    }
+    if mapView
+        DllCall("kernel32\UnmapViewOfFile", "ptr", mapView)
+    for handle in [requestEvent, responseEvent,
+        shutdownEvent, mapHandle, jobHandle] {
+        if handle
+            DllCall("kernel32\CloseHandle", "ptr", handle)
+    }
+    PreviewHelperCloseRunning := false
+    pending := PreviewHelperClosePending
+    PreviewHelperClosePending := 0
+    if pending
+        SetTimer(PreviewCloseHelperObjects.Bind(pending = 2), -1)
+}
+
+PreviewBeginMapAccess() {
+    global PreviewMapAccessDepth, PreviewMapView
+    if PreviewMapAccessDepth > 0
+        return 0
+    previousCritical := A_IsCritical
+    Critical("On")
+    PreviewMapAccessDepth := 1
+    return {View: PreviewMapView,
+        PreviousCritical: previousCritical, Active: true}
+}
+
+PreviewEndMapAccess(access) {
+    global PreviewMapAccessDepth, PreviewHelperClosePending
+    if !IsObject(access) || !access.Active
+        return
+    access.Active := false
+    PreviewMapAccessDepth := 0
+    previousCritical := access.PreviousCritical
+    Critical(previousCritical)
+    if PreviewMapAccessDepth || !PreviewHelperClosePending
+        return
+    pending := PreviewHelperClosePending
+    PreviewHelperClosePending := 0
+    SetTimer(PreviewCloseHelperObjects.Bind(pending = 2), -1)
 }
 
 CleanupPreview() {
@@ -1579,6 +1910,10 @@ RunPreviewSelfTests() {
         "预览切换默认 120ms")
     AssertSelfTest(PreviewCandidateDelay(false, "keyboard") = 250,
         "预览键盘默认 250ms")
+    AssertSelfTest(PreviewColorRefFromText("#112233", -1) = 0x00332211,
+        "预览背景 RGB 正确转换为 GDI COLORREF")
+    AssertSelfTest(PreviewColorRefFromText("112233", -1) = -1,
+        "预览背景颜色拒绝无 # 的格式")
     AssertSelfTest(PreviewLooksLikeImage("C:\Temp\photo.JPEG"),
         "图片候选扩展名大小写不敏感")
     AssertSelfTest(!PreviewLooksLikeImage("C:\Temp\document.pdf"),
@@ -1606,4 +1941,12 @@ RunPreviewSelfTests() {
     AssertSelfTest(!PreviewGenerationMatches(
         generation, listInstance, panelSession + 1),
         "旧面板显示会话失效")
+    AssertSelfTest(PreviewPixelLayoutIsValid(320, 200, 1280),
+        "紧密 32 位预览像素布局有效")
+    AssertSelfTest(PreviewPixelLayoutIsValid(319, 200, 1280),
+        "带来源行填充的预览像素布局有效")
+    AssertSelfTest(!PreviewPixelLayoutIsValid(320, 200, 1279),
+        "短于可见像素宽度的来源行被拒绝")
+    AssertSelfTest(!PreviewPixelLayoutIsValid(65535, 65535, 262140),
+        "超过共享映射容量的预览布局被拒绝")
 }

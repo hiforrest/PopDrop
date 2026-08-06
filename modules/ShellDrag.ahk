@@ -80,7 +80,8 @@ BeginMultiShellDrag(paths, ownerHwnd) {
     NumPut("uint", 1, dataObject, A_PtrSize)
     ; Keep the backing Buffer alive for as long as any drop target retains an
     ; IDataObject reference (some targets finish transfer asynchronously).
-    DragDataObjects[dataObject.Ptr] := {Memory: dataObject, Paths: paths}
+    DragDataObjects[dataObject.Ptr] := {
+        Memory: dataObject, Kind: "Files", Paths: paths}
 
     dropSource := Buffer(A_PtrSize + 8, 0)
     NumPut("ptr", DropVTable.Ptr, dropSource, 0)
@@ -94,6 +95,48 @@ BeginMultiShellDrag(paths, ownerHwnd) {
     } finally {
         DataRelease(dataObject.Ptr)
     }
+}
+
+BeginTextDrag(text, ownerHwnd, paths := 0, itemContexts := 0) {
+    global DropVTable, DataVTable, DragDataObjects
+    global ActiveInternalDragContext
+    if text = ""
+        throw Error("所选文本块没有可拖出的正文。")
+    BeginAutoHidePause()
+    dataObject := Buffer(A_PtrSize + 8, 0)
+    NumPut("ptr", DataVTable.Ptr, dataObject, 0)
+    NumPut("uint", 1, dataObject, A_PtrSize)
+    DragDataObjects[dataObject.Ptr] := {
+        Memory: dataObject, Kind: "Text", Text: text}
+    dropSource := Buffer(A_PtrSize + 8, 0)
+    NumPut("ptr", DropVTable.Ptr, dropSource, 0)
+    NumPut("uint", 1, dropSource, A_PtrSize)
+    effect := 0
+    if IsObject(paths) && paths.Length
+        ActiveInternalDragContext := {
+            Token: A_TickCount "-text-"
+                . DllCall("kernel32\GetCurrentProcessId", "uint"),
+            Items: IsObject(itemContexts) ? itemContexts : [],
+            Paths: paths.Clone()}
+    try {
+        ; Inbox drafts can be moved into a PopDrop text source. Other text
+        ; drags remain COPY-only, preserving external editor semantics and
+        ; preventing ordinary fixed references from being moved implicitly.
+        allowedEffects := IsObject(paths) && paths.Length
+            && AllTextBlockDraftPaths(paths) ? 0x3 : 0x1
+        dragResult := DllCall("ole32\DoDragDrop", "ptr", dataObject.Ptr,
+            "ptr", dropSource.Ptr, "uint", allowedEffects,
+            "uint*", &effect, "int")
+        if TryCudaTextPasteDrop(text, dragResult, effect)
+            effect := 1
+    }
+    finally {
+        ActiveInternalDragContext := 0
+        DataRelease(dataObject.Ptr)
+        KeepTemporaryPanelVisibleAfterDrag()
+        EndAutoHidePause()
+    }
+    return effect
 }
 
 DataQueryInterface(this, iid, objectOut) {
@@ -127,16 +170,27 @@ DataRelease(this) {
 
 DataGetData(this, formatEtc, medium) {
     global DragDataObjects
-    if !DragDataObjects.Has(this) || !IsHDropFormat(formatEtc)
+    if !DragDataObjects.Has(this)
         return 0x80040064 ; DV_E_FORMATETC
-
-    hDrop := CreateHDrop(DragDataObjects[this].Paths)
-    if !hDrop
+    state := DragDataObjects[this]
+    if state.Kind = "Text" {
+        if IsUnicodeTextFormat(formatEtc)
+            payload := CreateUnicodeTextHGlobal(state.Text)
+        else if IsAnsiTextFormat(formatEtc)
+            payload := CreateAnsiTextHGlobal(state.Text)
+        else
+            return 0x80040064
+    } else {
+        if !IsHDropFormat(formatEtc)
+            return 0x80040064
+        payload := CreateHDrop(state.Paths)
+    }
+    if !payload
         return 0x8007000E ; E_OUTOFMEMORY
     NumPut("uint", 1, medium, 0) ; TYMED_HGLOBAL
     unionOffset := A_PtrSize = 8 ? 8 : 4
     releaseOffset := A_PtrSize = 8 ? 16 : 8
-    NumPut("ptr", hDrop, medium, unionOffset)
+    NumPut("ptr", payload, medium, unionOffset)
     NumPut("ptr", 0, medium, releaseOffset)
     return 0 ; S_OK; the recipient owns hDrop via ReleaseStgMedium
 }
@@ -146,7 +200,14 @@ DataGetDataHere(this, formatEtc, medium) {
 }
 
 DataQueryGetData(this, formatEtc) {
-    return IsHDropFormat(formatEtc) ? 0 : 0x80040064 ; S_OK / DV_E_FORMATETC
+    global DragDataObjects
+    if !DragDataObjects.Has(this)
+        return 0x80040064
+    state := DragDataObjects[this]
+    supported := state.Kind = "Text"
+        ? (IsUnicodeTextFormat(formatEtc)
+            || IsAnsiTextFormat(formatEtc)) : IsHDropFormat(formatEtc)
+    return supported ? 0 : 0x80040064 ; S_OK / DV_E_FORMATETC
 }
 
 DataGetCanonicalFormatEtc(this, formatIn, formatOut) {
@@ -160,18 +221,104 @@ DataSetData(this, formatEtc, medium, release) {
 }
 
 DataEnumFormatEtc(this, direction, enumOut) {
+    global DragDataObjects
     if direction != 1 { ; DATADIR_GET
         NumPut("ptr", 0, enumOut)
         return 0x80004001 ; E_NOTIMPL
     }
     formatSize := A_PtrSize = 8 ? 32 : 20
-    formatEtc := Buffer(formatSize, 0)
-    FillHDropFormat(formatEtc.Ptr)
+    if !DragDataObjects.Has(this) {
+        NumPut("ptr", 0, enumOut)
+        return 0x80040064
+    }
+    formatCount := DragDataObjects[this].Kind = "Text" ? 2 : 1
+    formatEtc := Buffer(formatSize * formatCount, 0)
+    if DragDataObjects[this].Kind = "Text" {
+        FillUnicodeTextFormat(formatEtc.Ptr)
+        FillAnsiTextFormat(formatEtc.Ptr + formatSize)
+    } else
+        FillHDropFormat(formatEtc.Ptr)
     enumerator := 0
-    hr := DllCall("shell32\SHCreateStdEnumFmtEtc", "uint", 1,
+    hr := DllCall("shell32\SHCreateStdEnumFmtEtc", "uint", formatCount,
         "ptr", formatEtc.Ptr, "ptr*", &enumerator, "int")
     NumPut("ptr", enumerator, enumOut)
     return hr
+}
+
+IsUnicodeTextFormat(formatEtc) {
+    if !formatEtc
+        return false
+    aspectOffset := A_PtrSize = 8 ? 16 : 8
+    indexOffset := A_PtrSize = 8 ? 20 : 12
+    tymedOffset := A_PtrSize = 8 ? 24 : 16
+    return NumGet(formatEtc + 0, "ushort") = 13
+        && NumGet(formatEtc + aspectOffset, "uint") = 1
+        && NumGet(formatEtc + indexOffset, "int") = -1
+        && (NumGet(formatEtc + tymedOffset, "uint") & 1)
+}
+
+IsAnsiTextFormat(formatEtc) {
+    if !formatEtc
+        return false
+    aspectOffset := A_PtrSize = 8 ? 16 : 8
+    indexOffset := A_PtrSize = 8 ? 20 : 12
+    tymedOffset := A_PtrSize = 8 ? 24 : 16
+    return NumGet(formatEtc + 0, "ushort") = 1
+        && NumGet(formatEtc + aspectOffset, "uint") = 1
+        && NumGet(formatEtc + indexOffset, "int") = -1
+        && (NumGet(formatEtc + tymedOffset, "uint") & 1)
+}
+
+FillUnicodeTextFormat(formatEtc) {
+    aspectOffset := A_PtrSize = 8 ? 16 : 8
+    indexOffset := A_PtrSize = 8 ? 20 : 12
+    tymedOffset := A_PtrSize = 8 ? 24 : 16
+    NumPut("ushort", 13, formatEtc, 0)
+    NumPut("uint", 1, formatEtc, aspectOffset)
+    NumPut("int", -1, formatEtc, indexOffset)
+    NumPut("uint", 1, formatEtc, tymedOffset)
+}
+
+FillAnsiTextFormat(formatEtc) {
+    aspectOffset := A_PtrSize = 8 ? 16 : 8
+    indexOffset := A_PtrSize = 8 ? 20 : 12
+    tymedOffset := A_PtrSize = 8 ? 24 : 16
+    NumPut("ushort", 1, formatEtc, 0) ; CF_TEXT
+    NumPut("uint", 1, formatEtc, aspectOffset)
+    NumPut("int", -1, formatEtc, indexOffset)
+    NumPut("uint", 1, formatEtc, tymedOffset)
+}
+
+CreateUnicodeTextHGlobal(text) {
+    bytes := (StrLen(text) + 1) * 2
+    handle := DllCall("kernel32\GlobalAlloc", "uint", 0x42,
+        "uptr", bytes, "ptr")
+    if !handle
+        return 0
+    memory := DllCall("kernel32\GlobalLock", "ptr", handle, "ptr")
+    if !memory {
+        DllCall("kernel32\GlobalFree", "ptr", handle)
+        return 0
+    }
+    StrPut(text, memory, StrLen(text) + 1, "UTF-16")
+    DllCall("kernel32\GlobalUnlock", "ptr", handle)
+    return handle
+}
+
+CreateAnsiTextHGlobal(text) {
+    bytes := StrPut(text, "CP0")
+    handle := DllCall("kernel32\GlobalAlloc", "uint", 0x42,
+        "uptr", bytes, "ptr")
+    if !handle
+        return 0
+    memory := DllCall("kernel32\GlobalLock", "ptr", handle, "ptr")
+    if !memory {
+        DllCall("kernel32\GlobalFree", "ptr", handle)
+        return 0
+    }
+    StrPut(text, memory, bytes, "CP0")
+    DllCall("kernel32\GlobalUnlock", "ptr", handle)
+    return handle
 }
 
 DataDAdvise(this, formatEtc, flags, adviseSink, connectionOut) {

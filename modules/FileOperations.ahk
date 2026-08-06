@@ -396,6 +396,12 @@ PerformRecycleDelete(paths) {
                 "项目已移入回收站，但固定项配置更新失败：`n"
                 . err.Message "`n`n请检查 config.ini。",
                 "固定项更新失败", "Icon!")
+        try RemoveDeletedTextSourcePinnedPaths(state.DeletedPaths)
+        catch as err
+            ShowPanelMsgBox(
+                "项目已移入回收站，但文件夹内置顶配置更新失败：`n"
+                . err.Message "`n`n请检查 config.ini。",
+                "置顶配置更新失败", "Icon!")
         QueueSingleRefreshAfterFileOperation(viewState, Map())
         refreshQueued := true
         if totalFailures {
@@ -678,7 +684,7 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
     if state.Changed {
         pinnedUpdateFailed := false
         if operation = "move" && state.Mappings.Count {
-            try UpdatePinnedPathsAfterMove(state.Mappings)
+            try UpdatePinnedPathsAfterMove(state.Mappings, operationContext)
             catch as err {
                 pinnedUpdateFailed := true
                 ShowPanelMsgBox("文件已移动，但固定项路径保存失败：`n"
@@ -845,8 +851,10 @@ WriteTransferTargetsConfig(tempPath) {
     doc.Save()
 }
 
-UpdatePinnedPathsAfterMove(mappings) {
+UpdatePinnedPathsAfterMove(mappings, operationContext := 0) {
     global Workspaces, ActiveWorkspaceId, PinnedPaths
+    try UpdateTextBlockUsagePaths(mappings)
+    UpdateTextSourcePinnedPathsAfterMove(mappings)
     snapshots := []
     changed := false
     for workspace in Workspaces {
@@ -854,13 +862,22 @@ UpdatePinnedPathsAfterMove(mappings) {
             Workspace: workspace,
             Paths: workspace.PinnedPaths.Clone()
         })
-        for index, pinnedPath in workspace.PinnedPaths {
+        updatedPaths := []
+        for pinnedPath in workspace.PinnedPaths {
+            if ShouldRemoveMovedPinnedPath(
+                workspace.Id, pinnedPath, mappings, operationContext) {
+                changed := true
+                continue
+            }
             mappedPath := ResolveMovedPathMapping(pinnedPath, mappings)
             if mappedPath != "" && !(pinnedPath == mappedPath) {
-                workspace.PinnedPaths[index] := mappedPath
+                updatedPaths.Push(mappedPath)
                 changed := true
-            }
+            } else
+                updatedPaths.Push(pinnedPath)
         }
+        if !PathArraysEqual(workspace.PinnedPaths, updatedPaths)
+            workspace.PinnedPaths := updatedPaths
     }
     if !changed
         return
@@ -876,6 +893,21 @@ UpdatePinnedPathsAfterMove(mappings) {
             PinnedPaths := active.Value.PinnedPaths
         throw err
     }
+}
+
+ShouldRemoveMovedPinnedPath(workspaceId, pinnedPath, mappings,
+    operationContext) {
+    if !IsObject(operationContext)
+        || !HasProp(operationContext, "RemoveMovedPinsWorkspaceId")
+        || !HasProp(operationContext, "RemoveMovedPinnedPaths")
+        || StrLower(workspaceId)
+            != StrLower(operationContext.RemoveMovedPinsWorkspaceId)
+        || !ArrayContainsPath(operationContext.RemoveMovedPinnedPaths,
+            pinnedPath)
+        return false
+    ; Only successful Shell mappings are removed. Cancelled or failed items
+    ; remain pinned and visible for retry.
+    return mappings.Has(PathKey(pinnedPath))
 }
 
 ResolveMovedPathMapping(path, mappings) {

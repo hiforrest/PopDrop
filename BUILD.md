@@ -1,10 +1,12 @@
 # PopDrop 构建与验证
 
 PopDrop 主程序使用 AutoHotkey v2；外部内容投放和文件预览 helper 使用 Windows C++。
+当前源码版本为 v1.1.0，配置版本为 27。
 
 ## 环境
 
 - Windows 10 或 Windows 11
+- 系统自带 `WinSQLite3.dll`（Windows 10/11 标准组件；不可用时自动回退 INI 快照）
 - AutoHotkey v2（运行源码与 `--self-test`）
 - Ahk2Exe（仅编译 `PopDrop.exe` 时需要）
 - Visual Studio 2022 Build Tools，“使用 C++ 的桌面开发”工作负载
@@ -96,7 +98,7 @@ AutoHotkey 位数从 `native\bin\<架构>` 加载；发布包应把对应架构�
 - `PopDropTransfer.exe`（与主程序同目录，x64 架构）
 - `PopDropPreview.exe`（与主程序同目录，x64 架构）
 - `config.example.ini`（用户复制为 `config.ini` 使用）
-- `assets/`（图标资源，编译版运行时需要）
+- `assets/`（含 `icon-lnk.ico`；源码模式及编译版的运行时回退需要，编译时也会嵌入资源 556）
 - `README.md`、`USAGE.md`、`CHANGELOG.md`、`THIRD_PARTY_NOTICES.md`
 - `native/install-pdfium.ps1` 和 `native/pdfium-component.ini`（可选 PDF 预览）
 - 第三方许可（`native/third_party/pdfium/LICENSE`）

@@ -244,7 +244,9 @@ SettingsNavigationSelected(c, tree, item) {
 }
 
 LoadSettingsIntoDraft() {
-    global GlobalOpenFileMode, ConfiguredHotkey, WindowMode, EscapeHidesPanel
+    global GlobalOpenFileMode, ConfiguredHotkey, DoubleHotkeyWorkspaceId
+    global LastFileWorkspaceId
+    global WindowMode, EscapeHidesPanel
     global DefaultContextMenu
     global ShowRecentSidebar, RecentFileCount, MaxFilesPerFolder, SortMode
     global LastValidFolderSettings, OpenApps, TransferFavorites, RecentTargets
@@ -267,6 +269,8 @@ LoadSettingsIntoDraft() {
         workspaceDraft := {
             Id: workspace.Id,
             Name: workspace.Name,
+            Type: workspace.Type,
+            Hotkey: workspace.Hotkey,
             Sources: sources,
             PinnedPaths: workspace.PinnedPaths.Clone()
         }
@@ -295,6 +299,8 @@ LoadSettingsIntoDraft() {
             OpenFileMode: ParseGlobalOpenFileMode(GlobalOpenFileMode),
             DefaultContextMenu: ParseDefaultContextMenu(DefaultContextMenu),
             Hotkey: ConfiguredHotkey,
+            DoubleHotkeyWorkspaceId: DoubleHotkeyWorkspaceId,
+            LastFileWorkspaceId: LastFileWorkspaceId,
             WindowMode: WindowMode,
             EscapeHidesPanel: EscapeHidesPanel,
             ShowRecentSidebar: ShowRecentSidebar,
@@ -500,8 +506,11 @@ BuildGeneralSettingsPage(c, tabs) {
     g.AddGroupBox("x200 y165 w818 h82", "快捷键 · 应用于所有工作区")
     g.AddText("x220 y196 w150", "呼出/隐藏 PopDrop：")
     c.Hotkey := g.AddHotkey("x375 yp-4 w220 h26")
-    g.AddText("x615 yp+4 w360 c666666",
-        "保存时会先验证新快捷键是否可注册。")
+    g.AddText("x615 yp+4 w86", "默认文本区：")
+    c.DoubleHotkeyWorkspace := AddUiDropDownList(
+        g, "x700 yp-4 w280", ["关闭"])
+    g.AddText("x220 y224 w760 h18 c555555",
+        "面板隐藏时：单击进入最近文件区，快速双击进入默认文本区；面板显示时：主快捷键只关闭。")
 
     g.AddGroupBox("x200 y257 w818 h104", "窗口 · 应用于所有工作区")
     g.AddText("x220 y288 w150", "窗口显示方式：")
@@ -532,6 +541,8 @@ BuildGeneralSettingsPage(c, tabs) {
     c.GlobalDouble.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.GlobalSingle.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.Hotkey.OnEvent("Change", GeneralControlChanged.Bind(c))
+    c.DoubleHotkeyWorkspace.OnEvent(
+        "Change", GeneralControlChanged.Bind(c))
     c.WindowMode.OnEvent("Change", GeneralControlChanged.Bind(c))
     c.EscapeHide.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.ContextMenuPopDrop.OnEvent("Click", GeneralControlChanged.Bind(c))
@@ -549,7 +560,9 @@ BuildSourcesSettingsPage(c, tabs) {
     g.AddText("x220 y54 w86", "当前工作区：")
     c.WorkspaceDropDown := AddUiDropDownList(g, "x310 yp-4 w110", [])
     c.WorkspaceManage := AddUiButton(g, "x+10 yp w130", "管理工作区…")
-    c.WorkspaceScopeHint := g.AddText("x580 yp+4 w405 c555555", "")
+    c.WorkspaceScopeHint := g.AddText("x580 yp+4 w120 c555555", "")
+    g.AddText("x710 yp w74", "单次直达键：")
+    c.WorkspaceHotkey := g.AddHotkey("x790 yp-4 w195 h26")
     c.SourceList := g.AddListView(
         "x200 y106 w818 h110 Report -Multi NoSortHdr",
         ["来源", "路径", "状态"])
@@ -591,7 +604,7 @@ BuildSourcesSettingsPage(c, tabs) {
     c.SourceMax := AddUiEdit(g, "x544 yp w72 Number")
     g.AddText("x630 yp+4 w70", "排序：")
     c.SourceSort := AddUiDropDownList(g, "x700 yp-4 w220",
-        ["修改时间（最新在前）", "名称（升序）"])
+        ["修改时间（最新在前）", "名称（升序）", "智能优先"])
     g.AddText("x220 y527 w100", "排除噪音文件：")
     c.SourceNoiseMode := AddUiDropDownList(g, "x324 yp-4 w250",
         ["使用共享默认值", "启用", "禁用"])
@@ -607,6 +620,8 @@ BuildSourcesSettingsPage(c, tabs) {
         "Change", SettingsWorkspaceChanged.Bind(c))
     c.WorkspaceManage.OnEvent(
         "Click", OpenWorkspaceManager.Bind(c))
+    c.WorkspaceHotkey.OnEvent(
+        "Change", WorkspaceHotkeyChanged.Bind(c))
     c.SourceList.OnEvent("ItemSelect", SourceSelected.Bind(c))
     c.SourceAdd.OnEvent("Click", AddSourceToDraft.Bind(c))
     c.SourceRemove.OnEvent("Click", RemoveSourceFromDraft.Bind(c))
@@ -629,6 +644,7 @@ BuildSourcesSettingsPage(c, tabs) {
 }
 
 RefreshSettingsWorkspaceControls(c) {
+    global WORKSPACE_TYPE_TEXT
     if !HasProp(c, "WorkspaceDropDown")
         return
     c.WorkspaceIds := []
@@ -649,12 +665,35 @@ RefreshSettingsWorkspaceControls(c) {
         found := FindDraftWorkspace(c)
         if IsObject(found) {
             c.Draft.Sources := found.Value.Sources
-            c.WorkspaceScopeHint.Text := "以下修改只影响“"
-                . found.Value.Name "”。"
+            c.WorkspaceScopeHint.Text := ParseWorkspaceType(found.Value.Type)
+                = WORKSPACE_TYPE_TEXT ? "文本块工作区" : "文件工作区"
+            c.WorkspaceHotkey.Value := found.Value.Hotkey
         }
     } finally c.Loading := false
     c.SelectedSourceId := ""
     RefreshSourceList(c)
+    UpdateWorkspaceSourceControls(c)
+}
+
+WorkspaceHotkeyChanged(c, *) {
+    if c.Loading
+        return
+    found := FindDraftWorkspace(c)
+    if IsObject(found)
+        found.Value.Hotkey := Trim(c.WorkspaceHotkey.Value)
+}
+
+UpdateWorkspaceSourceControls(c) {
+    global WORKSPACE_TYPE_TEXT
+    found := FindDraftWorkspace(c)
+    textMode := IsObject(found)
+        && ParseWorkspaceType(found.Value.Type) = WORKSPACE_TYPE_TEXT
+    if HasProp(c, "SourceType")
+        c.SourceType.Enabled := !textMode && c.SelectedSourceId != ""
+    if HasProp(c, "SourceScope")
+        c.SourceScope.Enabled := !textMode && c.SelectedSourceId != ""
+    if HasProp(c, "SourceSort")
+        c.SourceSort.Enabled := c.SelectedSourceId != ""
 }
 
 SettingsWorkspaceChanged(c, control, *) {
@@ -823,10 +862,11 @@ OpenWorkspaceManager(c, *) {
     child.AddText("xm ym w570",
         "工作区只保存文件来源及来源专属设置；其他设置应用于所有工作区。")
     list := child.AddListView("xm y+10 w570 h250 Report -Multi NoSortHdr",
-        ["工作区", "来源数量", "状态"])
-    list.ModifyCol(1, 300)
+        ["工作区", "类型", "来源数量", "状态"])
+    list.ModifyCol(1, 230)
     list.ModifyCol(2, 100)
-    list.ModifyCol(3, 130)
+    list.ModifyCol(3, 90)
+    list.ModifyCol(4, 120)
     add := AddUiButton(child, "xm y+10 w92", "新建工作区")
     copy := AddUiButton(child, "x+7 yp w112", "复制当前工作区")
     rename := AddUiButton(child, "x+7 yp w72", "重命名")
@@ -846,12 +886,16 @@ OpenWorkspaceManager(c, *) {
 }
 
 RefreshWorkspaceManagerList(c, list) {
+    global WORKSPACE_TYPE_TEXT
     list.Delete()
     selected := 0
     for index, workspace in c.Draft.Workspaces {
         current := StrLower(workspace.Id)
             = StrLower(c.Draft.CurrentWorkspaceId)
-        row := list.Add("", workspace.Name, workspace.Sources.Length,
+        row := list.Add("", workspace.Name,
+            ParseWorkspaceType(workspace.Type) = WORKSPACE_TYPE_TEXT
+                ? "文本块" : "文件",
+            workspace.Sources.Length,
             current ? "当前工作区" : "")
         if current
             selected := row
@@ -891,21 +935,29 @@ PromptWorkspaceName(c, title, initial := "", ignoredId := "") {
 }
 
 CreateWorkspaceFromManager(c, list, *) {
+    global WORKSPACE_TYPE_FILES, WORKSPACE_TYPE_TEXT
     name := PromptWorkspaceName(c, "新建工作区")
     if name = ""
         return
-    answer := SettingsMessage(c,
-        "如何创建“" name "”？`n`n"
-        . "“是”：复制当前工作区（推荐）`n"
-        . "“否”：创建空白工作区`n"
+    typeAnswer := SettingsMessage(c,
+        "请选择工作区类型：`n`n"
+        . "“是”：文本块工作区`n"
+        . "“否”：文件工作区`n"
         . "“取消”：不创建",
         "新建工作区", "YesNoCancel Icon!")
-    if answer = "Cancel"
+    if typeAnswer = "Cancel"
         return
+    workspaceType := typeAnswer = "Yes"
+        ? WORKSPACE_TYPE_TEXT : WORKSPACE_TYPE_FILES
     current := FindDraftWorkspace(c)
     sources := []
     pinnedPaths := []
-    if answer = "Yes" && IsObject(current) {
+    canCopy := IsObject(current)
+        && ParseWorkspaceType(current.Value.Type) = workspaceType
+    copyCurrent := canCopy && SettingsMessage(c,
+        "是否复制当前工作区的来源与固定项？",
+        "新建工作区", "YesNo Icon?") = "Yes"
+    if copyCurrent {
         for source in current.Value.Sources {
             clone := CloneSettingsSource(source)
             clone.SourceId := NewStableId("source")
@@ -915,7 +967,8 @@ CreateWorkspaceFromManager(c, list, *) {
         pinnedPaths := current.Value.PinnedPaths.Clone()
     }
     workspace := {Id: NewStableId("workspace"),
-        Name: name, Sources: sources, PinnedPaths: pinnedPaths}
+        Name: name, Type: workspaceType, Hotkey: "",
+        Sources: sources, PinnedPaths: pinnedPaths}
     c.Draft.Workspaces.Push(workspace)
     c.Draft.CurrentWorkspaceId := workspace.Id
     c.Draft.Sources := workspace.Sources
@@ -943,7 +996,8 @@ CopyWorkspaceFromManager(c, list, *) {
     }
     pinnedPaths := current.Value.PinnedPaths.Clone()
     workspace := {Id: NewStableId("workspace"),
-        Name: name, Sources: sources, PinnedPaths: pinnedPaths}
+        Name: name, Type: current.Value.Type, Hotkey: "",
+        Sources: sources, PinnedPaths: pinnedPaths}
     c.Draft.Workspaces.Push(workspace)
     c.Draft.CurrentWorkspaceId := workspace.Id
     c.Draft.Sources := workspace.Sources
@@ -1366,7 +1420,7 @@ BuildAboutSettingsPage(c, tabs) {
     global APP_VERSION
     tabs.UseTab(5)
     g := c.Gui
-    g.AddGroupBox("x200 y29 w818 h380", "关于 PopDrop")
+    g.AddGroupBox("x200 y29 w818 h360", "关于 PopDrop")
 
     title := g.AddText("x232 y68 w520 h42", "PopDrop")
     title.SetFont("s22 Bold", "Microsoft YaHei UI")
@@ -1386,8 +1440,8 @@ BuildAboutSettingsPage(c, tabs) {
     g.AddText("x235 y292 w180 h24", "作者")
     author := AddUiButton(g, "x235 y324 w130", "作者主页")
     author.OnEvent("Click", OpenAboutUrl.Bind("https://s.ee/katt"))
-    g.AddText("x235 y360 w440 h24 c666666",
-        "先让几件小事顺手一点")
+    g.AddText("x385 y330 w440 h24 c666666",
+        "先让几件小事顺手一点。")
 }
 
 LoadGeneralControls(c) {
@@ -1399,6 +1453,7 @@ LoadGeneralControls(c) {
         c.GlobalDouble.Value := d.OpenFileMode != OPEN_MODE_SINGLE
         c.GlobalSingle.Value := d.OpenFileMode = OPEN_MODE_SINGLE
         c.Hotkey.Value := d.Hotkey
+        RefreshDoubleHotkeyWorkspaceChoices(c)
         c.WindowMode.Choose(WindowModeToIndex(d.WindowMode))
         c.EscapeHide.Value := d.EscapeHidesPanel
         c.ContextMenuPopDrop.Value :=
@@ -1423,6 +1478,12 @@ GeneralControlChanged(c, *) {
     d := c.Draft.General
     d.OpenFileMode := c.GlobalSingle.Value ? OPEN_MODE_SINGLE : OPEN_MODE_DOUBLE
     d.Hotkey := Trim(c.Hotkey.Value)
+    if HasProp(c, "DoubleHotkeyWorkspace") {
+        index := c.DoubleHotkeyWorkspace.Value - 1
+        d.DoubleHotkeyWorkspaceId := index >= 1
+            && index <= c.DoubleHotkeyWorkspaceIds.Length
+            ? c.DoubleHotkeyWorkspaceIds[index] : ""
+    }
     d.WindowMode := [WINDOW_MODE_ALWAYS_ON_TOP,
         WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL][Max(1, c.WindowMode.Value)]
     d.EscapeHidesPanel := !!c.EscapeHide.Value
@@ -1434,6 +1495,26 @@ GeneralControlChanged(c, *) {
     d.TransferMaxConcurrent := Trim(c.TransferMax.Value)
     d.ShowCompletionNotifications := !!c.TransferNotify.Value
     RefreshInheritedOpenModeLabels(c)
+}
+
+RefreshDoubleHotkeyWorkspaceChoices(c) {
+    global WORKSPACE_TYPE_TEXT
+    if !HasProp(c, "DoubleHotkeyWorkspace")
+        return
+    names := ["关闭（不设置默认文本区）"]
+    c.DoubleHotkeyWorkspaceIds := []
+    selected := 1
+    for workspace in c.Draft.Workspaces {
+        if ParseWorkspaceType(workspace.Type) != WORKSPACE_TYPE_TEXT
+            continue
+        names.Push(workspace.Name "（默认文本区）")
+        c.DoubleHotkeyWorkspaceIds.Push(workspace.Id)
+        if StrLower(workspace.Id)
+            = StrLower(c.Draft.General.DoubleHotkeyWorkspaceId)
+            selected := names.Length
+    }
+    ReplaceUiDropDownItems(c.DoubleHotkeyWorkspace, names)
+    c.DoubleHotkeyWorkspace.Choose(selected)
 }
 
 UpdateContextMenuDescription(c) {
@@ -1805,7 +1886,8 @@ LoadSelectedSourceToControls(c) {
         c.SourceMaxMode.Choose(s.MaxFilesPerFolderInherited ? 1
             : s.MaxFilesPerFolder = 0 ? 3 : 2)
         c.SourceMax.Value := s.MaxFilesPerFolder
-        c.SourceSort.Choose(s.SortMode = SORT_MODIFIED_DESC ? 1 : 2)
+        c.SourceSort.Choose(s.SortMode = SORT_MODIFIED_DESC ? 1
+            : s.SortMode = SORT_NAME_ASC ? 2 : 3)
         c.SourceNoiseMode.Choose(s.NoiseFilterMode = NOISE_FILTER_ENABLED ? 2
             : s.NoiseFilterMode = NOISE_FILTER_DISABLED ? 3 : 1)
         c.SourceNoiseRuleCount.Text := s.SourceCustomPatternTexts.Length " 条附加规则"
@@ -1813,6 +1895,7 @@ LoadSelectedSourceToControls(c) {
         c.AllowedCount.Text := "允许覆盖共享排除："
             . s.AllowedExcludedPaths.Length " 个"
         UpdateSourceControlState(c)
+        UpdateWorkspaceSourceControls(c)
     } finally c.Loading := false
 }
 
@@ -1909,13 +1992,28 @@ ApplyFilesSourceDefaults(c, source) {
     source.HideExtensions := 0
 }
 
+ApplyTextBlockSourceDefaults(source, preserveSort := false) {
+    global MODE_FILES, SCOPE_RECURSIVE_FILES, SORT_SMART
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    source.Mode := MODE_FILES
+    source.IncludeSubfolders := true
+    source.DisplayScope := SCOPE_RECURSIVE_FILES
+    if !preserveSort || !ValueInArray(source.SortMode,
+        [SORT_SMART, SORT_MODIFIED_DESC, SORT_NAME_ASC])
+        source.SortMode := SORT_SMART
+    source.Filter := {Mode: "Include", Extensions: [".md", ".txt"]}
+    source.StripOrderPrefix := 0
+    source.HideExtensions := 1
+}
+
 CommitCurrentSourceControlsToDraft(c) {
     global MODE_FILES, MODE_LAUNCHER
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     global SOURCE_OPEN_MODE_INHERIT, OPEN_MODE_SINGLE, OPEN_MODE_DOUBLE
-    global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_SMART
     global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
+    global WORKSPACE_TYPE_TEXT
     if c.Loading
         return
     found := FindDraftSource(c)
@@ -1936,9 +2034,14 @@ CommitCurrentSourceControlsToDraft(c) {
     s.MaxFilesPerFolder := s.MaxFilesPerFolderInherited
         ? c.Draft.General.MaxFilesPerFolder
         : c.SourceMaxMode.Value = 3 ? 0 : Trim(c.SourceMax.Value)
-    s.SortMode := c.SourceSort.Value = 2 ? SORT_NAME_ASC : SORT_MODIFIED_DESC
+    s.SortMode := c.SourceSort.Value = 2 ? SORT_NAME_ASC
+        : c.SourceSort.Value = 3 ? SORT_SMART : SORT_MODIFIED_DESC
     noiseModes := [NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED]
     s.NoiseFilterMode := noiseModes[Max(1, c.SourceNoiseMode.Value)]
+    workspace := FindDraftWorkspace(c)
+    if IsObject(workspace) && ParseWorkspaceType(workspace.Value.Type)
+        = WORKSPACE_TYPE_TEXT
+        ApplyTextBlockSourceDefaults(s, true)
 }
 
 RefreshSourceListRow(c) {
@@ -1956,6 +2059,7 @@ RefreshSourceListRow(c) {
 }
 
 AddSourceToDraft(c, *) {
+    global WORKSPACE_TYPE_TEXT
     path := SelectPanelFile("D3", "", "选择监控来源")
     if path = ""
         return
@@ -1978,8 +2082,12 @@ AddSourceToDraft(c, *) {
     name := MakeUniqueSourceName(DefaultSourceNameForPath(path),
         c.Draft.Sources)
     id := NewStableId("source")
-    c.Draft.Sources.Push(CreateDefaultSourceDraft(
-        name, path, id, c.Draft.General))
+    source := CreateDefaultSourceDraft(name, path, id, c.Draft.General)
+    workspace := FindDraftWorkspace(c)
+    if IsObject(workspace) && ParseWorkspaceType(workspace.Value.Type)
+        = WORKSPACE_TYPE_TEXT
+        ApplyTextBlockSourceDefaults(source)
+    c.Draft.Sources.Push(source)
     RefreshSourceList(c, id)
 }
 
@@ -3294,7 +3402,8 @@ SettingsTabChanged(c, *) {
 SettingsDraftSignature(draft) {
     parts := []
     g := draft.General
-    parts.Push(g.OpenFileMode, g.DefaultContextMenu, g.Hotkey, g.WindowMode,
+    parts.Push(g.OpenFileMode, g.DefaultContextMenu, g.Hotkey,
+        g.DoubleHotkeyWorkspaceId, g.WindowMode,
         g.EscapeHidesPanel ? "1" : "0",
         g.ShowRecentSidebar ? "1" : "0",
         g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode,
@@ -3317,7 +3426,8 @@ SettingsDraftSignature(draft) {
         JoinArray(n.CustomPatternTexts, Chr(30)))
     parts.Push("CW", draft.CurrentWorkspaceId)
     for workspace in draft.Workspaces {
-        parts.Push("W", workspace.Id, workspace.Name)
+        parts.Push("W", workspace.Id, workspace.Name,
+            workspace.Type, workspace.Hotkey)
         parts.Push("P", workspace.Id,
             JoinNormalizedPaths(workspace.PinnedPaths))
         for s in workspace.Sources {
@@ -3403,7 +3513,8 @@ ValidateSettingsDraft(c) {
     global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
-    global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_SMART
+    global WORKSPACE_TYPE_FILES, WORKSPACE_TYPE_TEXT
     global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
     global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
     global FILE_MANAGER_WINDOWS_SHELL, FILE_MANAGER_DIRECTORY_OPUS
@@ -3481,6 +3592,7 @@ ValidateSettingsDraft(c) {
         errors.Push("至少需要保留一个工作区。")
     workspaceNames := Map()
     workspaceIds := Map()
+    configuredHotkeys := Map(StrLower(Trim(d.General.Hotkey)), "主快捷键")
     allSourceIds := Map()
     activeFound := false
     for workspace in d.Workspaces {
@@ -3496,6 +3608,18 @@ ValidateSettingsDraft(c) {
             errors.Push("工作区名称重复：“" workspace.Name "”。")
         else
             workspaceNames[StrLower(workspace.Name)] := true
+        if !ValueInArray(Trim(workspace.Type),
+            [WORKSPACE_TYPE_FILES, WORKSPACE_TYPE_TEXT])
+            errors.Push("工作区类型无效：“" workspace.Name "”。")
+        workspaceHotkey := StrLower(Trim(workspace.Hotkey))
+        if workspaceHotkey != "" {
+            if configuredHotkeys.Has(workspaceHotkey)
+                errors.Push("快捷键重复：“" workspace.Hotkey "”（"
+                    configuredHotkeys[workspaceHotkey] "与工作区“"
+                    workspace.Name "”）。")
+            else
+                configuredHotkeys[workspaceHotkey] := "工作区“" workspace.Name "”"
+        }
         if StrLower(workspace.Id) = StrLower(d.CurrentWorkspaceId)
             activeFound := true
         names := Map()
@@ -3544,7 +3668,10 @@ ValidateSettingsDraft(c) {
         if !ValueInArray(s.FolderTimeMode,
             [FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT])
             errors.Push("来源“" s.Name "”的文件夹排序设置无效。")
-        if !ValueInArray(s.SortMode, [SORT_MODIFIED_DESC, SORT_NAME_ASC])
+        allowedSorts := ParseWorkspaceType(workspace.Type) = WORKSPACE_TYPE_TEXT
+            ? [SORT_SMART, SORT_MODIFIED_DESC, SORT_NAME_ASC]
+            : [SORT_MODIFIED_DESC, SORT_NAME_ASC]
+        if !ValueInArray(s.SortMode, allowedSorts)
             errors.Push("来源“" s.Name "”的排序设置无效。")
         if !(HasProp(s, "MaxFilesPerFolderInherited")
             && s.MaxFilesPerFolderInherited)
@@ -3580,6 +3707,26 @@ ValidateSettingsDraft(c) {
     }
     if !activeFound
         errors.Push("当前工作区不在工作区列表中。")
+    if d.General.DoubleHotkeyWorkspaceId != "" {
+        defaultTextFound := false
+        for workspace in d.Workspaces {
+            if StrLower(workspace.Id)
+                = StrLower(d.General.DoubleHotkeyWorkspaceId) {
+                defaultTextFound := ParseWorkspaceType(workspace.Type)
+                    = WORKSPACE_TYPE_TEXT
+                break
+            }
+        }
+        if !defaultTextFound
+            errors.Push("默认文本区不存在或不是文本块工作区。")
+    }
+    fileWorkspaceCount := 0
+    for workspace in d.Workspaces {
+        if ParseWorkspaceType(workspace.Type) = WORKSPACE_TYPE_FILES
+            fileWorkspaceCount += 1
+    }
+    if !fileWorkspaceCount
+        errors.Push("至少需要保留一个文件工作区，供主快捷键进入文件模式。")
 
     appPaths := Map()
     for app in d.Applications {
@@ -3725,6 +3872,16 @@ SaveSettingsDraftCore(c, closeAfter) {
             "快捷键不可用", "Iconx")
         return false
     }
+    for workspace in c.Draft.Workspaces {
+        workspaceHotkey := Trim(workspace.Hotkey)
+        if workspaceHotkey != ""
+            && !CanRegisterWorkspaceHotkey(workspaceHotkey, workspace.Id) {
+            SettingsMessage(c, "工作区“" workspace.Name "”的快捷键“"
+                workspaceHotkey "”无法注册。原快捷键不会被覆盖。",
+                "快捷键不可用", "Iconx")
+            return false
+        }
+    }
 
     oldHotkey := ConfiguredHotkey
     wroteConfig := false
@@ -3736,6 +3893,7 @@ SaveSettingsDraftCore(c, closeAfter) {
         ApplyWindowMode()
         if ConfiguredHotkey != oldHotkey
             InstallHotkey(ConfiguredHotkey)
+        InstallWorkspaceHotkeys()
         BuildTrayMenu()
         PopulatePanel()
         PopulateRecentSidebar()
@@ -3779,6 +3937,25 @@ CanRegisterSettingsHotkey(candidate, current) {
     }
 }
 
+CanRegisterWorkspaceHotkey(candidate, workspaceId) {
+    global ActiveWorkspaceHotkeys
+    candidate := Trim(candidate)
+    if candidate = ""
+        return true
+    for activeHotkey, activeWorkspaceId in ActiveWorkspaceHotkeys {
+        if StrLower(activeHotkey) = StrLower(candidate)
+            return StrLower(activeWorkspaceId) = StrLower(workspaceId)
+    }
+    try {
+        Hotkey(candidate, SettingsHotkeyProbe, "On")
+        Hotkey(candidate, "Off")
+        return true
+    } catch {
+        try Hotkey(candidate, "Off")
+        return false
+    }
+}
+
 SettingsHotkeyProbe(*) {
 }
 
@@ -3806,6 +3983,12 @@ WriteSettingsDraft(draft, tempPath) {
     doc.SetValue("General", "DefaultContextMenu",
         ParseDefaultContextMenu(g.DefaultContextMenu), 1)
     doc.SetValue("General", "Hotkey", g.Hotkey, 1)
+    doc.SetValue("General", "DoubleHotkeyWorkspaceId",
+        g.DoubleHotkeyWorkspaceId, 1)
+    doc.SetValue("General", "LastFileWorkspaceId",
+        ResolveFileWorkspaceId(
+            g.LastFileWorkspaceId, draft.Workspaces,
+            draft.CurrentWorkspaceId), 1)
     doc.SetValue("General", "WindowMode", g.WindowMode, 1)
     doc.SetValue("General", "EscapeHidesPanel",
         g.EscapeHidesPanel ? "1" : "0", 1)
@@ -3898,8 +4081,10 @@ WriteSettingsDraft(draft, tempPath) {
         }
         doc.ReplaceKnownKeys("Workspace:" workspace.Id, [
             {Key: "Name", Value: workspace.Name},
+            {Key: "Type", Value: ParseWorkspaceType(workspace.Type)},
+            {Key: "Hotkey", Value: Trim(workspace.Hotkey)},
             {Key: "SourceOrder", Value: JoinArray(sourceIds, ",")}
-        ], ["Name", "SourceOrder"], 3)
+        ], ["Name", "Type", "Hotkey", "SourceOrder"], 3)
         WritePinnedPathsToDocument(doc,
             "WorkspacePinned:" workspace.Id, workspace.PinnedPaths, 3)
     }

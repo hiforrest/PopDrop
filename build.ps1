@@ -18,12 +18,14 @@
 # ============================================================
 # Paths
 # ============================================================
-$script:ProjectRoot = "D:\GProgram\PopDrop"
+$script:ProjectRoot = $PSScriptRoot
 $script:AhkScriptPath = Join-Path $ProjectRoot "PopDrop.ahk"
 $script:ConfigExamplePath = Join-Path $ProjectRoot "config.example.ini"
 $script:OutputPath = Join-Path $ProjectRoot "PopDrop.exe"
 $script:AppIcoPath = Join-Path $ProjectRoot "assets\app.ico"
 $script:TrayIcoPath = Join-Path $ProjectRoot "assets\tray.ico"
+$script:LinkIcoPath = Join-Path $ProjectRoot "assets\icon-lnk.ico"
+$script:PinIcoPath = Join-Path $ProjectRoot "assets\pin.ico"
 $script:LogDir = Join-Path $ProjectRoot "build_logs"
 $script:CompilerPath = "C:\Program Files\AutoHotkey\Compiler\Ahk2Exe.exe"
 $script:BasePath64 = "C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe"
@@ -99,6 +101,12 @@ Write-OK "#Requires check passed: $firstLine"
 # 4. Check Ahk2Exe directives
 Write-Step "Checking Ahk2Exe directives"
 $ahkContent = Get-Content -LiteralPath $AhkScriptPath -Raw
+if ($ahkContent -notmatch ';@Ahk2Exe-SetVersion\s+1\.1\.0\.0'
+    -or $ahkContent -notmatch 'APP_VERSION\s*:=\s*"1\.1\.0"') {
+    Write-Err "Source version is not PopDrop v1.1.0"
+    exit 15
+}
+Write-OK "Source version check passed: PopDrop v1.1.0"
 if ($ahkContent -notmatch ';@Ahk2Exe-SetMainIcon') {
     Write-Warn "No ;@Ahk2Exe-SetMainIcon directive found"
 }
@@ -163,6 +171,20 @@ if (-not (Test-Path -LiteralPath $TrayIcoPath -PathType Leaf)) {
 }
 Write-OK "Tray icon found: $TrayIcoPath"
 
+Write-Step "Checking pinned-link icon: $LinkIcoPath"
+if (-not (Test-Path -LiteralPath $LinkIcoPath -PathType Leaf)) {
+    Write-Err "Pinned-link icon not found: $LinkIcoPath"
+    exit 13
+}
+Write-OK "Pinned-link icon found: $LinkIcoPath"
+
+Write-Step "Checking text-source pin icon: $PinIcoPath"
+if (-not (Test-Path -LiteralPath $PinIcoPath -PathType Leaf)) {
+    Write-Err "Text-source pin icon not found: $PinIcoPath"
+    exit 14
+}
+Write-OK "Text-source pin icon found: $PinIcoPath"
+
 # 8. Check output directory writable
 Write-Step "Checking output directory writable: $ProjectRoot"
 $testFile = Join-Path $ProjectRoot ".write_test_$(Get-Random).tmp"
@@ -213,6 +235,29 @@ if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $by
 # ============================================================
 # Create log directory
 # ============================================================
+Write-Step "Running AutoHotkey self-tests"
+$selfTest = Start-Process -FilePath $basePath `
+    -ArgumentList "`"$AhkScriptPath`" --self-test" `
+    -NoNewWindow -Wait -PassThru
+if ($selfTest.ExitCode -ne 0) {
+    Write-Err "AutoHotkey self-tests failed (exit $($selfTest.ExitCode))."
+    exit 11
+}
+Write-OK "AutoHotkey self-tests passed"
+
+$python = Get-Command python -ErrorAction SilentlyContinue
+if ($python) {
+    Write-Step "Running cross-platform regression tests"
+    & $python.Source -m unittest discover -s (Join-Path $ProjectRoot "tests") -v
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Python regression tests failed."
+        exit 12
+    }
+    Write-OK "Python regression tests passed"
+} else {
+    Write-Warn "Python not found; cross-platform regression tests were skipped."
+}
+
 if (-not (Test-Path -LiteralPath $LogDir -PathType Container)) {
     New-Item -Path $LogDir -ItemType Directory -Force | Out-Null
 }
