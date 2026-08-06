@@ -88,7 +88,7 @@ GetWorkspaceSourceDirtyToken(workspaceId, sourceId) {
 }
 
 ClearWorkspaceSourceDirty(workspaceId, sourceId, token := 0) {
-    global WorkspaceDirtySourceKeys
+    global WorkspaceDirtySourceKeys, InactiveScanQueue
     workspaceKey := StrLower(workspaceId)
     sourceKey := StrLower(sourceId)
     if !WorkspaceDirtySourceKeys.Has(workspaceKey)
@@ -96,8 +96,20 @@ ClearWorkspaceSourceDirty(workspaceId, sourceId, token := 0) {
     dirty := WorkspaceDirtySourceKeys[workspaceKey]
     if !dirty.Has(sourceKey)
         return
-    if token = 0 || dirty[sourceKey] = token
+    if token = 0 || dirty[sourceKey] = token {
         dirty.Delete(sourceKey)
+        ; A foreground scan may satisfy work that was previously queued while
+        ; this workspace was inactive.  Do not let that stale queue later
+        ; overwrite the freshly committed snapshot.
+        if InactiveScanQueue.Has(workspaceKey) {
+            queued := InactiveScanQueue[workspaceKey]
+            if queued.Has(sourceKey)
+                && (token = 0 || queued[sourceKey] = token)
+                queued.Delete(sourceKey)
+            if !queued.Count
+                InactiveScanQueue.Delete(workspaceKey)
+        }
+    }
 }
 
 IsLocalWatchablePath(path) {
@@ -183,6 +195,31 @@ ReconcileSourceWatchers(force := false) {
     }
     if SourceWatchers.Count
         SetTimer(PollSourceWatchers, 150)
+    SchedulePendingSourceWatcherFlush()
+}
+
+SchedulePendingSourceWatcherFlush() {
+    global ActiveWorkspaceId, SourceWatcherRecentDirty
+    global SourceWatcherRefreshPending
+    global WorkspaceDirtySourceKeys
+    if SourceWatcherRefreshPending
+        return
+    sourceKeys := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, false)
+    if !sourceKeys.Count && !SourceWatcherRecentDirty {
+        ; Dirty workspaces may all be inactive.  Flush still owns queuing their
+        ; disk/memory snapshot refreshes.
+        hasDirty := false
+        for workspaceKey, dirty in WorkspaceDirtySourceKeys {
+            if dirty.Count {
+                hasDirty := true
+                break
+            }
+        }
+        if !hasDirty
+            return
+    }
+    SourceWatcherRefreshPending := true
+    SetTimer(FlushSourceWatcherChanges, -1)
 }
 
 CreateSourceWatcher(definition) {
@@ -317,9 +354,13 @@ CloseSourceWatcher(watcher) {
 }
 
 CleanupSourceWatchers() {
-    global SourceWatchers
+    global SourceWatchers, SourceWatcherRefreshPending
     SetTimer(PollSourceWatchers, 0)
     SetTimer(FlushSourceWatcherChanges, 0)
+    ; Cancelling the debounce timer must also release its latch.  Otherwise a
+    ; watcher rebuild during the 120-ms window permanently suppresses every
+    ; later change notification.
+    SourceWatcherRefreshPending := false
     for key, watcher in SourceWatchers
         CloseSourceWatcher(watcher)
     SourceWatchers := Map()

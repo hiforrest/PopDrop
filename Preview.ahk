@@ -34,6 +34,7 @@ global PreviewDirectImageMaxPixelsMP := 160
 global PreviewDirectImageMaxExpandedMB := 256
 global PreviewDocumentEnabled := true
 global PreviewPdfEnabled := false
+global PreviewShowFileInfo := true
 global PreviewDocumentStatusDelayMs := 120
 global PreviewDocumentLongStatusMs := 5000
 global PreviewDocumentHardTimeoutMs := 12000
@@ -140,7 +141,7 @@ LoadPreviewSettings(settingErrors := 0) {
     global PreviewCacheUnreferencedDays, PreviewDirectImageMaxFileMB
     global PreviewDirectImageMaxEdge, PreviewDirectImageMaxPixelsMP
     global PreviewDirectImageMaxExpandedMB, PreviewDocumentEnabled
-    global PreviewPdfEnabled
+    global PreviewPdfEnabled, PreviewShowFileInfo
 
     loadedEnabled := PreviewReadBoolean("Enabled", true, settingErrors)
     previousDocumentEnabled := PreviewDocumentEnabled
@@ -228,6 +229,9 @@ LoadPreviewSettings(settingErrors := 0) {
         settingErrors)
     PreviewPdfEnabled := PreviewReadBoolean(
         "PdfEnabled", ConfigDefaultBoolean("Preview", "PdfEnabled", false),
+        settingErrors)
+    PreviewShowFileInfo := PreviewReadBoolean(
+        "ShowFileInfo", ConfigDefaultBoolean("Preview", "ShowFileInfo", true),
         settingErrors)
     enabledChanged := SetFilePreviewEnabled(loadedEnabled, false)
     if !enabledChanged
@@ -467,11 +471,18 @@ PreviewArmCandidate(path, hwnd, row, authority) {
         failure := PreviewNegativeCache[PathKey(path)]
         if failure.Stamp != PreviewFileStamp(path)
             PreviewNegativeCache.Delete(PathKey(path))
-        else if failure.Permanent
+        else if failure.Permanent {
+            PreviewSession.Path := path
+            PreviewSession.State := "Error"
+            PreviewPresentFallbackCard(path)
             return
-        else if ElapsedTickMilliseconds(
-            failure.Tick, A_TickCount) < failure.RetryMs
+        } else if ElapsedTickMilliseconds(
+            failure.Tick, A_TickCount) < failure.RetryMs {
+            PreviewSession.Path := path
+            PreviewSession.State := "Error"
+            PreviewPresentFallbackCard(path)
             return
+        }
         else
             PreviewNegativeCache.Delete(PathKey(path))
     }
@@ -534,11 +545,37 @@ PreviewIssueArmedRequest() {
     PreviewSendRequest(1, PreviewSession.Path)
 }
 
-PreviewHandleKeyDown(vk, hwnd) {
-    global PreviewInputAuthority
+PreviewHandleKeyDown(vk, hwnd, lParam := 0) {
+    global PreviewInputAuthority, FileView, RecentView
     static navigationKeys := Map(
         0x25, true, 0x26, true, 0x27, true, 0x28, true,
         0x24, true, 0x23, true, 0x21, true, 0x22, true)
+    if vk = 0x20 {
+        if !IsPanelQuickPreviewAvailable()
+            return
+        ; Use the hovered row when focus is elsewhere; otherwise retain the
+        ; current preview candidate. Auto-repeat must not relaunch the viewer.
+        if (lParam && ((lParam >> 30) & 1))
+            return
+        path := PreviewSession.Path
+        if path = "" {
+            point := Buffer(8, 0)
+            if DllCall("user32\GetCursorPos", "ptr", point.Ptr) {
+                sx := NumGet(point, 0, "int"), sy := NumGet(point, 4, "int")
+                list := hwnd = FileView.Hwnd ? FileView : RecentView
+                if IsObject(list) && ScreenPointInWindow(list.Hwnd, sx, sy) {
+                    cp := ScreenToClientPoint(list.Hwnd, sx, sy)
+                    row := HitTestListItemBounds(list.Hwnd, cp.X, cp.Y)
+                    candidate := PreviewCandidateForRow(list.Hwnd, row)
+                    if IsObject(candidate)
+                        path := candidate.Path
+                }
+            }
+        }
+        if path != ""
+            OpenExternalQuickPreview(path)
+        return
+    }
     if vk = 0x0D || vk = 0x1B {
         PreviewHide("key-action", true)
         return
@@ -779,8 +816,11 @@ PreviewSendRequest(command, path) {
     global PreviewDocumentThemeVersion
     PreviewSession.Path := path
     if !PreviewEnsureHelper() {
-        if command != 2
+        if command != 2 {
             PreviewRememberFailure(path)
+            PreviewSession.State := "Error"
+            PreviewPresentFallbackCard(path)
+        }
         return false
     }
     requestId := ++PreviewRequestSerial
@@ -889,7 +929,8 @@ PreviewPollResponse() {
                 PreviewShowDocumentError(status)
             else {
                 PreviewRememberFailure(PreviewSession.Path, status)
-                PreviewHide("no-content", false)
+                PreviewSession.State := "Error"
+                PreviewPresentFallbackCard(PreviewSession.Path)
             }
             return
         }
@@ -930,7 +971,9 @@ PreviewPollResponse() {
             PreviewShowDocumentError(10)
         } else {
             PreviewRememberFailure(failedPath)
-            PreviewHide("timeout", true)
+            PreviewSession.Path := failedPath
+            PreviewSession.State := "Error"
+            PreviewPresentFallbackCard(failedPath)
         }
     }
 }
@@ -1101,17 +1144,15 @@ PreviewShowDocumentError(status) {
     PreviewSession.DocumentGeneration := false
     PreviewRememberFailure(path, status)
     if status = 5
-        PreviewPresentStatusCard("文件内容过大", "未生成预览", false)
+        PreviewPresentFallbackCard(path)
     else if status = 6
-        PreviewPresentStatusCard("文档受密码保护", "无法生成预览", false)
+        PreviewPresentFallbackCard(path)
     else if status = 7
-        PreviewPresentStatusCard("文件当前不可访问", "", false)
+        PreviewPresentFallbackCard(path)
     else if status = 10
-        PreviewPresentStatusCard(
-            "暂时无法生成预览", "处理时间超过限制", false)
+        PreviewPresentFallbackCard(path)
     else
-        PreviewPresentStatusCard(
-            "暂时无法生成预览", "文件可能损坏或格式不受支持", false)
+        PreviewPresentFallbackCard(path)
 }
 
 PreviewTerminateHungHelper() {
@@ -1194,7 +1235,10 @@ PreviewPresentStatusCard(line1, line2 := "", animated := false,
             side = "Right" ? rightAvailable : leftAvailable)
         if width < minWidth
             return false
-        height := Min(panelBottom - panelTop, workBottom - workTop)
+        height := PreviewSession.StatusKind = "fallback"
+            ? Min(panelBottom - panelTop,
+                DllCall("kernel32\MulDiv", "int", 360, "int", dpi, "int", 96))
+            : Min(panelBottom - panelTop, workBottom - workTop)
         x := side = "Right" ? panelRight + gap
             : panelLeft - gap - width
         y := Max(workTop, Min(panelTop, workBottom - height))
@@ -1219,9 +1263,31 @@ PreviewPresentStatusCard(line1, line2 := "", animated := false,
     return true
 }
 
+PreviewPresentFallbackCard(path) {
+    global PreviewSession
+    PreviewSession.StatusKind := "fallback"
+    SplitPath(path, &name)
+    return PreviewPresentStatusCard(name, PreviewFormatFileDetails(path), false)
+}
+
+PreviewFormatFileDetails(path) {
+    size := 0
+    try size := FileGetSize(path)
+    catch
+        size := 0
+    if size >= 1024 * 1024
+        sizeText := Format("{:.1f} MB", size / 1024 / 1024)
+    else
+        sizeText := Format("{:.1f} KB", Max(0.1, size / 1024))
+    modified := "修改时间不可用"
+    try modified := FormatTime(FileGetTime(path, "M"), "yyyy-MM-dd HH:mm")
+    return sizeText "    " modified
+}
+
 PreviewBuildStatusCanvas(width, height, dpi, line1, line2, animated) {
     global PreviewCanvasDc, PreviewCanvasBitmap, PreviewCanvasOldBitmap
     global PreviewCanvasWidth, PreviewCanvasHeight, PreviewSession
+    global PreviewBackgroundColor
     PreviewReleaseCanvas()
     screenDc := DllCall("user32\GetDC", "ptr", 0, "ptr")
     PreviewCanvasDc := DllCall("gdi32\CreateCompatibleDC",
@@ -1238,18 +1304,24 @@ PreviewBuildStatusCanvas(width, height, dpi, line1, line2, animated) {
     rect := Buffer(16, 0)
     NumPut("int", width, rect, 8)
     NumPut("int", height, rect, 12)
+    cardBackground := PreviewSession.StatusKind = "fallback"
+        ? PreviewBackgroundColor : 0x00F8F8F8
     background := DllCall("gdi32\CreateSolidBrush",
-        "uint", 0x00F8F8F8, "ptr")
+        "uint", cardBackground, "ptr")
     DllCall("user32\FillRect", "ptr", PreviewCanvasDc,
         "ptr", rect.Ptr, "ptr", background)
     DllCall("gdi32\DeleteObject", "ptr", background)
     DllCall("gdi32\SetBkMode", "ptr", PreviewCanvasDc, "int", 1)
-    DllCall("gdi32\SetTextColor",
-        "ptr", PreviewCanvasDc, "uint", 0x003A342F)
+    DllCall("gdi32\SetTextColor", "ptr", PreviewCanvasDc,
+        "uint", PreviewSession.StatusKind = "fallback" ? 0x00D5D5D5 : 0x003A342F)
+    if PreviewSession.StatusKind = "fallback"
+        PreviewDrawFallbackIcon(PreviewCanvasDc, width, dpi)
     titleSize := DllCall("kernel32\MulDiv",
-        "int", 15, "int", dpi, "int", 96, "int")
+        "int", PreviewSession.StatusKind = "fallback" ? 14 : 15,
+        "int", dpi, "int", 96, "int")
     bodySize := DllCall("kernel32\MulDiv",
-        "int", 12, "int", dpi, "int", 96, "int")
+        "int", PreviewSession.StatusKind = "fallback" ? 14 : 12,
+        "int", dpi, "int", 96, "int")
     titleFont := DllCall("gdi32\CreateFontW",
         "int", -titleSize, "int", 0, "int", 0, "int", 0,
         "int", 600, "uint", 0, "uint", 0, "uint", 0,
@@ -1269,22 +1341,37 @@ PreviewBuildStatusCanvas(width, height, dpi, line1, line2, animated) {
     centerY := Floor(height / 2)
     titleRect := Buffer(16, 0)
     NumPut("int", 20, titleRect, 0)
-    NumPut("int", centerY - 38, titleRect, 4)
+    titleTop := PreviewSession.StatusKind = "fallback"
+        ? DllCall("kernel32\MulDiv", "int", 293, "int", dpi, "int", 96)
+        : centerY - 38
+    titleBottom := PreviewSession.StatusKind = "fallback"
+        ? DllCall("kernel32\MulDiv", "int", 330, "int", dpi, "int", 96)
+        : centerY - 8
+    NumPut("int", titleTop, titleRect, 4)
     NumPut("int", width - 20, titleRect, 8)
-    NumPut("int", centerY - 8, titleRect, 12)
+    NumPut("int", titleBottom, titleRect, 12)
     DllCall("user32\DrawTextW", "ptr", PreviewCanvasDc,
         "wstr", line1, "int", -1, "ptr", titleRect.Ptr,
-        "uint", 0x00000001 | 0x00000004 | 0x00000800)
+        "uint", PreviewSession.StatusKind = "fallback"
+            ? (0x00000001 | 0x00000010 | 0x00000800)
+            : (0x00000001 | 0x00000004 | 0x00000800))
     if line2 != "" {
         DllCall("gdi32\SelectObject",
             "ptr", PreviewCanvasDc, "ptr", bodyFont, "ptr")
         DllCall("gdi32\SetTextColor",
-            "ptr", PreviewCanvasDc, "uint", 0x00706055)
+            "ptr", PreviewCanvasDc,
+            "uint", PreviewSession.StatusKind = "fallback" ? 0x00B3A79E : 0x00706055)
         bodyRect := Buffer(16, 0)
         NumPut("int", 20, bodyRect, 0)
-        NumPut("int", centerY + 2, bodyRect, 4)
+        bodyTop := PreviewSession.StatusKind = "fallback"
+            ? DllCall("kernel32\MulDiv", "int", 270, "int", dpi, "int", 96)
+            : centerY + 2
+        bodyBottom := PreviewSession.StatusKind = "fallback"
+            ? DllCall("kernel32\MulDiv", "int", 290, "int", dpi, "int", 96)
+            : centerY + 42
+        NumPut("int", bodyTop, bodyRect, 4)
         NumPut("int", width - 20, bodyRect, 8)
-        NumPut("int", centerY + 42, bodyRect, 12)
+        NumPut("int", bodyBottom, bodyRect, 12)
         DllCall("user32\DrawTextW", "ptr", PreviewCanvasDc,
             "wstr", line2, "int", -1, "ptr", bodyRect.Ptr,
             "uint", 0x00000001 | 0x00000004 | 0x00000800)
@@ -1301,11 +1388,30 @@ PreviewBuildStatusCanvas(width, height, dpi, line1, line2, animated) {
     return true
 }
 
+PreviewDrawFallbackIcon(targetDc, width, dpi) {
+    global PreviewSession
+    info := Buffer(A_PtrSize = 8 ? 696 : 692, 0)
+    icon := 0
+    flags := 0x000000100 ; SHGFI_ICON + default large icon
+    if DllCall("shell32\SHGetFileInfoW", "wstr", PreviewSession.Path,
+        "uint", 0, "ptr", info.Ptr, "uint", info.Size, "uint", flags)
+        icon := NumGet(info, 0, "ptr")
+    if !icon
+        return
+    size := Min(196, Max(96, Floor(width * 0.55)))
+    iconY := DllCall("kernel32\MulDiv", "int", 82, "int", dpi, "int", 96)
+    DllCall("user32\DrawIconEx", "ptr", targetDc,
+        "int", Floor((width - size) / 2), "int", iconY,
+        "ptr", icon, "int", size, "int", size, "uint", 0,
+        "ptr", 0, "uint", 3)
+    DllCall("user32\DestroyIcon", "ptr", icon)
+}
+
 PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride,
     sourceKind := 0, sourcePixels := 0) {
     global Panel, PreviewSide, PreviewSession, PreviewWidthDip
     global PreviewMapView, PREVIEW_PIXEL_OFFSET, PreviewWindow
-    global PreviewStatusRect
+    global PreviewStatusRect, PreviewShowFileInfo
     panelRect := Buffer(16, 0)
     if !DllCall("user32\GetWindowRect", "ptr", Panel.Hwnd, "ptr", panelRect.Ptr)
         return false
@@ -1356,7 +1462,12 @@ PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride,
     padding := Max(6, DllCall("kernel32\MulDiv",
         "int", 8, "int", dpi, "int", 96, "int"))
     contentMaxWidth := Max(1, windowWidth - padding * 2)
-    contentMaxHeight := Max(1, panelHeight - padding * 2)
+    ; The text block is 112 DIP high, but its first 36 DIP are intentionally
+    ; available to the image. This enlarges the preview without moving text.
+    infoHeight := PreviewShowFileInfo
+        ? DllCall("kernel32\MulDiv", "int", 76, "int", dpi, "int", 96)
+        : 0
+    contentMaxHeight := Max(1, panelHeight - padding * 2 - infoHeight)
     ; Shell is the last-resort source. Its cached thumbnail can be much
     ; smaller than the useful preview area, so enlarge that fallback to fit.
     scaleLimit := sourceKind = 2 || sourceKind >= 4 ? 1000.0 : 1.0
@@ -1365,13 +1476,13 @@ PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride,
     drawWidth := Max(1, Floor(sourceWidth * scale))
     drawHeight := Max(1, Floor(sourceHeight * scale))
     windowHeight := sourceKind >= 4
-        ? panelHeight : Min(panelHeight, drawHeight + padding * 2)
+        ? panelHeight : Min(panelHeight, drawHeight + padding * 2 + infoHeight)
     x := side = "Right" ? panelRight + gap
         : panelLeft - gap - windowWidth
     y := Max(workTop, Min(panelTop, workBottom - windowHeight))
     if !PreviewBuildCanvas(windowWidth, windowHeight, padding,
         drawWidth, drawHeight, sourceWidth, sourceHeight, sourceStride,
-        sourcePixels, x, y)
+        sourcePixels, x, y, dpi)
         return false
     PreviewStatusRect := {X: x, Y: y, Width: windowWidth,
         Height: windowHeight, Dpi: dpi}
@@ -1387,10 +1498,12 @@ PreviewPresentPixels(sourceWidth, sourceHeight, sourceStride,
 }
 
 PreviewBuildCanvas(windowWidth, windowHeight, padding, drawWidth, drawHeight,
-    sourceWidth, sourceHeight, sourceStride, sourcePixels, screenX, screenY) {
+    sourceWidth, sourceHeight, sourceStride, sourcePixels, screenX, screenY,
+    dpi := 96) {
     global PreviewCanvasDc, PreviewCanvasBitmap, PreviewCanvasOldBitmap
     global PreviewCanvasWidth, PreviewCanvasHeight
     global PreviewBackgroundColor, PreviewBackgroundOpacity
+    global PreviewShowFileInfo, PreviewSession
     if !IsObject(sourcePixels)
         return false
     canvasDc := 0
@@ -1491,8 +1604,12 @@ PreviewBuildCanvas(windowWidth, windowHeight, padding, drawWidth, drawHeight,
         PreviewPaintConfiguredBackground(canvasDc,
             windowWidth, windowHeight, screenX, screenY,
             PreviewBackgroundColor, PreviewBackgroundOpacity)
+        infoHeight := PreviewShowFileInfo
+            ? DllCall("kernel32\MulDiv", "int", 76, "int", dpi, "int", 96)
+            : 0
+        imageAreaHeight := Max(1, windowHeight - padding * 2 - infoHeight)
         imageX := Floor((windowWidth - drawWidth) / 2)
-        imageY := Floor((windowHeight - drawHeight) / 2)
+        imageY := padding + Max(0, Floor((imageAreaHeight - drawHeight) / 2))
         imageRect := Buffer(16, 0)
         NumPut("int", imageX, imageRect, 0)
         NumPut("int", imageY, imageRect, 4)
@@ -1508,6 +1625,9 @@ PreviewBuildCanvas(windowWidth, windowHeight, padding, drawWidth, drawHeight,
             "ptr", sourceDc, "int", 0, "int", 0,
             "int", sourceWidth, "int", sourceHeight,
             "uint", NumGet(blend, 0, "uint"))
+        if PreviewShowFileInfo
+            PreviewDrawFileInfo(canvasDc, windowWidth, windowHeight,
+                padding, dpi)
         rect := Buffer(16, 0)
         NumPut("int", windowWidth, rect, 8)
         NumPut("int", windowHeight, rect, 12)
@@ -1563,6 +1683,43 @@ PreviewBuildCanvas(windowWidth, windowHeight, padding, drawWidth, drawHeight,
         if canvasDc
             DllCall("gdi32\DeleteDC", "ptr", canvasDc)
     }
+}
+
+PreviewDrawFileInfo(targetDc, width, height, padding, dpi := 96) {
+    global PreviewSession
+    path := PreviewSession.Path
+    SplitPath(path, &name)
+    details := PreviewFormatFileDetails(path)
+    infoHeight := DllCall("kernel32\MulDiv",
+        "int", 112, "int", dpi, "int", 96)
+    barTop := Max(0, height - infoHeight)
+    fontHeight := DllCall("kernel32\MulDiv",
+        "int", 15, "int", dpi, "int", 96)
+    font := DllCall("gdi32\CreateFontW", "int", -fontHeight,
+        "int", 0, "int", 0, "int", 0, "int", 400, "uint", 0,
+        "uint", 0, "uint", 0, "uint", 1, "uint", 0, "uint", 0,
+        "uint", 0, "uint", 0, "wstr", "Microsoft YaHei UI", "ptr")
+    old := DllCall("gdi32\SelectObject", "ptr", targetDc, "ptr", font, "ptr")
+    DllCall("gdi32\SetTextColor", "ptr", targetDc, "uint", 0x00D5D5D5)
+    DllCall("gdi32\SetBkMode", "ptr", targetDc, "int", 1)
+    rect := Buffer(16, 0)
+    NumPut("int", padding, rect, 0)
+    topInset := DllCall("kernel32\MulDiv", "int", 60, "int", dpi, "int", 96)
+    nameBottom := DllCall("kernel32\MulDiv", "int", 112, "int", dpi, "int", 96)
+    detailsTop := DllCall("kernel32\MulDiv", "int", 36, "int", dpi, "int", 96)
+    detailsBottom := DllCall("kernel32\MulDiv", "int", 58, "int", dpi, "int", 96)
+    NumPut("int", barTop + topInset, rect, 4)
+    NumPut("int", width - padding, rect, 8)
+    NumPut("int", barTop + nameBottom, rect, 12)
+    DllCall("user32\DrawTextW", "ptr", targetDc, "wstr", name,
+        "int", -1, "ptr", rect.Ptr, "uint", 0x00000001 | 0x00000010 | 0x00000800)
+    DllCall("gdi32\SetTextColor", "ptr", targetDc, "uint", 0x00B3A79E)
+    NumPut("int", barTop + detailsTop, rect, 4)
+    NumPut("int", barTop + detailsBottom, rect, 12)
+    DllCall("user32\DrawTextW", "ptr", targetDc, "wstr", details,
+        "int", -1, "ptr", rect.Ptr, "uint", 0x00000001 | 0x00000010 | 0x00000800)
+    DllCall("gdi32\SelectObject", "ptr", targetDc, "ptr", old, "ptr")
+    DllCall("gdi32\DeleteObject", "ptr", font)
 }
 
 PreviewPaintConfiguredBackground(targetDc, width, height,

@@ -137,9 +137,9 @@ InstallPanelHotkeys() {
     Hotkey("Space", ToggleExternalQuickPreview)
     HotIf(IsPanelQuickPreviewActive)
     Hotkey("Esc", QuickPreviewEscape)
-    HotIf(IsExternalQuickPreviewFocused)
-    Hotkey("Space", ToggleExternalQuickPreview)
-    Hotkey("Esc", QuickPreviewEscape)
+    ; Once QuickLook/Seer owns focus, its keyboard and menus belong entirely to
+    ; that application.  In particular, do not steal Space/Esc from provider
+    ; dialogs, toolbar menus or plugin child windows.
     HotIf()
 }
 
@@ -676,6 +676,7 @@ PrependPinnedPaths(paths) {
 SavePinnedFiles() {
     SyncActiveWorkspacePinnedState()
     AtomicConfigEdit(WritePinnedFilesConfig)
+    RefreshScanAfterPinnedChange()
 }
 
 WritePinnedFilesConfig(tempPath) {

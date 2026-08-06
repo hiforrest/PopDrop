@@ -1149,10 +1149,13 @@ WriteWorkerCompletionAtomic(path, request, scannedCount) {
 }
 
 ResolveCacheDirectory(setting) {
+    global DataRootDir
     setting := NormalizePath(setting)
     candidates := []
     if setting != ""
         candidates.Push(setting)
+    else if IsSet(DataRootDir) && DataRootDir != ""
+        candidates.Push(DataRootDir "\cache")
     else
         candidates.Push(A_ScriptDir "\cache")
     localAppData := EnvGet("LOCALAPPDATA")
@@ -1479,19 +1482,28 @@ StartBackgroundScan(sourceKeys := 0, reason := "auto", includeRecent := -1) {
     global WorkerRunning, PendingRefresh, PendingFullRefresh
     global PendingScanSourceKeys, PendingIncludeRecent
     global ScanGeneration, WorkerGeneration, WorkerWorkspaceId
+    global WorkerFingerprint, WorkerStartedTick, WorkerRecoveryAttempts
     global WorkerRequestPath, WorkerReadyPath, WorkerPid, CacheDir, CacheWritable
     global WorkerAppliedSourceIndexes, WorkerRecentApplied, WorkerChanged
     global WorkerFullScan
     global WorkerSourceDirtyTokens, WorkerRecentDirtyToken
     global SourceWatcherRecentDirty, SourceWatcherRecentGeneration
     global WorkerStatusToken, ActiveWorkspaceId, ShowRecentSidebar
+    global CurrentConfigFingerprint
     global InactiveScanJob
     ReconcileSourceWatchers()
     if includeRecent = -1
         includeRecent := ShowRecentSidebar
+    if reason != "recovery"
+        WorkerRecoveryAttempts := 0
     if IsObject(InactiveScanJob)
-        CancelInactiveWorkspaceScan()
-    if WorkerRunning && StrLower(WorkerWorkspaceId) != StrLower(ActiveWorkspaceId) {
+        CancelInactiveWorkspaceScan(false)
+    workerStale := WorkerRunning
+        && (StrLower(WorkerWorkspaceId) != StrLower(ActiveWorkspaceId)
+            || WorkerFingerprint != CurrentConfigFingerprint)
+    ; Manual refresh is an explicit recovery command.  It must replace a hung
+    ; full worker instead of being discarded by the full-scan coalescer.
+    if WorkerRunning && (workerStale || reason = "manual") {
         if WorkerPid && ProcessExist(WorkerPid)
             try ProcessClose(WorkerPid)
         FinishWorker(false)
@@ -1535,6 +1547,8 @@ StartBackgroundScan(sourceKeys := 0, reason := "auto", includeRecent := -1) {
     WorkerFullScan := !IsObject(sourceKeys)
     WorkerGeneration := generation
     WorkerWorkspaceId := ActiveWorkspaceId
+    WorkerFingerprint := CurrentConfigFingerprint
+    WorkerStartedTick := A_TickCount
     WorkerRequestPath := requestPath
     WorkerReadyPath := readyPath
     WorkerAppliedSourceIndexes := Map()
@@ -1589,6 +1603,8 @@ EnsureCurrentScanSkeleton() {
 
 PollWorkerResult() {
     global WorkerRunning, WorkerPid, WorkerReadyPath, WorkerGeneration
+    global WorkerWorkspaceId, WorkerFingerprint, WorkerStartedTick
+    global WorkerRecoveryAttempts
     global WorkerAppliedSourceIndexes, WorkerRecentApplied, WorkerChanged
     global WorkerSourceDirtyTokens, WorkerRecentDirtyToken
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
@@ -1602,6 +1618,13 @@ PollWorkerResult() {
         SetTimer(PollWorkerResult, 0)
         return
     }
+    if WorkerFingerprint != CurrentConfigFingerprint
+        || StrLower(WorkerWorkspaceId) != StrLower(ActiveWorkspaceId) {
+        if WorkerPid && ProcessExist(WorkerPid)
+            try ProcessClose(WorkerPid)
+        FinishWorker(false)
+        return
+    }
     Loop Files, WorkerReadyPath "\source-*.ini", "F" {
         if !RegExMatch(A_LoopFileName, "i)^source-(\d+)\.ini$", &match)
             continue
@@ -1609,7 +1632,7 @@ PollWorkerResult() {
         if WorkerAppliedSourceIndexes.Has(sourceIndex)
             continue
         partial := ReadScanResult(A_LoopFileFullPath, WorkerGeneration,
-            CurrentConfigFingerprint, ActiveWorkspaceId)
+            WorkerFingerprint, WorkerWorkspaceId)
         if sourceIndex < 1 || sourceIndex > LastValidFolderSettings.Length
             continue
         if !IsObject(partial) || partial.Kind != "Source"
@@ -1644,7 +1667,7 @@ PollWorkerResult() {
     recentPath := WorkerReadyPath "\recent.ini"
     if !WorkerRecentApplied && FileExist(recentPath) {
         partial := ReadScanResult(recentPath, WorkerGeneration,
-            CurrentConfigFingerprint, ActiveWorkspaceId)
+            WorkerFingerprint, WorkerWorkspaceId)
         if IsObject(partial) && partial.Kind = "Recent" {
             WorkerRecentApplied := true
             if ResultSignature({Folders: [], Recent: CurrentScanResult.Recent})
@@ -1671,22 +1694,82 @@ PollWorkerResult() {
     if FileExist(completePath) {
         validComplete := IniRead(completePath, "Meta", "Generation", "")
             = WorkerGeneration
+            && IniRead(completePath, "Meta", "Fingerprint", "")
+                = WorkerFingerprint
+            && StrLower(IniRead(completePath, "Meta", "WorkspaceId", ""))
+                = StrLower(WorkerWorkspaceId)
+            && WorkerFingerprint = CurrentConfigFingerprint
+            && StrLower(WorkerWorkspaceId) = StrLower(ActiveWorkspaceId)
         if validComplete {
+            WorkerRecoveryAttempts := 0
             ScanResultLoaded := true
             RememberCurrentWorkspaceSnapshot()
             FlushPendingScanCacheWrite()
             SetBackgroundStatus(WorkerChanged ? "已更新" : "已是最新",
                 WorkerChanged ? 700 : 250)
+            FinishWorker()
         } else
-            SetBackgroundStatus("更新失败", 1200)
-        FinishWorker()
+            RecoverFailedWorker("扫描结果已过期")
         return
     }
     if WorkerPid && !ProcessExist(WorkerPid) {
         FlushPendingScanCacheWrite()
-        SetBackgroundStatus("更新失败", 1200)
-        FinishWorker()
+        RecoverFailedWorker("扫描进程异常退出")
+        return
     }
+    if WorkerStartedTick && A_TickCount - WorkerStartedTick > 120000 {
+        if WorkerPid && ProcessExist(WorkerPid)
+            try ProcessClose(WorkerPid)
+        RecoverFailedWorker("扫描超时")
+    }
+}
+
+RecoverFailedWorker(reason) {
+    global PendingRefresh, WorkerRecoveryAttempts, ShowRecentSidebar
+    hadPending := PendingRefresh
+    FinishWorker(false)
+    if hadPending {
+        PendingRefresh := false
+        SetBackgroundStatus("正在重试")
+        SetTimer(StartPendingRefresh, -80)
+        return
+    }
+    if WorkerRecoveryAttempts < 1 {
+        WorkerRecoveryAttempts += 1
+        SetBackgroundStatus("正在重试")
+        SetTimer(() => StartBackgroundScan(0, "recovery", ShowRecentSidebar), -250)
+        return
+    }
+    SetBackgroundStatus("加载失败，请点击刷新")
+}
+
+RefreshScanAfterPinnedChange() {
+    global CurrentConfigFingerprint, CurrentScanResult, LastValidFolderSettings
+    global CurrentHiddenBySource, PanelRenderSignature, RecentRenderSignature
+    global ScanResultLoaded, ActiveWorkspaceId
+    fingerprint := ComputeConfigFingerprint(LastValidFolderSettings)
+    if fingerprint = CurrentConfigFingerprint
+        return
+    ; Keep the already rendered source snapshot available while the changed
+    ; pinned override is reconciled.  Fast mode must never turn a warm view
+    ; into a pinned-only cold-loading screen merely because its fingerprint
+    ; changed.
+    CurrentConfigFingerprint := fingerprint
+    if IsObject(CurrentScanResult) {
+        CurrentScanResult.Fingerprint := fingerprint
+        CurrentScanResult.WorkspaceId := ActiveWorkspaceId
+    }
+    CurrentHiddenBySource := Map()
+    PanelRenderSignature := ""
+    RecentRenderSignature := ""
+    if ScanResultLoaded
+        RememberCurrentWorkspaceSnapshot()
+    for folder in LastValidFolderSettings {
+        sourceId := folder.SourceId != "" ? folder.SourceId
+            : ResolveFolderSourceId(folder.Name, folder.Path)
+        MarkWorkspaceSourceDirty(ActiveWorkspaceId, sourceId)
+    }
+    StartBackgroundScan(0, "pinned-change", false)
 }
 
 RebuildCurrentHiddenDiagnostics() {
@@ -1863,6 +1946,11 @@ PollInactiveWorkspaceScan() {
         if IniRead(completePath, "Meta", "Generation", "") = job.Generation {
             if WriteWorkspaceSnapshot(job.Result, job.WorkspaceId,
                 job.Fingerprint) {
+                ; Fast workspace switching reads memory before SQLite/INI.  The
+                ; durable inactive refresh and its in-memory peer must be
+                ; published as one logical commit before Dirty is cleared.
+                RememberWorkspaceSnapshot(job.Result, job.WorkspaceId,
+                    job.Fingerprint)
                 ; Clear Dirty only after the merged snapshot is durable. If a
                 ; write fails, the source remains queued for a later retry.
                 for sourceKey, token in job.SourceTokens {
@@ -1920,7 +2008,7 @@ GetWorkspaceSourceIdByIndex(workspaceId, sourceIndex) {
         settings[sourceIndex].Name, settings[sourceIndex].Path)
 }
 
-FinishInactiveWorkspaceScan() {
+FinishInactiveWorkspaceScan(startNext := true) {
     global InactiveScanJob
     SetTimer(PollInactiveWorkspaceScan, 0)
     if IsObject(InactiveScanJob) {
@@ -1928,7 +2016,8 @@ FinishInactiveWorkspaceScan() {
         try DirDelete(InactiveScanJob.ReadyPath, true)
     }
     InactiveScanJob := 0
-    StartNextInactiveWorkspaceScan()
+    if startNext
+        StartNextInactiveWorkspaceScan()
 }
 
 RequeueInactiveWorkspaceJob(job) {
@@ -1940,19 +2029,27 @@ RequeueInactiveWorkspaceJob(job) {
         InactiveScanQueue[workspaceKey][sourceKey] := token
 }
 
-CancelInactiveWorkspaceScan() {
+CancelInactiveWorkspaceScan(startNext := true) {
     global InactiveScanJob, InactiveScanQueue
     if !IsObject(InactiveScanJob)
         return
     RequeueInactiveWorkspaceJob(InactiveScanJob)
     if InactiveScanJob.Pid && ProcessExist(InactiveScanJob.Pid)
         try ProcessClose(InactiveScanJob.Pid)
-    FinishInactiveWorkspaceScan()
+    FinishInactiveWorkspaceScan(startNext)
+}
+
+RememberWorkspaceSnapshot(result, workspaceId, fingerprint) {
+    global WorkspaceScanSnapshots
+    if workspaceId != ""
+        WorkspaceScanSnapshots[StrLower(workspaceId)] := {
+            Fingerprint: fingerprint, Result: result}
 }
 
 FinishWorker(startPending := true) {
     global WorkerRunning, WorkerPid, WorkerRequestPath, WorkerReadyPath
     global PendingRefresh, WorkerStatusToken, WorkerFullScan
+    global WorkerFingerprint, WorkerStartedTick
     SetTimer(PollWorkerResult, 0)
     ++WorkerStatusToken
     try FileDelete(WorkerRequestPath)
@@ -1961,6 +2058,8 @@ FinishWorker(startPending := true) {
         try DirDelete(WorkerReadyPath, true)
     WorkerRunning := false
     WorkerFullScan := false
+    WorkerFingerprint := ""
+    WorkerStartedTick := 0
     WorkerPid := 0
     pendingStarted := false
     if startPending && PendingRefresh {

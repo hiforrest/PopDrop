@@ -395,7 +395,13 @@ EnsureRefreshConfigDefaults(doc) {
             minutes := ConfigDefaultValue(
                 "General", "ConsistencyCheckMinutes", "60")
         doc.SetValue("General", "ConsistencyCheckMinutes", minutes, 1)
+    if !ConfigDocumentContainsKey(doc, "General", "UiScale")
+        doc.SetValue("General", "UiScale", "100", 1)
+    else if StrLower(Trim(doc.GetValue("General", "UiScale", ""))) = "system"
+        doc.SetValue("General", "UiScale", "100", 1)
     }
+    if !ConfigDocumentContainsKey(doc, "General", "StartupEnabled")
+        doc.SetValue("General", "StartupEnabled", "0", 1)
 }
 
 EnsureKnownFolderDefaults(doc) {
@@ -512,7 +518,8 @@ EnsurePreviewConfigDefaults(doc) {
         {Key: "DirectImageMaxPixelsMP", Value: ConfigDefaultValue("Preview", "DirectImageMaxPixelsMP", "160")},
         {Key: "DirectImageMaxExpandedMB", Value: ConfigDefaultValue("Preview", "DirectImageMaxExpandedMB", "256")},
         {Key: "DocumentEnabled", Value: ConfigDefaultValue("Preview", "DocumentEnabled", "1")},
-        {Key: "PdfEnabled", Value: ConfigDefaultValue("Preview", "PdfEnabled", "0")}
+        {Key: "PdfEnabled", Value: ConfigDefaultValue("Preview", "PdfEnabled", "0")},
+        {Key: "ShowFileInfo", Value: ConfigDefaultValue("Preview", "ShowFileInfo", "1")}
     ]
     for entry in defaults {
         if !IsObject(GetDocumentEntry(doc, "Preview", entry.Key))
@@ -589,6 +596,9 @@ LoadSettings(*) {
     global WorkspaceScanSnapshots, PanelRenderSignature, RecentRenderSignature
     global ConsistencyCheckMinutes, ContentUpdateMode
     global CONTENT_UPDATE_FAST, CONTENT_UPDATE_ACCURACY
+    global UiScaleMode, UiScalePercent, UiScaleFactor
+    global UI_SCALE_100, UI_SCALE_125
+    global UI_SCALE_150, UI_SCALE_175, UI_SCALE_200
     global ConfigErrors, LastValidFolderSettings
     global ConfigErrorsShown
     global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
@@ -706,6 +716,17 @@ LoadSettings(*) {
         ContentUpdateMode := CONTENT_UPDATE_ACCURACY
     else
         ContentUpdateMode := CONTENT_UPDATE_FAST
+    rawUiScale := Trim(IniRead(ConfigPath, "General", "UiScale", UI_SCALE_100))
+    validUiScale := [UI_SCALE_100, UI_SCALE_125, UI_SCALE_150,
+        UI_SCALE_175, UI_SCALE_200]
+    if ValueInArray(rawUiScale, validUiScale) {
+        UiScaleMode := rawUiScale
+        UiScalePercent := Integer(rawUiScale)
+    } else {
+        UiScaleMode := UI_SCALE_100
+        UiScalePercent := 100
+    }
+    UiScaleFactor := Max(0.75, Min(UiScalePercent / 100, 2.5))
     try RecentFileCount := Integer(IniRead(ConfigPath, "General", "RecentFileCount", "12"))
     catch
         RecentFileCount := 12

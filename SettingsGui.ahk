@@ -9,7 +9,7 @@ OpenConfig(*) {
 OpenAboutPopDrop(*) {
     c := OpenSettingsGui()
     if IsObject(c)
-        ShowSettingsPage(c, 6)
+        ShowSettingsPage(c, 7)
 }
 
 OpenAboutUrl(url, *) {
@@ -27,7 +27,7 @@ OpenFileManagerSettings() {
     c := OpenSettingsGui()
     if !IsObject(c)
         return false
-    ShowSettingsPage(c, 3)
+    ShowSettingsPage(c, 2)
     try c.FileManagerProvider.Focus()
     return true
 }
@@ -123,7 +123,7 @@ NavigateSettingsToSource(c, workspaceId, sourceId) {
         return false
     target := ResolveDraftSourceNavigation(
         c.Draft, workspaceId, sourceId)
-    ShowSettingsPage(c, 2)
+    ShowSettingsPage(c, 6)
     RefreshSourceList(c, sourceId, false)
     if !target.SourceFound {
         c.SourceStatus.Text := "目标来源已经不存在。"
@@ -135,7 +135,7 @@ NavigateSettingsToSource(c, workspaceId, sourceId) {
 }
 
 OpenSettingsGui() {
-    global Panel, SettingsDialog, SettingsController
+    global Panel, SettingsDialog, SettingsController, UiScaleFactor
 
     CancelFilePointerGesture()
     PreviewSuppress("settings", false)
@@ -154,7 +154,7 @@ OpenSettingsGui() {
         "PopDrop 设置")
     guiObj.MarginX := 14
     guiObj.MarginY := 12
-    guiObj.SetFont("s9", "Microsoft YaHei UI")
+    guiObj.SetFont("s" Round(9 * UiScaleFactor), "Microsoft YaHei UI")
     controller := {
         Gui: guiObj,
         Draft: draft,
@@ -172,33 +172,35 @@ OpenSettingsGui() {
     SettingsController := controller
     SettingsDialog := guiObj
 
-    navigation := guiObj.AddTreeView("xm ym w156 h636 +0x20")
+    navigation := guiObj.AddTreeView("xm ym w156 h752 +0x20")
     sharedRoot := navigation.Add("共享设置", 0, "Expand")
     navGeneral := navigation.Add("通用", sharedRoot)
-    navOperations := navigation.Add("打开与文件操作", sharedRoot)
-    navDisplay := navigation.Add("显示与过滤", sharedRoot)
+    navOperations := navigation.Add("文件打开与操作", sharedRoot)
+    navDisplay := navigation.Add("文件显示与过滤", sharedRoot)
+    navInterface := navigation.Add("界面设置", sharedRoot)
     navContentUpdate := navigation.Add("内容更新方式", sharedRoot)
     workspaceRoot := navigation.Add("工作区设置", 0, "Expand")
     navWorkspace := navigation.Add("当前工作区", workspaceRoot)
     navAbout := navigation.Add("关于 PopDrop")
     controller.Navigation := navigation
     controller.NavPages := Map(
-        navGeneral, 1, navWorkspace, 2, navOperations, 3, navDisplay, 4,
-        navContentUpdate, 5, navAbout, 6)
+        navGeneral, 1, navOperations, 2, navDisplay, 3, navInterface, 4,
+        navContentUpdate, 5, navWorkspace, 6, navAbout, 7)
     controller.NavItems := Map(
-        1, navGeneral, 2, navWorkspace, 3, navOperations, 4, navDisplay,
-        5, navContentUpdate, 6, navAbout)
+        1, navGeneral, 2, navOperations, 3, navDisplay, 4, navInterface,
+        5, navContentUpdate, 6, navWorkspace, 7, navAbout)
     ; Tab3 remains the native page host, but its duplicate tab strip is placed
     ; above the client area. The TreeView is the only visible page navigation.
-    tabs := guiObj.AddTab3("x184 y-26 w852 h674 -Tabstop",
-        ["共享设置 · 通用", "当前工作区",
-         "共享设置 · 打开与文件操作", "共享设置 · 显示与过滤",
-         "共享设置 · 内容更新方式", "关于 PopDrop"])
+    tabs := guiObj.AddTab3("x184 y-26 w852 h790 -Tabstop",
+        ["共享设置 · 通用", "共享设置 · 文件打开与操作",
+         "共享设置 · 文件显示与过滤", "共享设置 · 界面设置",
+         "共享设置 · 内容更新方式", "当前工作区", "关于 PopDrop"])
     controller.Tab := tabs
     BuildGeneralSettingsPage(controller, tabs)
     BuildSourcesSettingsPage(controller, tabs)
     BuildOperationsSettingsPage(controller, tabs)
     BuildDisplaySettingsPage(controller, tabs)
+    BuildInterfaceSettingsPage(controller, tabs)
     BuildContentUpdateSettingsPage(controller, tabs)
     BuildAboutSettingsPage(controller, tabs)
     tabs.UseTab()
@@ -213,7 +215,7 @@ OpenSettingsGui() {
     ; A relative y+ value would be based on the last control created on the
     ; active tab page, placing the footer underneath Tab3 where it is visible
     ; but cannot receive mouse input.
-    advanced := AddUiButton(guiObj, "x184 y660 w112", "高级设置…")
+    advanced := AddUiButton(guiObj, "x184 y776 w112", "高级设置…")
     guiObj.AddText("x+8 yp+7 w400 c666666",
         "直接编辑 config.ini，适合高级用户。")
     cancel := AddUiButton(guiObj, "x860 yp-7 w78", "取消")
@@ -233,9 +235,10 @@ OpenSettingsGui() {
     RefreshExcludedNameList(controller)
     LoadGeneralControls(controller)
     LoadDisplayControls(controller)
+    LoadInterfaceControls(controller)
     LoadContentUpdateControls(controller)
     navigation.Modify(navGeneral, "Select Vis")
-    guiObj.Show("w1050 h704")
+    guiObj.Show("w1050 h820")
     return controller
 }
 
@@ -260,7 +263,12 @@ LoadSettingsIntoDraft() {
     global FileManagerProvider, FileManagerExecutable
     global PreviewEnabled, PreviewSide, PreviewCacheEnabled
     global PreviewDocumentEnabled, PreviewPdfEnabled
+    global PreviewShowFileInfo
     global ContentUpdateMode
+    global UiScaleMode, ThumbnailSize, ThumbnailHorizontalGap
+    global ThumbnailVerticalGap, ThumbnailTextLines
+    global TextBlockCardWidth, TextBlockCardHeight
+    global ThumbnailPolicy
     global ExternalQuickPreviewProvider
     global SeerIntegrationEnabled, QuickLookPath
 
@@ -303,6 +311,7 @@ LoadSettingsIntoDraft() {
             OpenFileMode: ParseGlobalOpenFileMode(GlobalOpenFileMode),
             DefaultContextMenu: ParseDefaultContextMenu(DefaultContextMenu),
             Hotkey: ConfiguredHotkey,
+            StartupEnabled: ReadStartupEnabled(),
             DoubleHotkeyWorkspaceId: DoubleHotkeyWorkspaceId,
             LastFileWorkspaceId: LastFileWorkspaceId,
             WindowMode: WindowMode,
@@ -323,10 +332,19 @@ LoadSettingsIntoDraft() {
             PreviewCacheEnabled: PreviewCacheEnabled,
             PreviewDocumentEnabled: PreviewDocumentEnabled,
             PreviewPdfEnabled: PreviewPdfEnabled,
+            PreviewShowFileInfo: PreviewShowFileInfo,
             QuickPreviewProvider: ExternalQuickPreviewProvider,
             SeerIntegrationEnabled: SeerIntegrationEnabled,
             QuickLookPath: QuickLookPath,
             ContentUpdateMode: ContentUpdateMode,
+            UiScaleMode: UiScaleMode,
+            ThumbnailPolicy: ThumbnailPolicy,
+            ThumbnailSize: ThumbnailSize,
+            ThumbnailHorizontalGap: ThumbnailHorizontalGap,
+            ThumbnailVerticalGap: ThumbnailVerticalGap,
+            ThumbnailTextLines: ThumbnailTextLines,
+            TextBlockCardWidth: TextBlockCardWidth,
+            TextBlockCardHeight: TextBlockCardHeight,
             DefaultDisplayScope: ReadGlobalDisplayScopeForDraft(),
             DefaultFolderTimeMode: ReadGlobalFolderTimeForDraft(),
             DefaultFilter: ReadGlobalFilterForDraft(),
@@ -543,6 +561,12 @@ BuildGeneralSettingsPage(c, tabs) {
     c.TransferNotify := g.AddCheckBox("x580 yp",
         "面板隐藏时显示批次完成通知")
 
+    g.AddGroupBox("x200 y647 w818 h90", "开机启动")
+    c.StartupEnabled := g.AddCheckBox("x220 y676",
+        "登录 Windows 后自动启动 PopDrop")
+    g.AddText("x500 y680 w480 h36 c666666",
+        "通过当前用户的启动文件夹创建快捷方式；关闭后会自动移除。")
+
     c.GlobalDouble.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.GlobalSingle.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.Hotkey.OnEvent("Change", GeneralControlChanged.Bind(c))
@@ -556,10 +580,11 @@ BuildGeneralSettingsPage(c, tabs) {
     c.AllowHttp.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.TransferMax.OnEvent("Change", GeneralControlChanged.Bind(c))
     c.TransferNotify.OnEvent("Click", GeneralControlChanged.Bind(c))
+    c.StartupEnabled.OnEvent("Click", GeneralControlChanged.Bind(c))
 }
 
 BuildSourcesSettingsPage(c, tabs) {
-    tabs.UseTab(2)
+    tabs.UseTab(6)
     g := c.Gui
     g.AddGroupBox("x200 y29 w818 h66", "当前工作区")
     g.AddText("x220 y54 w86", "当前工作区：")
@@ -833,6 +858,7 @@ ReloadSettingsDraft(c) {
     c.SelectedTargetId := ""
     LoadGeneralControls(c)
     LoadDisplayControls(c)
+    LoadInterfaceControls(c)
     LoadContentUpdateControls(c)
     RefreshSettingsWorkspaceControls(c)
     RefreshApplicationList(c)
@@ -1071,7 +1097,7 @@ DeleteWorkspaceFromManager(c, list, *) {
 }
 
 BuildOperationsSettingsPage(c, tabs) {
-    tabs.UseTab(3)
+    tabs.UseTab(2)
     g := c.Gui
     g.AddGroupBox("x200 y29 w818 h190",
         "文件管理器 · 应用于所有工作区")
@@ -1347,7 +1373,7 @@ HandleFileManagerTestResult(c, result, successText) {
 }
 
 BuildDisplaySettingsPage(c, tabs) {
-    tabs.UseTab(4)
+    tabs.UseTab(3)
     g := c.Gui
     g.AddGroupBox("x200 y29 w818 h190", "共享排除的文件夹名称")
     c.ExcludedNameList := g.AddListView(
@@ -1385,10 +1411,11 @@ BuildDisplaySettingsPage(c, tabs) {
     c.PreviewEnabled := g.AddCheckBox("x220 y470", "文件预览")
     c.PreviewDocumentEnabled := g.AddCheckBox("x320 yp", "文档预览")
     c.PreviewPdfEnabled := g.AddCheckBox("x420 yp", "PDF 预览")
-    g.AddText("x535 yp+3 w76", "预览位置：")
-    c.PreviewSide := AddUiDropDownList(g, "x615 yp-4 w120",
+    c.PreviewShowFileInfo := g.AddCheckBox("x560 y493", "显示文件名、大小和修改时间")
+    g.AddText("x535 y473 w76", "预览位置：")
+    c.PreviewSide := AddUiDropDownList(g, "x615 y469 w120",
         ["自动", "右侧", "左侧"])
-    c.PreviewCacheEnabled := g.AddCheckBox("x755 yp",
+    c.PreviewCacheEnabled := g.AddCheckBox("x755 y470",
         "后台生成静态快照")
     g.AddText("x220 y507 w100", "PDFium 组件：")
     c.PdfiumStatus := g.AddText("x320 yp w440 c666666", "")
@@ -1415,6 +1442,7 @@ BuildDisplaySettingsPage(c, tabs) {
     c.PreviewDocumentEnabled.OnEvent("Click", DisplayControlChanged.Bind(c))
     c.PreviewPdfEnabled.OnEvent(
         "Click", PdfiumPreviewSettingClicked.Bind(c))
+    c.PreviewShowFileInfo.OnEvent("Click", DisplayControlChanged.Bind(c))
     c.PdfiumInstall.OnEvent("Click", PdfiumInstallClicked.Bind(c))
     c.QuickPreviewProvider.OnEvent(
         "Change", DisplayControlChanged.Bind(c))
@@ -1422,9 +1450,56 @@ BuildDisplaySettingsPage(c, tabs) {
     c.QuickLookBrowse.OnEvent("Click", BrowseQuickLookPath.Bind(c))
 }
 
+BuildInterfaceSettingsPage(c, tabs) {
+    tabs.UseTab(4)
+    g := c.Gui
+    g.AddGroupBox("x200 y29 w818 h145", "界面缩放 · 应用于所有工作区")
+    g.AddText("x224 y66 w92", "界面缩放：")
+    c.UiScale := AddUiDropDownList(g, "x320 yp-4 w150",
+        ["100%", "125%", "150%", "175%", "200%"])
+    c.UiScaleHint := g.AddText("x490 yp+4 w480 c666666",
+        "100% 保持系统当前显示大小；其他比例会在此基础上放大。")
+    g.AddText("x224 y111 w744 c666666",
+        "界面缩放保存后需重新启动 PopDrop 才能生效。")
+
+    g.AddGroupBox("x200 y190 w818 h220", "文件图标 · 应用于所有工作区")
+    g.AddText("x224 y228 w92", "图标质量：")
+    c.ThumbnailPolicy := AddUiDropDownList(g, "x320 yp-4 w150",
+        ["快速", "完整"])
+    g.AddText("x224 y272 w92", "图标大小：")
+    c.ThumbnailSize := AddUiEdit(g, "x320 yp-4 w72 Number")
+    g.AddText("x404 yp+4 w110 c666666", "48–256")
+    g.AddText("x224 y316 w92", "横向间距：")
+    c.ThumbnailHorizontalGap := AddUiEdit(g, "x320 yp-4 w72 Number")
+    g.AddText("x460 yp+4 w92", "纵向间距：")
+    c.ThumbnailVerticalGap := AddUiEdit(g, "x556 yp-4 w72 Number")
+    g.AddText("x224 y360 w92", "文件名行数：")
+    c.ThumbnailTextLines := AddUiDropDownList(g, "x320 yp-4 w150",
+        ["1 行", "2 行"])
+
+    g.AddGroupBox("x200 y426 w818 h142", "文本块 · 应用于所有工作区")
+    g.AddText("x224 y465 w92", "卡片宽度：")
+    c.TextBlockCardWidth := AddUiEdit(g, "x320 yp-4 w72 Number")
+    g.AddText("x404 yp+4 w110 c666666", "140–640")
+    g.AddText("x540 yp w92", "卡片高度：")
+    c.TextBlockCardHeight := AddUiEdit(g, "x636 yp-4 w72 Number")
+    g.AddText("x720 yp+4 w110 c666666", "48–320")
+    g.AddText("x224 y515 w744 c666666",
+        "宽度和高度用于调整文本块工作区中的卡片尺寸。")
+
+    c.UiScale.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.ThumbnailPolicy.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.ThumbnailSize.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.ThumbnailHorizontalGap.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.ThumbnailVerticalGap.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.ThumbnailTextLines.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.TextBlockCardWidth.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.TextBlockCardHeight.OnEvent("Change", InterfaceControlChanged.Bind(c))
+}
+
 BuildAboutSettingsPage(c, tabs) {
     global APP_VERSION
-    tabs.UseTab(6)
+    tabs.UseTab(7)
     g := c.Gui
     g.AddGroupBox("x200 y29 w818 h360", "关于 PopDrop")
 
@@ -1519,8 +1594,50 @@ LoadGeneralControls(c) {
         c.AllowHttp.Value := d.AllowHttp
         c.TransferMax.Value := d.TransferMaxConcurrent
         c.TransferNotify.Value := d.ShowCompletionNotifications
+        c.StartupEnabled.Value := d.StartupEnabled
         LoadFileManagerControls(c)
     } finally c.Loading := false
+}
+
+LoadInterfaceControls(c) {
+    global UI_SCALE_100, UI_SCALE_125
+    global UI_SCALE_150, UI_SCALE_175, UI_SCALE_200
+    c.Loading := true
+    try {
+        d := c.Draft.General
+        scaleIndex := d.UiScaleMode = UI_SCALE_125 ? 2
+            : d.UiScaleMode = UI_SCALE_150 ? 3
+            : d.UiScaleMode = UI_SCALE_175 ? 4
+            : d.UiScaleMode = UI_SCALE_200 ? 5 : 1
+        c.UiScale.Choose(scaleIndex)
+        c.ThumbnailPolicy.Choose(d.ThumbnailPolicy = "Full" ? 2 : 1)
+        c.ThumbnailSize.Value := d.ThumbnailSize
+        c.ThumbnailHorizontalGap.Value := d.ThumbnailHorizontalGap
+        c.ThumbnailVerticalGap.Value := d.ThumbnailVerticalGap
+        c.ThumbnailTextLines.Choose(d.ThumbnailTextLines = 1 ? 1 : 2)
+        c.TextBlockCardWidth.Value := d.TextBlockCardWidth
+        c.TextBlockCardHeight.Value := d.TextBlockCardHeight
+    } finally c.Loading := false
+}
+
+InterfaceControlChanged(c, *) {
+    global UI_SCALE_100, UI_SCALE_125
+    global UI_SCALE_150, UI_SCALE_175, UI_SCALE_200
+    if c.Loading
+        return
+    scales := [UI_SCALE_100, UI_SCALE_125, UI_SCALE_150,
+        UI_SCALE_175, UI_SCALE_200]
+    c.Draft.General.UiScaleMode := scales[Max(1, c.UiScale.Value)]
+    c.Draft.General.ThumbnailPolicy := c.ThumbnailPolicy.Value = 2
+        ? "Full" : "Fast"
+    c.Draft.General.ThumbnailSize := Trim(c.ThumbnailSize.Value)
+    c.Draft.General.ThumbnailHorizontalGap := Trim(
+        c.ThumbnailHorizontalGap.Value)
+    c.Draft.General.ThumbnailVerticalGap := Trim(
+        c.ThumbnailVerticalGap.Value)
+    c.Draft.General.ThumbnailTextLines := c.ThumbnailTextLines.Value = 1 ? 1 : 2
+    c.Draft.General.TextBlockCardWidth := Trim(c.TextBlockCardWidth.Value)
+    c.Draft.General.TextBlockCardHeight := Trim(c.TextBlockCardHeight.Value)
 }
 
 GeneralControlChanged(c, *) {
@@ -1548,6 +1665,7 @@ GeneralControlChanged(c, *) {
     d.AllowHttp := !!c.AllowHttp.Value
     d.TransferMaxConcurrent := Trim(c.TransferMax.Value)
     d.ShowCompletionNotifications := !!c.TransferNotify.Value
+    d.StartupEnabled := !!c.StartupEnabled.Value
     RefreshInheritedOpenModeLabels(c)
 }
 
@@ -1614,6 +1732,7 @@ LoadDisplayControls(c) {
         c.PreviewCacheEnabled.Value := d.PreviewCacheEnabled
         c.PreviewDocumentEnabled.Value := d.PreviewDocumentEnabled
         c.PreviewPdfEnabled.Value := d.PreviewPdfEnabled
+        c.PreviewShowFileInfo.Value := d.PreviewShowFileInfo
         providerIndex := StrLower(d.QuickPreviewProvider) = "seer" ? 2
             : StrLower(d.QuickPreviewProvider) = "quicklook" ? 3 : 1
         c.QuickPreviewProvider.Choose(providerIndex)
@@ -1670,6 +1789,7 @@ DisplayControlChanged(c, *) {
     d.PreviewCacheEnabled := !!c.PreviewCacheEnabled.Value
     d.PreviewDocumentEnabled := !!c.PreviewDocumentEnabled.Value
     d.PreviewPdfEnabled := !!c.PreviewPdfEnabled.Value
+    d.PreviewShowFileInfo := !!c.PreviewShowFileInfo.Value
     d.QuickPreviewProvider := ["Off", "Seer", "QuickLook"][
         Max(1, c.QuickPreviewProvider.Value)]
     d.SeerIntegrationEnabled := d.QuickPreviewProvider = "Seer"
@@ -3459,6 +3579,11 @@ SettingsDraftSignature(draft) {
     parts.Push(g.OpenFileMode, g.DefaultContextMenu, g.Hotkey,
         g.DoubleHotkeyWorkspaceId, g.WindowMode,
         g.EscapeHidesPanel ? "1" : "0",
+        g.UiScaleMode,
+        g.ThumbnailPolicy,
+        g.ThumbnailSize "", g.ThumbnailHorizontalGap "",
+        g.ThumbnailVerticalGap "", g.ThumbnailTextLines "",
+        g.TextBlockCardWidth "", g.TextBlockCardHeight "",
         g.ContentUpdateMode,
         g.ShowRecentSidebar ? "1" : "0",
         g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode,
@@ -3537,6 +3662,7 @@ SettingsDraftHasChanges(c) {
     CommitCurrentSourceControlsToDraft(c)
     GeneralControlChanged(c)
     DisplayControlChanged(c)
+    InterfaceControlChanged(c)
     ContentUpdateControlChanged(c,
         c.Draft.General.ContentUpdateMode = CONTENT_UPDATE_ACCURACY
             ? "Accuracy" : "Fast")
@@ -3639,6 +3765,23 @@ ValidateSettingsDraft(c) {
         errors.Push("最近文件显示数量必须是 1–100 的整数。")
     if !IsIntegerText(d.General.TransferMaxConcurrent, 1, 6)
         errors.Push("外部传输最大并发数必须是 1–6 的整数。")
+    if !ValueInArray(d.General.UiScaleMode,
+        ["100", "125", "150", "175", "200"])
+        errors.Push("界面缩放设置无效。")
+    if !ValueInArray(d.General.ThumbnailPolicy, ["Fast", "Full"])
+        errors.Push("图标质量设置无效。")
+    if !IsIntegerText(d.General.ThumbnailSize, 48, 256)
+        errors.Push("图标大小必须是 48–256 的整数。")
+    if !IsIntegerText(d.General.ThumbnailHorizontalGap, 0, 128)
+        errors.Push("图标横向间距必须是 0–128 的整数。")
+    if !IsIntegerText(d.General.ThumbnailVerticalGap, 0, 128)
+        errors.Push("图标纵向间距必须是 0–128 的整数。")
+    if !IsIntegerText(d.General.ThumbnailTextLines, 1, 2)
+        errors.Push("文件名行数必须是 1 或 2。")
+    if !IsIntegerText(d.General.TextBlockCardWidth, 140, 640)
+        errors.Push("文本块宽度必须是 140–640 的整数。")
+    if !IsIntegerText(d.General.TextBlockCardHeight, 48, 320)
+        errors.Push("文本块高度必须是 48–320 的整数。")
     if !ValueInArray(d.General.QuickPreviewProvider,
         ["Off", "Seer", "QuickLook"])
         errors.Push("空格键快速预览提供程序无效。")
@@ -3882,6 +4025,7 @@ SaveSettingsDraftCore(c, closeAfter) {
     CommitCurrentSourceControlsToDraft(c)
     GeneralControlChanged(c)
     DisplayControlChanged(c)
+    InterfaceControlChanged(c)
     FileManagerControlChanged(c)
     c.Draft.General.FileManagerExecutable :=
         NormalizeFileManagerExecutableForSave(
@@ -3947,6 +4091,7 @@ SaveSettingsDraftCore(c, closeAfter) {
     try {
         CreateConfigBackup()
         AtomicConfigEdit(WriteSettingsDraft.Bind(c.Draft))
+        ApplyStartupShortcut(c.Draft.General.StartupEnabled)
         wroteConfig := true
         LoadSettings()
         ApplyWindowMode()
@@ -4042,6 +4187,7 @@ WriteSettingsDraft(draft, tempPath) {
     doc.SetValue("General", "DefaultContextMenu",
         ParseDefaultContextMenu(g.DefaultContextMenu), 1)
     doc.SetValue("General", "Hotkey", g.Hotkey, 1)
+    doc.SetValue("General", "StartupEnabled", g.StartupEnabled ? "1" : "0", 1)
     doc.SetValue("General", "DoubleHotkeyWorkspaceId",
         g.DoubleHotkeyWorkspaceId, 1)
     doc.SetValue("General", "LastFileWorkspaceId",
@@ -4057,6 +4203,19 @@ WriteSettingsDraft(draft, tempPath) {
         g.ShowRecentSidebar ? "1" : "0", 1)
     doc.SetValue("General", "ContentUpdateMode",
         g.ContentUpdateMode, 1)
+    doc.SetValue("General", "UiScale", g.UiScaleMode, 1)
+    doc.SetValue("General", "ThumbnailPolicy", g.ThumbnailPolicy, 1)
+    doc.SetValue("General", "ThumbnailSize", g.ThumbnailSize, 1)
+    doc.SetValue("General", "ThumbnailHorizontalGap",
+        g.ThumbnailHorizontalGap, 1)
+    doc.SetValue("General", "ThumbnailVerticalGap",
+        g.ThumbnailVerticalGap, 1)
+    doc.SetValue("General", "ThumbnailTextLines",
+        g.ThumbnailTextLines, 1)
+    doc.SetValue("General", "TextBlockCardWidth",
+        g.TextBlockCardWidth, 1)
+    doc.SetValue("General", "TextBlockCardHeight",
+        g.TextBlockCardHeight, 1)
     doc.SetValue("General", "RecentFileCount", g.RecentFileCount, 1)
     doc.SetValue("ExternalTransfer", "EnablePublicUrlFallback",
         g.EnablePublicUrlFallback ? "1" : "0", 1)
@@ -4080,6 +4239,8 @@ WriteSettingsDraft(draft, tempPath) {
         g.PreviewDocumentEnabled ? "1" : "0", 1)
     doc.SetValue("Preview", "PdfEnabled",
         g.PreviewPdfEnabled ? "1" : "0", 1)
+    doc.SetValue("Preview", "ShowFileInfo",
+        g.PreviewShowFileInfo ? "1" : "0", 1)
     doc.SetValue("QuickPreview", "ExternalQuickPreviewProvider",
         g.QuickPreviewProvider, 1)
     doc.SetValue("QuickPreview", "SeerIntegrationEnabled",

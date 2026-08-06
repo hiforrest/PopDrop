@@ -22,6 +22,11 @@ global APP_VERSION := "1.1.0"
 global CONFIG_VERSION := "27"
 global CONTENT_UPDATE_FAST := "Fast"
 global CONTENT_UPDATE_ACCURACY := "Accuracy"
+global UI_SCALE_100 := "100"
+global UI_SCALE_125 := "125"
+global UI_SCALE_150 := "150"
+global UI_SCALE_175 := "175"
+global UI_SCALE_200 := "200"
 
 ; ──── 工作区类型 ────
 global WORKSPACE_TYPE_FILES := "Files"
@@ -116,7 +121,8 @@ SetWorkingDir A_ScriptDir
 DllCall("ole32\OleInitialize", "ptr", 0)
 OnExit(Cleanup)
 
-global ConfigPath := A_ScriptDir "\config.ini"
+global DataRootDir := ResolvePopDropDataRoot()
+global ConfigPath := DataRootDir "\config.ini"
 global Panel := 0
 global FileView := 0
 global RecentLabel := 0
@@ -173,6 +179,9 @@ global WindowHeight := 576
 global ViewMode := "Thumbnail"
 global ShowRecentSidebar := false
 global ContentUpdateMode := CONTENT_UPDATE_FAST
+global UiScaleMode := UI_SCALE_100
+global UiScalePercent := 100
+global UiScaleFactor := 1.0
 global RecentFileCount := 12
 ; Native single-line control tuning. Buttons and edits use the full logical
 ; height. A DropDownList adds its own frame around the selection field, so its
@@ -278,6 +287,9 @@ global WorkerFullScan := false
 global WorkerPid := 0
 global WorkerGeneration := ""
 global WorkerWorkspaceId := ""
+global WorkerFingerprint := ""
+global WorkerStartedTick := 0
+global WorkerRecoveryAttempts := 0
 global WorkerRequestPath := ""
 global WorkerReadyPath := ""
 global PendingRefresh := false

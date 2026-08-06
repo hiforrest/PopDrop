@@ -265,3 +265,59 @@ IsSameOrDescendantPath(candidate, ancestor) {
     return candidateKey = ancestorKey
         || SubStr(candidateKey, 1, StrLen(ancestorKey) + 1) = ancestorKey "\"
 }
+ResolvePopDropDataRoot() {
+    scriptDir := A_ScriptDir
+    startup := EnvGet("APPDATA") "\Microsoft\Windows\Start Menu\Programs\Startup"
+    if startup != "" && StrLower(RTrim(scriptDir, "\"))
+        = StrLower(RTrim(startup, "\")) {
+        localAppData := EnvGet("LOCALAPPDATA")
+        if localAppData = ""
+            localAppData := A_AppData
+        root := localAppData "\PopDrop"
+        try DirCreate(root)
+        ; Preserve configurations created by the affected startup-folder
+        ; builds when switching to the isolated data root.
+        if !FileExist(root "\config.ini") && FileExist(scriptDir "\config.ini") {
+            try FileCopy(scriptDir "\config.ini", root "\config.ini")
+        }
+        return root
+    }
+    return scriptDir
+}
+
+ReadStartupEnabled() {
+    global ConfigPath
+    return IniRead(ConfigPath, "General", "StartupEnabled", "0") = "1"
+}
+
+GetPopDropStartupShortcutPath() {
+    startup := EnvGet("APPDATA") "\Microsoft\Windows\Start Menu\Programs\Startup"
+    return startup "\PopDrop.lnk"
+}
+
+ApplyStartupShortcut(enabled) {
+    shortcut := GetPopDropStartupShortcutPath()
+    if !enabled {
+        try FileDelete(shortcut)
+        return
+    }
+    try {
+        shell := ComObject("WScript.Shell")
+        link := shell.CreateShortcut(shortcut)
+        if A_IsCompiled {
+            link.TargetPath := A_ScriptFullPath
+            link.Arguments := ""
+            link.WorkingDirectory := A_ScriptDir
+            link.IconLocation := A_ScriptFullPath ",0"
+        } else {
+            link.TargetPath := A_AhkPath
+            link.Arguments := '"' A_ScriptFullPath '"'
+            link.WorkingDirectory := A_ScriptDir
+            link.IconLocation := A_ScriptDir "\assets\app.ico"
+        }
+        link.Description := "PopDrop"
+        link.Save()
+    } catch as err {
+        throw Error("无法更新开机启动快捷方式：" err.Message)
+    }
+}

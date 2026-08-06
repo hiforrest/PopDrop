@@ -480,7 +480,7 @@ FileViewContextMenuKeyDown(wParam, lParam, msg, hwnd) {
     global PendingContextMenuKeyboardAlternate, PendingContextMenuMouseShift
     if !IsTrackedFileViewHwnd(hwnd)
         return
-    PreviewHandleKeyDown(wParam, hwnd)
+    PreviewHandleKeyDown(wParam, hwnd, lParam)
     static VK_F10 := 0x79
     static VK_APPS := 0x5D
     if PendingContextMenuMouseShift.Has(hwnd)

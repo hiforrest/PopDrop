@@ -8,7 +8,7 @@ BuildPanel() {
     global PinnedGroupLeftSeparator, PinnedGroupRightSeparator
     global SettingsButton, CloseButton, TextBlockSearchEdit
     global TransferStatusText
-    global APP_VERSION, WorkspaceSelector
+    global APP_VERSION, WorkspaceSelector, UiScaleFactor
     global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
 
     Panel := Gui("+Resize +MinSize760x380", "PopDrop v" APP_VERSION)
@@ -16,7 +16,7 @@ BuildPanel() {
     ; The toolbar is a fixed 42-DIP band. Keep the tuned control row one DIP
     ; below the previous centered position, without changing the list boundary.
     Panel.MarginY := 7
-    Panel.SetFont("s9", "Microsoft YaHei UI")
+    Panel.SetFont("s" Round(9 * UiScaleFactor), "Microsoft YaHei UI")
 
     workspaceLabel := Panel.AddText("xm ym+6 w52 h22 +0x200", "工作区：")
     WorkspaceSelector := AddUiDropDownList(Panel, "x+2 yp-5 w110", [])
@@ -220,7 +220,7 @@ MainWorkspaceChanged(control, *) {
         return
     if IsObject(InactiveScanJob)
         && StrLower(InactiveScanJob.WorkspaceId) = StrLower(targetId)
-        CancelInactiveWorkspaceScan()
+        CancelInactiveWorkspaceScan(false)
     if !RequestActivateWorkspace(targetId, "main")
         SyncWorkspaceControls()
 }
@@ -373,6 +373,8 @@ AutoHideNativeTimerProc(hwnd, message, timerId, tick) {
     foreground := DllCall("user32\GetForegroundWindow", "ptr")
     if !foreground || foreground = panelHwnd
         return
+    if QuickPreviewNativeProtectsAutoHide(foreground, tick)
+        return
     ; Same-process popups and any window explicitly owned by the panel are
     ; legitimate menus/dialogs, not evidence that the user left PopDrop.
     processId := 0
@@ -470,6 +472,10 @@ AutoHideExternalForegroundChanged(wParam, lParam, msg, hwnd) {
     if !foreground || foreground = Panel.Hwnd
         || IsOwnedByPanel(foreground)
         return
+    if QuickPreviewSessionOwnsWindow(foreground) {
+        StartAutoHideWatchdog()
+        return
+    }
     CancelUncommittedMainHotkeyGesture()
     CancelFilePointerGesture()
     ; Repair a watchdog that an earlier hide/drag race may have stopped, then
@@ -553,6 +559,8 @@ AutoHideWatchdog() {
     if activeHwnd = Panel.Hwnd
         || (activeHwnd && IsOwnedByPanel(activeHwnd))
         return
+    if QuickPreviewSessionOwnsWindow(activeHwnd)
+        return
     ; This independent path does not rely on WM_ACTIVATE arriving. A short
     ; one-shot delay retains the existing protection for an in-progress click.
     ScheduleAutoHideCheck(60)
@@ -598,7 +606,7 @@ TryAutoHidePanel() {
 
     ; Only the actual external preview window may retain PopDrop. A stale
     ; QuickViewActive flag must never protect an unrelated foreground app.
-    if QuickViewActive && IsExternalQuickPreviewFocused() {
+    if QuickViewActive && QuickPreviewSessionOwnsWindow(activeHwnd) {
         ScheduleAutoHideCheck(100)
         return
     }
@@ -1105,7 +1113,7 @@ HidePanel(*) {
     if IsObject(SourceRemovalDialog)
         SourceRemovalDialog := 0
     CancelFilePointerGesture()
-    CloseExternalQuickPreview()
+    CloseExternalQuickPreview(true, false)
     PreviewPanelHidden()
     CancelAutoHideCheck()
     StopAutoHideWatchdog()
