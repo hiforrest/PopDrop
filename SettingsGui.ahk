@@ -218,8 +218,8 @@ OpenSettingsGui() {
     advanced := AddUiButton(guiObj, "x184 y776 w112", "高级设置…")
     guiObj.AddText("x+8 yp+7 w400 c666666",
         "直接编辑 config.ini，适合高级用户。")
-    cancel := AddUiButton(guiObj, "x860 yp-7 w78", "取消")
-    save := AddUiButton(guiObj, "x+8 yp w78 Default", "保存")
+    save := AddUiButton(guiObj, "x860 yp-7 w78 Default", "保存")
+    cancel := AddUiButton(guiObj, "x+8 yp w78", "取消")
     advanced.OnEvent("Click", AdvancedSettingsClicked.Bind(controller))
     cancel.OnEvent("Click", RequestCloseSettings.Bind(controller))
     save.OnEvent("Click", SaveSettingsDraft.Bind(controller))
@@ -1529,14 +1529,12 @@ BuildContentUpdateSettingsPage(c, tabs) {
     tabs.UseTab(5)
     g := c.Gui
     g.AddGroupBox("x200 y29 w818 h300", "内容更新方式 · 应用于所有工作区")
-    c.ContentUpdateFast := g.AddRadio("x224 y68 Group", "极速显示（推荐）")
-    g.AddText("x244 y101 w744 h54 c555555",
-        "在意窗口打开和工作区切换速度的用户适合此模式。"
-        . "通常会快速显示最新内容，极少数特殊存储环境可能出现短暂延迟。")
+    c.ContentUpdateFast := g.AddRadio("x224 y68 Group", "极速显示（默认推荐）")
+    g.AddText("x244 y101 w744 h32 c555555",
+        "日常首选，极致轻快的使用体验")
     c.ContentUpdateAccuracy := g.AddRadio("x224 y178", "准确优先")
-    g.AddText("x244 y211 w744 h54 c555555",
-        "适合对内容准确性要求极高，或曾遇到文件显示滞后、更新不及时的用户。"
-        . "打开窗口和切换工作区时会重新确认内容，文件较多时等待时间可能更长。")
+    g.AddText("x244 y211 w744 h32 c555555",
+        "保障内容正确，仅限极速模式异常时使用")
     c.ContentUpdateHint := g.AddText("x224 y278 w744 h36 c666666",
         "当前设置会在保存后立即应用。")
     c.ContentUpdateFast.OnEvent(

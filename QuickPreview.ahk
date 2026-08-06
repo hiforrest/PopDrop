@@ -13,6 +13,11 @@ global QuickViewActive := false
 global QuickViewPath := ""
 global QuickViewOpenedAt := 0
 global QuickViewRequestedAt := 0
+global QuickPreviewRequestedPath := ""
+global QuickPreviewPendingSeerPath := ""
+global QuickPreviewSeerLastInvokeAt := 0
+global QuickPreviewSpacePressed := false
+global QuickPreviewProviderWasVisible := false
 global QuickPreviewWarningShown := false
 global QuickPreviewRaisedWindows := Map()
 global QuickPreviewProviderWindows := Map()
@@ -56,34 +61,7 @@ QuickPreviewRefreshCapability() {
         QuickPreviewCapability := false
     if !QuickPreviewCapability && QuickViewActive
         CloseExternalQuickPreview(false)
-    try Hotkey("~Space", QuickPreviewSpaceHotkey,
-        QuickPreviewCapability ? "On" : "Off")
     return QuickPreviewCapability
-}
-
-QuickPreviewSpaceHotkey(*) {
-    global PanelVisible, FileView, RecentView, QuickViewActive
-    ; This pass-through variant exists only for hover-without-selection while
-    ; PopDrop itself is foreground.  Never react to Space typed in a viewer,
-    ; its menu/dialog, or an unrelated application above the visible panel.
-    if !PanelVisible || !QuickPreviewCapability || QuickViewActive
-        || !IsPopDropPanelActive()
-        return
-    point := Buffer(8, 0)
-    if !DllCall("user32\GetCursorPos", "ptr", point.Ptr)
-        return
-    sx := NumGet(point, 0, "int"), sy := NumGet(point, 4, "int")
-    for list in [FileView, RecentView] {
-        if !IsObject(list) || !ScreenPointInWindow(list.Hwnd, sx, sy)
-            continue
-        cp := ScreenToClientPoint(list.Hwnd, sx, sy)
-        row := HitTestListItemBounds(list.Hwnd, cp.X, cp.Y)
-        candidate := PreviewCandidateForRow(list.Hwnd, row)
-        if IsObject(candidate) {
-            OpenExternalQuickPreview(candidate.Path)
-            return
-        }
-    }
 }
 
 QuickPreviewValidateQuickLookPath(path) {
@@ -99,7 +77,11 @@ QuickPreviewValidateQuickLookPath(path) {
 }
 
 IsPanelQuickPreviewAvailable(*) {
-    if !IsPanelFileViewActive()
+    if !IsPopDropPanelActive()
+        return false
+    ; Space belongs to a focused toolbar control unless the pointer is
+    ; explicitly over a file. This still supports hover-without-selection.
+    if !IsPanelFileViewActive() && QuickPreviewHoveredPath() = ""
         return false
     return QuickPreviewRefreshCapability()
 }
@@ -113,6 +95,61 @@ IsExternalQuickPreviewFocused(*) {
     QuickPreviewRegisterProviderWindows()
     return QuickPreviewSessionOwnsWindow(
         DllCall("user32\GetForegroundWindow", "ptr"))
+}
+
+IsSeerMainPreviewFocused(*) {
+    global ExternalQuickPreviewProvider, QuickViewActive
+    if !QuickViewActive || ExternalQuickPreviewProvider != "Seer"
+        return false
+    seer := DllCall("user32\FindWindowW",
+        "wstr", "SeerWindowClass", "ptr", 0, "ptr")
+    if !seer || DllCall("user32\GetForegroundWindow", "ptr") != seer
+        return false
+    ; Do not steal Space from a Seer menu or an active owned popup/dialog.
+    popup := DllCall("user32\GetLastActivePopup", "ptr", seer, "ptr")
+    if popup != seer && DllCall("user32\IsWindowVisible", "ptr", popup, "int")
+        return false
+    threadId := DllCall("user32\GetWindowThreadProcessId",
+        "ptr", seer, "ptr", 0, "uint")
+    info := Buffer(8 + 6 * A_PtrSize + 16, 0)
+    NumPut("uint", info.Size, info, 0)
+    if DllCall("user32\GetGUIThreadInfo", "uint", threadId,
+        "ptr", info.Ptr, "int") {
+        flags := NumGet(info, 4, "uint")
+        if flags & (0x0004 | 0x0008 | 0x0010)
+            return false
+    }
+    return true
+}
+
+CloseSeerQuickPreviewFromSpace(*) {
+    if !QuickPreviewAcceptSpaceEdge()
+        return
+    CloseExternalQuickPreview()
+}
+
+HandlePanelQuickPreviewSpace(*) {
+    if !QuickPreviewAcceptSpaceEdge()
+        return
+    ToggleExternalQuickPreview()
+}
+
+QuickPreviewAcceptSpaceEdge() {
+    global QuickPreviewSpacePressed
+    if QuickPreviewSpacePressed
+        return false
+    QuickPreviewSpacePressed := true
+    SetTimer(QuickPreviewSpaceReleasePoll, -20)
+    return true
+}
+
+QuickPreviewSpaceReleasePoll() {
+    global QuickPreviewSpacePressed
+    if GetKeyState("Space", "P") {
+        SetTimer(QuickPreviewSpaceReleasePoll, -20)
+        return
+    }
+    QuickPreviewSpacePressed := false
 }
 
 ToggleExternalQuickPreview(*) {
@@ -152,28 +189,41 @@ QuickPreviewHoveredPath() {
 OpenExternalQuickPreview(path) {
     global ExternalQuickPreviewProvider, QuickLookPath
     global QuickViewActive, QuickViewPath, QuickViewOpenedAt
-    global QuickViewRequestedAt
-    global QuickPreviewWarningShown
+    global QuickViewRequestedAt, QuickPreviewRequestedPath
+    global QuickPreviewWarningShown, QuickPreviewProviderWasVisible
     if !QuickPreviewRefreshCapability()
         return false
     path := NormalizePath(path)
+    if path = "" || !FileExist(path)
+        return false
+    if QuickViewActive && PathsEqual(path, QuickViewPath)
+        && QuickViewRequestedAt && ElapsedTickMilliseconds(
+            QuickViewRequestedAt, A_TickCount) < 500
+        return true
+    ; Lock the exact candidate before Seer can synchronously request a path.
+    ; Never re-resolve selection state during this request.
+    QuickPreviewRequestedPath := path
     newSession := !QuickViewActive
     if newSession {
+        ; Discard ItemSelect work queued before Space fixed the candidate.
+        SetTimer(QuickPreviewUpdateFocusedSelection, 0)
         QuickPreviewBeginSession()
         BeginAutoHidePause()
         QuickViewActive := true
         QuickViewOpenedAt := A_TickCount
+        QuickPreviewProviderWasVisible := false
     }
     ignored := 0
     requestTick := A_TickCount
     success := ExternalQuickPreviewProvider = "Seer"
-        ? QuickPreviewSendSeer(5000, path, &ignored)
+        ? QuickPreviewInvokeSeer(path)
         : ShellLaunchExecutableWithArgs(QuickLookPath, [path], "")
     if !success {
         if newSession {
             QuickViewActive := false
             QuickViewOpenedAt := 0
             QuickViewRequestedAt := 0
+            QuickPreviewRequestedPath := ""
             QuickPreviewResetSessionTracking()
             EndAutoHidePause()
         }
@@ -194,6 +244,8 @@ OpenExternalQuickPreview(path) {
 CloseExternalQuickPreview(sendClose := true, restoreFocus := true) {
     global ExternalQuickPreviewProvider, QuickViewActive, QuickViewPath
     global QuickViewOpenedAt, QuickViewRequestedAt
+    global QuickPreviewRequestedPath, QuickPreviewPendingSeerPath
+    global QuickPreviewProviderWasVisible
     if !QuickViewActive
         return false
     if sendClose {
@@ -209,6 +261,10 @@ CloseExternalQuickPreview(sendClose := true, restoreFocus := true) {
     QuickViewPath := ""
     QuickViewOpenedAt := 0
     QuickViewRequestedAt := 0
+    QuickPreviewRequestedPath := ""
+    QuickPreviewPendingSeerPath := ""
+    QuickPreviewProviderWasVisible := false
+    SetTimer(QuickPreviewFlushSeerInvoke, 0)
     SetTimer(QuickPreviewHealthCheck, 0)
     if restoreFocus
         QuickPreviewRestorePanelFocus()
@@ -397,12 +453,55 @@ QuickPreviewSendSeer(command, path, &messageResult) {
     messageResult := 0
     sent := DllCall("user32\SendMessageTimeoutW",
         "ptr", seer, "uint", 0x004A, "ptr", 0, "ptr", copyData.Ptr,
-        "uint", 0x0002, "uint", 180, "uptr*", &messageResult, "ptr")
+        "uint", 0x0002, "uint", 250, "uptr*", &messageResult, "ptr")
     return sent != 0
+}
+
+QuickPreviewInvokeSeer(path) {
+    global QuickPreviewPendingSeerPath, QuickPreviewSeerLastInvokeAt
+    ; Seer documents a minimum 200 ms interval for SEER_INVOKE_W32 (5000).
+    ; Coalesce rapid selection/navigation changes and dispatch only the newest
+    ; absolute path after a small safety margin.
+    static minimumIntervalMs := 220
+    if QuickPreviewSeerLastInvokeAt {
+        elapsed := ElapsedTickMilliseconds(
+            QuickPreviewSeerLastInvokeAt, A_TickCount)
+        if elapsed < minimumIntervalMs {
+            QuickPreviewPendingSeerPath := path
+            SetTimer(QuickPreviewFlushSeerInvoke,
+                -(minimumIntervalMs - elapsed))
+            return true
+        }
+    }
+    QuickPreviewPendingSeerPath := ""
+    QuickPreviewSeerLastInvokeAt := A_TickCount
+    ignored := 0
+    return QuickPreviewSendSeer(5000, path, &ignored)
+}
+
+QuickPreviewFlushSeerInvoke() {
+    global ExternalQuickPreviewProvider, QuickViewActive
+    global QuickPreviewPendingSeerPath, QuickPreviewSeerLastInvokeAt
+    global QuickViewRequestedAt
+    if !QuickViewActive || ExternalQuickPreviewProvider != "Seer" {
+        QuickPreviewPendingSeerPath := ""
+        return
+    }
+    path := QuickPreviewPendingSeerPath
+    QuickPreviewPendingSeerPath := ""
+    if path = "" || !FileExist(path)
+        return
+    QuickPreviewSeerLastInvokeAt := A_TickCount
+    ignored := 0
+    if QuickPreviewSendSeer(5000, path, &ignored)
+        QuickViewRequestedAt := A_TickCount
+    else
+        CloseExternalQuickPreview(false)
 }
 
 QuickPreviewCopyData(wParam, lParam, msg, hwnd) {
     global Panel, ExternalQuickPreviewProvider, SeerIntegrationEnabled
+    global QuickPreviewRequestedPath, QuickViewPath
     if !IsObject(Panel) || hwnd != Panel.Hwnd
         || ExternalQuickPreviewProvider != "Seer"
         || !SeerIntegrationEnabled
@@ -414,10 +513,14 @@ QuickPreviewCopyData(wParam, lParam, msg, hwnd) {
     command := NumGet(lParam, 0, "uptr")
     if command != 4000
         return
-    context := GetActiveSelectionContext()
-    if context.Clicked != "" {
+    ; Compatibility for installations that registered PopDrop as a custom
+    ; explorer. Reply only with the path locked by this preview session; a
+    ; late 4000 request must never substitute another selected item.
+    path := QuickPreviewRequestedPath != ""
+        ? QuickPreviewRequestedPath : QuickViewPath
+    if path != "" && FileExist(path) {
         ignored := 0
-        QuickPreviewSendSeer(4001, NormalizePath(context.Clicked), &ignored)
+        QuickPreviewSendSeer(4001, path, &ignored)
     }
     return 1
 }
@@ -425,12 +528,14 @@ QuickPreviewCopyData(wParam, lParam, msg, hwnd) {
 QuickPreviewScheduleUpdate() {
     global QuickViewActive
     if QuickViewActive
-        SetTimer(QuickPreviewUpdateFocusedSelection, -150)
+        SetTimer(QuickPreviewUpdateFocusedSelection, -220)
 }
 
 QuickPreviewUpdateFocusedSelection() {
     global QuickViewActive, QuickViewPath
-    if !QuickViewActive
+    ; A queued ItemSelect from before the viewer was activated must not replace
+    ; a hover-opened file with a stale selected row.
+    if !QuickViewActive || !IsPopDropPanelActive()
         return
     context := GetActiveSelectionContext()
     if context.Clicked = "" || PathsEqual(context.Clicked, QuickViewPath)
@@ -454,6 +559,7 @@ QuickPreviewCloseQuickLookWindow() {
 QuickPreviewHealthCheck() {
     global QuickViewActive, ExternalQuickPreviewProvider, QuickViewOpenedAt
     global QuickViewRequestedAt, QuickLookPath
+    global QuickPreviewProviderWasVisible
     if !QuickViewActive {
         SetTimer(QuickPreviewHealthCheck, 0)
         return
@@ -468,12 +574,18 @@ QuickPreviewHealthCheck() {
             alive := QuickPreviewAnyProviderWindowVisible()
     } else {
         alive := QuickPreviewFindProviderWindow() != 0
-        ; Give the desktop CLI time to forward the first request.
-        if !alive && QuickViewRequestedAt && ElapsedTickMilliseconds(
-            QuickViewRequestedAt, A_TickCount) < 5000
-            return
     }
+    if alive
+        QuickPreviewProviderWasVisible := true
     if !alive {
+        ; A successful IPC/CLI hand-off can precede the first visible frame.
+        ; Keep a bounded provider-specific launch grace only until a preview
+        ; window has actually been observed; later closes remain immediate.
+        graceMs := ExternalQuickPreviewProvider = "Seer" ? 2000 : 5000
+        if !QuickPreviewProviderWasVisible && QuickViewRequestedAt
+            && ElapsedTickMilliseconds(QuickViewRequestedAt,
+                A_TickCount) < graceMs
+            return
         CloseExternalQuickPreview(false)
         return
     }
@@ -584,11 +696,14 @@ QuickPreviewRestoreWindowLevels() {
 }
 
 CleanupQuickPreview() {
-    global QuickViewActive
+    global QuickViewActive, QuickPreviewSpacePressed
     if QuickViewActive
         CloseExternalQuickPreview(false, false)
     else
         QuickPreviewRestoreWindowLevels()
     SetTimer(QuickPreviewUpdateFocusedSelection, 0)
+    SetTimer(QuickPreviewFlushSeerInvoke, 0)
+    SetTimer(QuickPreviewSpaceReleasePoll, 0)
+    QuickPreviewSpacePressed := false
     SetTimer(QuickPreviewHealthCheck, 0)
 }

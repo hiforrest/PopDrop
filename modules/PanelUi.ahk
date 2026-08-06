@@ -53,7 +53,8 @@ BuildPanel() {
         "x184 y8 w196 h26 Hidden", "")
     TextBlockSearchEdit.OnEvent("Change", TextBlockSearchChanged)
     DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
-        "uint", 0x1501, "ptr", 1, "wstr", "直接输入以筛选文本块", "ptr")
+        "uint", 0x1501, "ptr", 1,
+        "wstr", "空格分隔多个关键字（AND）", "ptr")
     ToolbarControls.Push(TextBlockSearchEdit)
 
     ; Pre-create the compact folder-only drop surface. It occupies the same

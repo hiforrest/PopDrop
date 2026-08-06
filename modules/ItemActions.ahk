@@ -109,6 +109,7 @@ InstallPanelHotkeys() {
     HotIf(IsPanelFileViewActive)
     Hotkey("Enter", PanelOpenSelection)
     Hotkey("Delete", PanelDeleteSelection)
+    Hotkey("+Delete", PanelPermanentDeleteSelection)
     ; Do not register Shift+F10 separately. The native ListView ContextMenu
     ; event handles both Shift+F10 and AppsKey, preventing one gesture from
     ; opening a hotkey menu and then a second native-control menu.
@@ -134,12 +135,15 @@ InstallPanelHotkeys() {
     HotIf(CanPasteClipboardAsPinnedTextBlock)
     Hotkey("^v", PasteClipboardAsPinnedTextBlock)
     HotIf(IsPanelQuickPreviewAvailable)
-    Hotkey("Space", ToggleExternalQuickPreview)
+    Hotkey("Space", HandlePanelQuickPreviewSpace)
     HotIf(IsPanelQuickPreviewActive)
     Hotkey("Esc", QuickPreviewEscape)
-    ; Once QuickLook/Seer owns focus, its keyboard and menus belong entirely to
-    ; that application.  In particular, do not steal Space/Esc from provider
-    ; dialogs, toolbar menus or plugin child windows.
+    ; QuickLook keeps full ownership of its keyboard. Seer's main preview does
+    ; not reliably toggle closed after a 5000 invocation, so handle Space only
+    ; on that exact top-level window. Menus, popups and dialogs are excluded by
+    ; IsSeerMainPreviewFocused and keep their native keyboard behavior.
+    HotIf(IsSeerMainPreviewFocused)
+    Hotkey("Space", CloseSeerQuickPreviewFromSpace)
     HotIf()
 }
 
@@ -209,6 +213,12 @@ PanelDeleteSelection(*) {
     context := GetActiveSelectionContext()
     if context.Paths.Length
         DeletePathsToRecycleBin(context.Paths)
+}
+
+PanelPermanentDeleteSelection(*) {
+    context := GetActiveSelectionContext()
+    if context.Paths.Length
+        DeletePathsPermanently(context.Paths)
 }
 
 PanelRevealSelection(*) {

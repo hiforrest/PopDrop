@@ -16,6 +16,7 @@ PopulatePanel() {
     global PanelRenderSignature, PanelRenderedWorkspaceId
     global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
     global ItemCountText
+    global TextBlockSelectFirstPending
 
     stableViewState := PanelRenderedWorkspaceId != ""
         && StrLower(PanelRenderedWorkspaceId) = StrLower(ActiveWorkspaceId)
@@ -224,8 +225,6 @@ PopulatePanel() {
     else
         ApplyViewMode()
     FileView.Opt("+Redraw")
-    if IsTextWorkspace()
-        SelectDefaultTextBlockSearchResult()
     UpdateTransferGroupHeaders()
     ; Paint the committed rows before publishing their count in the footer.
     DllCall("user32\RedrawWindow", "ptr", FileView.Hwnd, "ptr", 0, "ptr", 0,
@@ -256,6 +255,10 @@ PopulatePanel() {
         ApplyPendingViewRestore()
     else if IsObject(stableViewState)
         RestoreStableScanViewState(stableViewState)
+    if IsTextWorkspace() {
+        SelectDefaultTextBlockSearchResult(TextBlockSelectFirstPending)
+        TextBlockSelectFirstPending := false
+    }
 }
 
 RestoreStableScanViewState(restore) {
@@ -460,10 +463,12 @@ PopulateRecentSidebar() {
 ComputePanelRenderSignature() {
     global ActiveWorkspaceId, CurrentConfigFingerprint, CurrentScanResult
     global PinnedPaths, ViewMode, ThumbnailSize
+    global TextBlockSearchQuery
     return StrLower(ActiveWorkspaceId) "|" CurrentConfigFingerprint
         . "|" ResultSignature({Folders: CurrentScanResult.Folders, Recent: []})
         . "|p=" JoinNormalizedPaths(PinnedPaths)
         . "|v=" ViewMode "|t=" ThumbnailSize
+        . "|q=" TextBlockSearchQuery
 }
 
 IsPanelRenderCurrent() {

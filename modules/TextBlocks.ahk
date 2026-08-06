@@ -340,6 +340,15 @@ NormalizeCapturedText(text) {
     return Trim(text, " `t`n")
 }
 
+NormalizeEditedTextBlock(text) {
+    ; Existing files may intentionally begin or end with blank lines so that
+    ; pasting inserts separation at the original caret position. Normalize
+    ; only representation details; never trim user-authored outer whitespace.
+    text := StrReplace(text, Chr(0), "")
+    text := StrReplace(text, "`r`n", "`n")
+    return StrReplace(text, "`r", "`n")
+}
+
 IsGenericTextBlockHeading(text) {
     static generic := Map(
         "角色", true, "任务", true, "目标", true, "背景", true,
@@ -655,17 +664,40 @@ ApplyTextBlockSearchRefresh() {
 
 TextBlockMatchesQuery(file, folder, query) {
     global TextBlockSearchIndex
-    if query = ""
+    terms := TextBlockSearchTerms(query)
+    if !terms.Length
         return true
-    query := StrLower(query)
     haystack := StrLower(TextBlockTitleFromPath(file.Path)
         . " " folder.Name . " " file.Path)
-    if InStr(haystack, query)
-        return true
     key := PathKey(file.Path)
-    return TextBlockSearchIndex.Has(key)
+    body := TextBlockSearchIndex.Has(key)
         && IsObject(TextBlockSearchIndex[key])
-        && InStr(TextBlockSearchIndex[key].Body, query)
+        ? TextBlockSearchIndex[key].Body : ""
+    return TextBlockHaystacksMatchTerms(haystack, body, terms)
+}
+
+TextBlockHaystacksMatchTerms(metadata, body, terms) {
+    for term in terms {
+        if !InStr(metadata, term) && !InStr(body, term)
+            return false
+    }
+    return true
+}
+
+TextBlockSearchTerms(query) {
+    query := StrReplace(query, "　", " ")
+    query := RegExReplace(Trim(query), "\s+", " ")
+    if query = ""
+        return []
+    terms := []
+    seen := Map()
+    for term in StrSplit(StrLower(query), " ") {
+        if term != "" && !seen.Has(term) {
+            terms.Push(term)
+            seen[term] := true
+        }
+    }
+    return terms
 }
 
 PrepareTextBlockFiles(files, folder, maxCount := 0) {
@@ -984,16 +1016,21 @@ ApplyTextBlockCardView() {
 }
 
 TextBlockSearchChanged(control, *) {
-    global TextBlockSearchQuery
-    TextBlockSearchQuery := Trim(control.Value)
+    global TextBlockSearchQuery, TextBlockSelectFirstPending
+    query := Trim(control.Value)
+    if query != TextBlockSearchQuery
+        TextBlockSelectFirstPending := true
+    TextBlockSearchQuery := query
     PopulatePanel()
 }
 
 ClearTextBlockSearch(refresh := true, *) {
     global TextBlockSearchEdit, TextBlockSearchQuery
+    global TextBlockSelectFirstPending
     if TextBlockSearchQuery = ""
         return false
     TextBlockSearchQuery := ""
+    TextBlockSelectFirstPending := true
     if IsObject(TextBlockSearchEdit)
         TextBlockSearchEdit.Value := ""
     if refresh
@@ -1007,7 +1044,7 @@ FocusTextBlockSearch(*) {
         TextBlockSearchEdit.Visible := true
         TextBlockSearchEdit.Focus()
         DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
-            "uint", 0x00B1, "ptr", -1, "ptr", -1, "ptr")
+            "uint", 0x00B1, "ptr", 0, "ptr", -1, "ptr") ; EM_SETSEL all
     }
 }
 
@@ -1019,13 +1056,20 @@ RestoreTextBlockSearchFocus(*) {
         FocusTextBlockSearch()
 }
 
-SelectDefaultTextBlockSearchResult(*) {
-    global FileView, ItemPaths, TextBlockSearchQuery
-    if TextBlockSearchQuery = "" || !IsObject(FileView)
+SelectDefaultTextBlockSearchResult(forceFirst := false, *) {
+    global FileView, ItemPaths
+    if !IsObject(FileView)
         return 0
+    if !forceFirst {
+        selected := FileView.GetNext(0)
+        if selected && ItemPaths.Has(selected)
+            && HasTextBlockExtension(ItemPaths[selected])
+            return selected
+    }
     FileView.Modify(0, "-Select -Focus")
     Loop FileView.GetCount() {
         if !ItemPaths.Has(A_Index)
+            || !HasTextBlockExtension(ItemPaths[A_Index])
             continue
         ; Select for visible feedback but deliberately leave keyboard focus in
         ; the Edit control so subsequent characters continue the query.
@@ -1036,8 +1080,8 @@ SelectDefaultTextBlockSearchResult(*) {
 }
 
 IsTextBlockSearchResultReady(*) {
-    global TextBlockSearchQuery, FileView, ItemPaths
-    if !IsTextBlockSearchActive() || TextBlockSearchQuery = ""
+    global FileView, ItemPaths
+    if !IsTextBlockSearchActive()
         return false
     row := IsObject(FileView) ? FileView.GetNext(0) : 0
     return row && ItemPaths.Has(row)
@@ -1082,6 +1126,7 @@ FocusTextBlockResults(*) {
 
 TextBlockCharInput(wParam, lParam, msg, hwnd) {
     global FileView, TextBlockSearchEdit, TextBlockSearchQuery, PanelVisible
+    global TextBlockSelectFirstPending
     if !PanelVisible || !IsTextWorkspace() || !IsObject(FileView)
         || hwnd != FileView.Hwnd || !IsObject(TextBlockSearchEdit)
         return
@@ -1089,6 +1134,7 @@ TextBlockCharInput(wParam, lParam, msg, hwnd) {
         if StrLen(TextBlockSearchQuery) {
             TextBlockSearchEdit.Value := SubStr(TextBlockSearchQuery, 1, -1)
             TextBlockSearchQuery := TextBlockSearchEdit.Value
+            TextBlockSelectFirstPending := true
             PopulatePanel()
         }
         return 0
@@ -1266,7 +1312,7 @@ SaveTextBlockEditor(state, *) {
         && ShowPanelMsgBox("文件已被其他程序修改，仍要覆盖吗？",
             "外部修改", "YesNo Default2 Icon!") != "Yes"
         return
-    text := NormalizeCapturedText(state.Body.Value)
+    text := NormalizeEditedTextBlock(state.Body.Value)
     temp := state.Path ".popdrop-writing"
     try {
         try FileDelete(temp)
@@ -1305,7 +1351,7 @@ SaveTextBlockCopy(state, *) {
         return false
     }
     try {
-        text := NormalizeCapturedText(state.Body.Value)
+        text := NormalizeEditedTextBlock(state.Body.Value)
         handle := DllCall("kernel32\CreateFileW", "wstr", selected,
             "uint", 0x40000000, "uint", 1, "ptr", 0, "uint", 1,
             "uint", 0x80, "ptr", 0, "ptr")

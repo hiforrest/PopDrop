@@ -38,6 +38,22 @@ RunSelfTests() {
         AssertSelfTest(!ShouldCaptureTextBlockPaste(
             false, true, "Cards", true),
             "非活动面板不接管 Ctrl+V")
+        searchTerms := TextBlockSearchTerms(
+            " Alpha   beta　GAMMA alpha ")
+        AssertSelfTest(searchTerms.Length = 3
+            && searchTerms[1] = "alpha"
+            && searchTerms[2] = "beta"
+            && searchTerms[3] = "gamma",
+            "文本块搜索按半角或全角空格拆分并去重")
+        AssertSelfTest(TextBlockHaystacksMatchTerms(
+            "alpha title", "contains beta", ["alpha", "beta"]),
+            "文本块多关键字可分别命中文件信息与正文")
+        AssertSelfTest(!TextBlockHaystacksMatchTerms(
+            "alpha title", "other body", ["alpha", "beta"]),
+            "文本块多关键字使用 AND 语义")
+        AssertSelfTest(NormalizeEditedTextBlock(
+            "`r`n正文`r`n`r`n") = "`n正文`n`n",
+            "编辑文本块保留首尾空行")
         AssertSelfTest(ParseGlobalOpenFileMode("") = OPEN_MODE_DOUBLE,
             "缺失全局打开方式回退为双击")
         AssertSelfTest(ParseGlobalOpenFileMode("broken") = OPEN_MODE_DOUBLE,

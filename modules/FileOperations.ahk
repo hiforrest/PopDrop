@@ -101,15 +101,35 @@ RequestRenamePath(path, *) {
     }
 
     SplitPath(path, &oldName)
+    isFolder := !!DirExist(path)
+    oldStem := oldName
+    oldExtension := ""
+    if !isFolder {
+        dotPosition := InStr(oldName, ".", true, -1)
+        if dotPosition > 1 {
+            oldStem := SubStr(oldName, 1, dotPosition - 1)
+            oldExtension := SubStr(oldName, dotPosition + 1)
+        }
+    }
     Loop {
-        result := PromptPanelInput(
-            "请输入新名称（文件请保留所需扩展名）：",
-            "重命名", oldName)
+        result := PromptPanelRename(oldStem, oldExtension, !isFolder)
         if result.Result != "OK"
             return false
-        newName := result.Value
+        if !isFolder && InStr(result.Extension, ".") {
+            oldStem := result.Name
+            oldExtension := result.Extension
+            ShowPanelMsgBox(
+                "扩展名框中不要输入句点；多个后缀请保留在文件名框中。",
+                "扩展名无效", "Icon!")
+            continue
+        }
+        newName := result.Name
+        if !isFolder && result.Extension != ""
+            newName .= "." result.Extension
         validation := ValidateRenameName(newName)
         if !validation.Valid {
+            oldStem := result.Name
+            oldExtension := result.Extension
             ShowPanelMsgBox(validation.Error, "名称无效", "Icon!")
             continue
         }
@@ -263,21 +283,41 @@ DeletePathsToRecycleBin(paths, *) {
             "移入回收站", "Icon!")
         return false
     }
-    itemText := existing.Length = 1
-        ? "“" GetFileName(existing[1]) "”"
-        : existing.Length " 个项目"
-    answer := ShowPanelMsgBox(
-        "确定要将 " itemText " 移入回收站吗？`n`n"
-        . "PopDrop 不会在回收站不可用时改为永久删除。",
-        "移入回收站", "YesNo Default2 Icon!")
-    if answer != "Yes"
-        return false
     return PerformRecycleDelete(existing)
 }
 
 PerformRecycleDelete(paths) {
-    ; FOFX_RECYCLEONDELETE makes recycling part of the requested Shell
-    ; operation. There is deliberately no FileDelete/DirDelete fallback.
+    return PerformShellDelete(paths, false)
+}
+
+DeletePathsPermanently(paths, *) {
+    existing := []
+    for path in paths {
+        normalized := NormalizePath(path)
+        if FileExist(normalized) && !ArrayContainsPath(existing, normalized)
+            existing.Push(normalized)
+    }
+    if !existing.Length {
+        ShowPanelMsgBox("所选项目均不存在或当前无法访问。",
+            "永久删除", "Icon!")
+        return false
+    }
+    itemText := existing.Length = 1
+        ? "“" GetFileName(existing[1]) "”"
+        : existing.Length " 个项目"
+    answer := ShowPanelMsgBox(
+        "确定要永久删除 " itemText " 吗？`n`n"
+        . "此操作不会使用回收站，且无法由 PopDrop 撤销。",
+        "永久删除", "YesNo Default2 Icon!")
+    if answer != "Yes"
+        return false
+    return PerformShellDelete(existing, true)
+}
+
+PerformShellDelete(paths, permanent := false) {
+    ; IFileOperation owns both deletion paths. Recycling explicitly requests
+    ; FOFX_RECYCLEONDELETE and never falls back to FileDelete/DirDelete;
+    ; permanent deletion deliberately omits recycle and undo flags.
     global Panel
     validPaths := []
     skipped := 0
@@ -291,14 +331,15 @@ PerformRecycleDelete(paths) {
         }
         if IsPathRoot(path) {
             skipped += 1
-            details.Push(path "：不能将磁盘或共享根目录移入回收站")
+            details.Push(path "：不能删除磁盘或共享根目录")
             continue
         }
         if !ArrayContainsPath(validPaths, path)
             validPaths.Push(path)
     }
     if !validPaths.Length {
-        SetUserStatus("没有可移入回收站的项目")
+        SetUserStatus(permanent ? "没有可永久删除的项目"
+            : "没有可移入回收站的项目")
         return {
             Success: 0, Failed: 0, Skipped: skipped,
             Aborted: false, Changed: false, RefreshQueued: false,
@@ -333,18 +374,19 @@ PerformRecycleDelete(paths) {
             "ptr", 0, "uint", 1, "ptr", iidFileOperation.Ptr,
             "ptr*", &fileOperation, "int")
         if hr != 0 || !fileOperation
-            throw Error("无法创建 Windows Shell 回收站操作。")
+            throw Error("无法创建 Windows Shell 删除操作。")
 
-        ; FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR |
-        ; FOFX_SHOWELEVATIONPROMPT | FOFX_RECYCLEONDELETE |
-        ; FOFX_ADDUNDORECORD. Windows 10/11 therefore receives both explicit
-        ; Recycle Bin and user-session undo semantics.
-        operationFlags := 0x40 | 0x200 | 0x40000 | 0x80000 | 0x20000000
+        ; Both paths suppress Shell's own confirmation because PopDrop already
+        ; confirms Shift+Delete and deliberately keeps Delete/right-click
+        ; recycling immediate. Permanent deletion omits every recycle/undo flag.
+        operationFlags := permanent
+            ? (0x10 | 0x200 | 0x40000)
+            : (0x10 | 0x40 | 0x200 | 0x40000 | 0x80000 | 0x20000000)
         ComCall(5, fileOperation, "uint", operationFlags)
         ComCall(9, fileOperation, "ptr", Panel.Hwnd)
         hr := ComCall(3, fileOperation, "ptr", sink.Ptr, "uint*", &cookie)
         if hr != 0
-            throw Error("无法订阅回收站操作结果。")
+            throw Error("无法订阅删除操作结果。")
 
         for sourcePath in validPaths {
             sourceItem := CreateShellItem(sourcePath)
@@ -361,24 +403,25 @@ PerformRecycleDelete(paths) {
                 else {
                     state.Failed += 1
                     state.Details.Push(
-                        sourcePath "：无法加入回收站操作队列")
+                        sourcePath "：无法加入删除操作队列")
                 }
             } finally {
                 ObjRelease(sourceItem)
             }
         }
         if !queued
-            throw Error("没有项目能够加入回收站操作队列。")
+            throw Error("没有项目能够加入删除操作队列。")
 
         BeginAutoHidePause()
         try performHr := ComCall(21, fileOperation)
         finally EndAutoHidePause()
         ComCall(22, fileOperation, "int*", &aborted)
     } catch as err {
-        ShowPanelMsgBox(
-            "无法将所选项目移入回收站：`n" err.Message
-            . "`n`n未执行永久删除。",
-            "删除失败", "Iconx")
+        errorText := permanent
+            ? "无法永久删除所选项目：`n" err.Message
+            : "无法将所选项目移入回收站：`n" err.Message
+                . "`n`n未执行永久删除。"
+        ShowPanelMsgBox(errorText, "删除失败", "Iconx")
     } finally {
         if fileOperation && cookie
             try ComCall(4, fileOperation, "uint", cookie)
@@ -393,27 +436,34 @@ PerformRecycleDelete(paths) {
         try RemoveDeletedPinnedPaths(state.DeletedPaths)
         catch as err
             ShowPanelMsgBox(
-                "项目已移入回收站，但固定项配置更新失败：`n"
+                (permanent ? "项目已永久删除" : "项目已移入回收站")
+                . "，但固定项配置更新失败：`n"
                 . err.Message "`n`n请检查 config.ini。",
                 "固定项更新失败", "Icon!")
         try RemoveDeletedTextSourcePinnedPaths(state.DeletedPaths)
         catch as err
             ShowPanelMsgBox(
-                "项目已移入回收站，但文件夹内置顶配置更新失败：`n"
+                (permanent ? "项目已永久删除" : "项目已移入回收站")
+                . "，但文件夹内置顶配置更新失败：`n"
                 . err.Message "`n`n请检查 config.ini。",
                 "置顶配置更新失败", "Icon!")
         QueueSingleRefreshAfterFileOperation(viewState, Map())
         refreshQueued := true
         if totalFailures {
-            SetActionStatus(
-                "已将 " state.Success " 个项目移入回收站，"
+            SetActionStatus((permanent
+                ? "已永久删除 " state.Success " 个项目，"
+                : "已将 " state.Success " 个项目移入回收站，")
                 . totalFailures " 个失败或跳过    查看详情",
-                ShowRecycleDeleteDetails.Bind(state.Details.Clone()))
+                ShowDeleteDetails.Bind(state.Details.Clone(), permanent))
         } else if aborted {
-            SetUserStatus("已将 " state.Success
-                . " 个项目移入回收站；操作随后被取消")
+            SetUserStatus((permanent
+                ? "已永久删除 " state.Success " 个项目"
+                : "已将 " state.Success " 个项目移入回收站")
+                . "；操作随后被取消")
         } else {
-            SetUserStatus("已将 " state.Success " 个项目移入回收站")
+            SetUserStatus(permanent
+                ? "已永久删除 " state.Success " 个项目"
+                : "已将 " state.Success " 个项目移入回收站")
         }
     } else if aborted || HResultSucceeded(performHr) {
         SetUserStatus("删除操作已取消，未产生文件变化")
@@ -473,12 +523,13 @@ RemoveDeletedPinnedPaths(deletedPaths) {
     }
 }
 
-ShowRecycleDeleteDetails(details, *) {
+ShowDeleteDetails(details, permanent := false, *) {
     message := details.Length
         ? JoinArray(details, "`n") : "没有更多错误详情。"
-    ShowPanelMsgBox(
-        message "`n`nPopDrop 没有执行永久删除。",
-        "回收站操作详情", "Iconi")
+    if !permanent
+        message .= "`n`nPopDrop 没有执行永久删除。"
+    ShowPanelMsgBox(message,
+        permanent ? "永久删除详情" : "回收站操作详情", "Iconi")
 }
 
 PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {

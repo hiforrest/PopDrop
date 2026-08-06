@@ -369,6 +369,7 @@ global SettingsDialog := 0
 global EscapeHidesPanel := true
 global TextBlockSearchEdit := 0
 global TextBlockSearchQuery := ""
+global TextBlockSelectFirstPending := true
 global TextBlockSearchIndex := Map()
 global TextBlockSearchQueue := []
 global TextBlockSearchRefreshPending := false
