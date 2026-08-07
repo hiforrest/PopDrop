@@ -1454,13 +1454,13 @@ BuildInterfaceSettingsPage(c, tabs) {
     tabs.UseTab(4)
     g := c.Gui
     g.AddGroupBox("x200 y29 w818 h145", "界面缩放 · 应用于所有工作区")
-    g.AddText("x224 y66 w92", "界面缩放：")
+    g.AddText("x224 y66 w92", "主面板缩放：")
     c.UiScale := AddUiDropDownList(g, "x320 yp-4 w150",
         ["100%", "125%", "150%", "175%", "200%"])
     c.UiScaleHint := g.AddText("x490 yp+4 w480 c666666",
-        "100% 保持系统当前显示大小；其他比例会在此基础上放大。")
+        "窗口、控件、文字、图标与间距按比例同步放大。")
     g.AddText("x224 y111 w744 c666666",
-        "界面缩放保存后需重新启动 PopDrop 才能生效。")
+        "当前应用于 PopDrop 主面板；保存后需重新启动才能生效。")
 
     g.AddGroupBox("x200 y190 w818 h220", "文件图标 · 应用于所有工作区")
     g.AddText("x224 y228 w92", "图标质量：")

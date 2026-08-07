@@ -1,9 +1,10 @@
 ; Native control construction, owner drawing and DPI corrections.
 
-AddUiButton(guiObj, options, text) {
+AddUiButton(guiObj, options, text, scaleFactor := 1.0) {
     global UI_SINGLE_LINE_HEIGHT
     return guiObj.AddButton(
-        options " h" UI_SINGLE_LINE_HEIGHT " -Wrap", text)
+        options " h" Round(UI_SINGLE_LINE_HEIGHT * scaleFactor)
+        . " -Wrap", text)
 }
 
 AddUiEdit(guiObj, options, text := "") {
@@ -23,19 +24,21 @@ AddUiEdit(guiObj, options, text := "") {
     return control
 }
 
-AddUiDropDownList(guiObj, options, items) {
+AddUiDropDownList(guiObj, options, items, scaleFactor := 1.0) {
     global UI_DROPDOWN_FIELD_HEIGHT, UI_DROPDOWN_Y_OFFSET_PX
-        , UiDropDownTextItems
+        , UiDropDownTextItems, UiDropDownScaleFactors
     ; CBS_OWNERDRAWFIXED | CBS_HASSTRINGS lets WM_DRAWITEM center only the text.
     ; Windows continues to own the combo frame, arrow, popup and input behavior.
     control := guiObj.AddDropDownList(options " +0x210", items)
     UiDropDownTextItems[control.Hwnd] := items.Clone()
+    UiDropDownScaleFactors[control.Hwnd] := scaleFactor
     EnsureUiDropDownOwnerMessages(guiObj, control)
     ; CB_SETITEMHEIGHT(-1) adjusts only the native selection field. Unlike the
     ; H option it does not collapse the popup list to one row. The native frame
     ; adds roughly four logical pixels around this field. Windows vertically
     ; centers the text inside the resulting selection field.
-    fieldHeight := Round(UI_DROPDOWN_FIELD_HEIGHT * A_ScreenDPI / 96)
+    fieldHeight := Round(UI_DROPDOWN_FIELD_HEIGHT * scaleFactor
+        * A_ScreenDPI / 96)
     DllCall("user32\SendMessageW", "ptr", control.Hwnd,
         "uint", 0x0153, "ptr", -1, "ptr", fieldHeight, "ptr")
     DllCall("user32\SendMessageW", "ptr", control.Hwnd,
@@ -43,6 +46,39 @@ AddUiDropDownList(guiObj, options, items) {
     if UI_DROPDOWN_Y_OFFSET_PX
         OffsetGuiControlYPhysical(control, UI_DROPDOWN_Y_OFFSET_PX)
     return control
+}
+
+PanelScale(value) {
+    global PanelUiScaleFactor
+    return Round(value * PanelUiScaleFactor)
+}
+
+PanelPhysicalScale(value, hwnd := 0) {
+    dpi := hwnd
+        ? DllCall("user32\GetDpiForWindow", "ptr", hwnd, "uint")
+        : A_ScreenDPI
+    if !dpi
+        dpi := 96
+    return DllCall("kernel32\MulDiv", "int", PanelScale(value),
+        "int", dpi, "int", 96, "int")
+}
+
+ScalePanelGuiOptions(options) {
+    scaled := []
+    for token in StrSplit(options, A_Space) {
+        if RegExMatch(token,
+            "i)^([xywh](?:p|m)?)([+-]?)(\d+(?:\.\d+)?)(.*)$", &match) {
+            token := match[1] match[2]
+                . PanelScale(match[3] + 0) match[4]
+        }
+        scaled.Push(token)
+    }
+    return JoinArray(scaled, " ")
+}
+
+MovePanelControl(control, x, y, width, height) {
+    control.Move(PanelScale(x), PanelScale(y),
+        PanelScale(width), PanelScale(height))
 }
 
 ReplaceUiDropDownItems(control, items) {
@@ -147,6 +183,7 @@ CenterUiEditText(control) {
 
 DrawUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
     global UI_DROPDOWN_TEXT_Y_OFFSET_PX, UiDropDownTextItems
+    global UiDropDownScaleFactors
     if !lParam
         return
     if NumGet(lParam, 0, "uint") = 5 ; ODT_STATIC
@@ -162,6 +199,8 @@ DrawUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
     rectOffset := handleOffset + A_PtrSize * 2
     if !comboHwnd || !hdc
         return
+    scaleFactor := UiDropDownScaleFactors.Has(comboHwnd)
+        ? UiDropDownScaleFactors[comboHwnd] : 1.0
 
     textItemId := itemId
     if textItemId = 0xFFFFFFFF
@@ -229,7 +268,7 @@ DrawUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
         NumPut("int", NumGet(drawRect, (A_Index - 1) * 4, "int"),
             textRect, (A_Index - 1) * 4)
     NumPut("int", NumGet(textRect, 0, "int")
-        + Max(2, Round(4 * A_ScreenDPI / 96)), textRect, 0)
+        + Max(2, Round(4 * scaleFactor * A_ScreenDPI / 96)), textRect, 0)
     NumPut("int", NumGet(textRect, 4, "int")
         + UI_DROPDOWN_TEXT_Y_OFFSET_PX, textRect, 4)
     NumPut("int", NumGet(textRect, 12, "int")
@@ -329,10 +368,16 @@ DrawFooterTextItem(drawItemPtr) {
 }
 
 MeasureUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
-    global UI_DROPDOWN_FIELD_HEIGHT
+    global UI_DROPDOWN_FIELD_HEIGHT, UiDropDownScaleFactors
     if !lParam || NumGet(lParam, 0, "uint") != 3 ; ODT_COMBOBOX
         return
-    NumPut("uint", Round(UI_DROPDOWN_FIELD_HEIGHT * A_ScreenDPI / 96),
+    controlId := NumGet(lParam, 4, "uint")
+    controlHwnd := DllCall("user32\GetDlgItem", "ptr", ownerHwnd,
+        "int", controlId, "ptr")
+    scaleFactor := controlHwnd && UiDropDownScaleFactors.Has(controlHwnd)
+        ? UiDropDownScaleFactors[controlHwnd] : 1.0
+    NumPut("uint", Round(UI_DROPDOWN_FIELD_HEIGHT * scaleFactor
+        * A_ScreenDPI / 96),
         lParam, 16)
     return 1
 }

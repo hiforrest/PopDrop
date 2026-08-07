@@ -38,7 +38,13 @@ PopulatePanel() {
     ; icon. Text cards use a deliberately small 8-DIP spacer: enough left
     ; inset for readable card copy without recreating the old 96-DIP phantom
     ; icon column.
-    imageEdge := IsTextWorkspace() ? 8 : ThumbnailSize
+    ; ImageList dimensions are raw pixels. ThumbnailSize has always represented
+    ; that native pixel edge, even when Windows display scaling is 200%. Apply
+    ; only PopDrop's explicit panel scale here; multiplying by window DPI would
+    ; turn a configured 110 px thumbnail into 220 px at system 200%.
+    imageEdge := IsTextWorkspace()
+        ? PanelScale(8)
+        : PanelScale(ThumbnailSize)
     imageCapacity := IsTextWorkspace() ? 1 : 24
     if !ThumbnailImageList || ThumbnailImageListEdge != imageEdge
         || ThumbnailIconCache.Count > 2048 {
@@ -77,12 +83,13 @@ PopulatePanel() {
             WorkspaceId: ActiveWorkspaceId}
         for path in visiblePinnedPaths {
             exists := FileExist(path)
-            if IsTextWorkspace() && HasTextBlockExtension(path)
+            if !exists {
+                label := GetFileName(path) "  [项目不存在]"
+                row := AddFileTile(path, label, "", groupId, "UnknownFile")
+            } else if IsTextWorkspace() && HasTextBlockExtension(path)
                 row := AddTextBlockTile(path, groupId)
             else {
                 label := GetFileName(path)
-                if !exists
-                    label .= "  [项目不存在]"
                 row := AddFileTile(path, label, "", groupId)
             }
             ItemPaths[row] := path
@@ -173,7 +180,8 @@ PopulatePanel() {
             if filterMode != "All"
                 row := AddPlaceholderTile("没有符合筛选条件的文件", groupId)
             else
-                row := AddPlaceholderTile("暂无文件", groupId)
+                row := AddPlaceholderTile(
+                    "暂无文件", groupId, "EmptyFolder")
             ItemPaths[row] := folder.Path
             ItemFolderPaths[row] := folder.Path
             ItemKinds[row] := "Folder"
@@ -307,25 +315,86 @@ SetListItemGroup(row, groupId) {
         "ptr", 0, "ptr", item.Ptr, "ptr") ; LVM_SETITEMW
 }
 
-AddFileTile(path, label, modifiedText, groupId) {
+SetListItemImageIndex(row, imageIndex) {
+    global FileView
+    item := Buffer(A_PtrSize = 8 ? 88 : 60, 0)
+    NumPut("uint", 0x2, item, 0) ; LVIF_IMAGE
+    NumPut("int", row - 1, item, 4)
+    NumPut("int", imageIndex, item, A_PtrSize = 8 ? 36 : 28)
+    DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x104C,
+        "ptr", 0, "ptr", item.Ptr, "ptr") ; LVM_SETITEMW
+}
+
+AddFileTile(path, label, modifiedText, groupId, bundledIcon := "") {
     global FileView, ItemLabels, ThumbnailPolicy
-    cacheKey := PathKey(path) "|" modifiedText
-    thumbnail := AddShellThumbnail(path, cacheKey)
+    cacheKey := PathKey(path) "|" modifiedText "|" bundledIcon
+    thumbnail := bundledIcon != ""
+        ? AddBundledThumbnailIcon(bundledIcon)
+        : AddShellThumbnail(path, cacheKey)
     options := thumbnail.Index ? "Icon" thumbnail.Index : ""
     row := FileView.Add(options, label, modifiedText)
+    if bundledIcon != "" && !thumbnail.Index
+        SetListItemImageIndex(row, -2) ; I_IMAGENONE: never borrow index zero
     ItemLabels[row] := label
     SetListItemGroup(row, groupId)
-    if ThumbnailPolicy = "Full" && !thumbnail.Cached
+    if bundledIcon = "" && ThumbnailPolicy = "Full" && !thumbnail.Cached
         QueueThumbnailEnhancement(path, row, cacheKey)
     return row
 }
 
-AddPlaceholderTile(label, groupId) {
+AddPlaceholderTile(label, groupId, bundledIcon := "") {
     global FileView, ItemLabels
-    row := FileView.Add("", label, "")
+    thumbnail := bundledIcon != ""
+        ? AddBundledThumbnailIcon(bundledIcon)
+        : {Index: 0, Cached: true}
+    options := thumbnail.Index ? "Icon" thumbnail.Index : ""
+    row := FileView.Add(options, label, "")
+    if !thumbnail.Index
+        SetListItemImageIndex(row, -2) ; I_IMAGENONE
     ItemLabels[row] := label
     SetListItemGroup(row, groupId)
     return row
+}
+
+AddBundledThumbnailIcon(kind) {
+    global ThumbnailImageList, ThumbnailImageListEdge, ThumbnailIconCache
+
+    resourceId := kind = "EmptyFolder" ? 558
+        : kind = "UnknownFile" ? 559 : 0
+    fileName := kind = "EmptyFolder" ? "empty-folder.ico"
+        : kind = "UnknownFile" ? "unknown-file.ico" : ""
+    if !resourceId || fileName = ""
+        return {Index: 0, Cached: true}
+
+    cacheKey := "__popdrop-bundled__|" kind "|" ThumbnailImageListEdge
+    if ThumbnailIconCache.Has(cacheKey)
+        return ThumbnailIconCache[cacheKey]
+
+    icon := 0
+    if A_IsCompiled {
+        module := DllCall("kernel32\GetModuleHandleW", "ptr", 0, "ptr")
+        icon := DllCall("user32\LoadImageW", "ptr", module,
+            "ptr", resourceId, "uint", 1,
+            "int", ThumbnailImageListEdge, "int", ThumbnailImageListEdge,
+            "uint", 0, "ptr") ; IMAGE_ICON
+    }
+    if !icon {
+        iconPath := A_ScriptDir "\assets\" fileName
+        icon := DllCall("user32\LoadImageW", "ptr", 0,
+            "wstr", iconPath, "uint", 1,
+            "int", ThumbnailImageListEdge, "int", ThumbnailImageListEdge,
+            "uint", 0x10, "ptr") ; IMAGE_ICON | LR_LOADFROMFILE
+    }
+
+    imageIndex := -1
+    if icon {
+        imageIndex := DllCall("comctl32\ImageList_ReplaceIcon",
+            "ptr", ThumbnailImageList, "int", -1, "ptr", icon, "int")
+        DllCall("user32\DestroyIcon", "ptr", icon)
+    }
+    result := {Index: (imageIndex >= 0 ? imageIndex + 1 : 0), Cached: true}
+    ThumbnailIconCache[cacheKey] := result
+    return result
 }
 
 AddShellThumbnail(path, cacheKey := "") {
@@ -360,7 +429,11 @@ AddShellThumbnailBitmap(path, cacheOnly := true) {
         iidImageFactory := GuidBuffer("{BCC18B79-BA16-442F-80C4-8A59C30C463B}")
         if DllCall("shell32\SHCreateItemFromParsingName", "wstr", path, "ptr", 0,
             "ptr", iidImageFactory.Ptr, "ptr*", &factory) = 0 {
-            requestedSize := (ThumbnailSize & 0xFFFFFFFF) | (ThumbnailSize << 32)
+            ; IShellItemImageFactory also consumes a raw pixel SIZE. Keep it
+            ; identical to the ImageList edge and do not apply system DPI twice.
+            scaledThumbnailSize := PanelScale(ThumbnailSize)
+            requestedSize := (scaledThumbnailSize & 0xFFFFFFFF)
+                | (scaledThumbnailSize << 32)
             ; SIIGBF_INCACHEONLY (0x10) prevents an uncached thumbnail from
             ; triggering synchronous decoding on the UI thread.
             imageFlags := 0x20 | (cacheOnly ? 0x10 : 0)
@@ -452,7 +525,7 @@ PopulateRecentSidebar() {
     if !recentFiles.Length
         RecentView.Add("", "暂无系统近期记录")
     RecentLabel.Text := "最近打开  (" recentFiles.Length ")"
-    RecentView.ModifyCol(1, 230)
+    RecentView.ModifyCol(1, PanelScale(230))
     RecentView.Modify(0, "-Select -Focus")
     RecentView.Opt("+Redraw")
     DllCall("user32\RedrawWindow", "ptr", RecentView.Hwnd, "ptr", 0, "ptr", 0,

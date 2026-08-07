@@ -6,6 +6,8 @@
 ;@Ahk2Exe-AddResource assets\tray.ico, 555
 ;@Ahk2Exe-AddResource assets\icon-lnk.ico, 556
 ;@Ahk2Exe-AddResource assets\pin.ico, 557
+;@Ahk2Exe-AddResource assets\empty-folder.ico, 558
+;@Ahk2Exe-AddResource assets\unknown-file.ico, 559
 ;@Ahk2Exe-SetVersion 1.1.0.0
 ;@Ahk2Exe-SetName PopDrop
 
@@ -27,6 +29,11 @@ global UI_SCALE_125 := "125"
 global UI_SCALE_150 := "150"
 global UI_SCALE_175 := "175"
 global UI_SCALE_200 := "200"
+; Available in --self-test mode as well as the main UI. A config transaction
+; must never be re-entered by another AutoHotkey thread while its baseline is
+; being compared and atomically replaced.
+global ConfigEditInProgress := false
+global ConfigEditSerial := 0
 
 ; ──── 工作区类型 ────
 global WORKSPACE_TYPE_FILES := "Files"
@@ -182,6 +189,9 @@ global ContentUpdateMode := CONTENT_UPDATE_FAST
 global UiScaleMode := UI_SCALE_100
 global UiScalePercent := 100
 global UiScaleFactor := 1.0
+; Frozen when the main panel is built. Settings continue to apply after a
+; restart, so a newly saved scale cannot partially resize an existing panel.
+global PanelUiScaleFactor := 1.0
 global RecentFileCount := 12
 ; Native single-line control tuning. Buttons and edits use the full logical
 ; height. A DropDownList adds its own frame around the selection field, so its
@@ -201,6 +211,7 @@ global UI_DROPDOWN_TEXT_Y_OFFSET_PX := 0
 ; fallback. Some Windows builds report itemID=-1 while painting the closed
 ; selection field, and native text retrieval can then return no text.
 global UiDropDownTextItems := Map()
+global UiDropDownScaleFactors := Map()
 global UiDropDownParentSubclassCallback := 0
 global UiDropDownSubclassedParents := Map()
 global ConfiguredHotkey := "F2"
@@ -208,6 +219,9 @@ global ActiveHotkey := ""
 global ActiveWorkspaceHotkeys := Map()
 global WorkspaceHotkeyPressed := Map()
 global WorkspaceHotkeyLastDispatch := Map()
+global PendingPanelWorkspaceId := ""
+global PanelWorkspaceSwitchGeneration := 0
+global PanelWorkspaceSwitchRunning := false
 global DoubleHotkeyWorkspaceId := ""
 global LastFileWorkspaceId := ""
 ; The main shortcut is parsed as a gesture independently from panel state.

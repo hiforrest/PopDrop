@@ -8,41 +8,57 @@ BuildPanel() {
     global PinnedGroupLeftSeparator, PinnedGroupRightSeparator
     global SettingsButton, CloseButton, TextBlockSearchEdit
     global TransferStatusText
-    global APP_VERSION, WorkspaceSelector, UiScaleFactor
+    global APP_VERSION, WorkspaceSelector, UiScaleFactor, PanelUiScaleFactor
     global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
 
-    Panel := Gui("+Resize +MinSize760x380", "PopDrop v" APP_VERSION)
-    Panel.MarginX := 12
+    PanelUiScaleFactor := UiScaleFactor
+    Panel := Gui("+Resize +MinSize" PanelScale(760) "x" PanelScale(380),
+        "PopDrop v" APP_VERSION)
+    Panel.MarginX := PanelScale(12)
     ; The toolbar is a fixed 42-DIP band. Keep the tuned control row one DIP
     ; below the previous centered position, without changing the list boundary.
-    Panel.MarginY := 7
+    Panel.MarginY := PanelScale(7)
     Panel.SetFont("s" Round(9 * UiScaleFactor), "Microsoft YaHei UI")
 
-    workspaceLabel := Panel.AddText("xm ym+6 w52 h22 +0x200", "工作区：")
-    WorkspaceSelector := AddUiDropDownList(Panel, "x+2 yp-5 w110", [])
-    OffsetGuiControlYPhysical(workspaceLabel, -4)
+    workspaceLabel := Panel.AddText(ScalePanelGuiOptions(
+        "xm ym+6 w52 h22 +0x200"), "工作区：")
+    WorkspaceSelector := AddUiDropDownList(Panel,
+        ScalePanelGuiOptions("x+2 yp-5 w110"), [], PanelUiScaleFactor)
+    OffsetGuiControlYPhysical(workspaceLabel, PanelScale(-4))
     WorkspaceSelector.OnEvent("Change", MainWorkspaceChanged)
-    RefreshButton := AddUiButton(Panel, "x+6 yp w52", "刷新")
+    RefreshButton := AddUiButton(Panel,
+        ScalePanelGuiOptions("x+6 yp w52"), "刷新", PanelUiScaleFactor)
     RefreshButton.OnEvent("Click", RefreshPanel)
-    PinnedGroupLeftSeparator := Panel.AddText(
-        "x+7 yp+3 w2 h20 +0x11", "") ; SS_ETCHEDVERT
-    PinnedDropButton := AddUiButton(Panel, "x+7 yp-3 w70", "＋固定项")
+    PinnedGroupLeftSeparator := Panel.AddText(ScalePanelGuiOptions(
+        "x+7 yp+3 w2 h20 +0x11"), "") ; SS_ETCHEDVERT
+    PinnedDropButton := AddUiButton(Panel,
+        ScalePanelGuiOptions("x+7 yp-3 w70"), "＋固定项",
+        PanelUiScaleFactor)
     PinnedDropButton.OnEvent("Click", AddPinnedFiles)
-    RemovePinnedButton := AddUiButton(Panel, "x+4 yp w70", "－固定项")
+    RemovePinnedButton := AddUiButton(Panel,
+        ScalePanelGuiOptions("x+4 yp w70"), "－固定项",
+        PanelUiScaleFactor)
     RemovePinnedButton.OnEvent("Click", RemovePinnedFile)
     ClipboardPinnedButton := AddUiButton(
-        Panel, "x+4 yp w42 Hidden Disabled", "📋+")
+        Panel, ScalePanelGuiOptions("x+4 yp w42 Hidden Disabled"), "📋+",
+        PanelUiScaleFactor)
     ClipboardPinnedButton.OnEvent("Click", AddClipboardTextToPinned)
-    PinnedGroupRightSeparator := Panel.AddText(
-        "x+7 yp+3 w2 h20 +0x11", "") ; SS_ETCHEDVERT
-    DisplayButton := AddUiButton(Panel, "x+7 yp-3 w56", "显示 ▾")
+    PinnedGroupRightSeparator := Panel.AddText(ScalePanelGuiOptions(
+        "x+7 yp+3 w2 h20 +0x11"), "") ; SS_ETCHEDVERT
+    DisplayButton := AddUiButton(Panel,
+        ScalePanelGuiOptions("x+7 yp-3 w56"), "显示 ▾",
+        PanelUiScaleFactor)
     DisplayButton.OnEvent("Click", ShowDisplayMenu)
     BuildDisplayMenu()
-    SettingsButton := AddUiButton(Panel, "x+4 yp w52", "设置")
+    SettingsButton := AddUiButton(Panel,
+        ScalePanelGuiOptions("x+4 yp w52"), "设置", PanelUiScaleFactor)
     SettingsButton.OnEvent("Click", OpenConfig)
-    WindowModeButton := AddUiButton(Panel, "x+4 yp w72", "置顶：关")
+    WindowModeButton := AddUiButton(Panel,
+        ScalePanelGuiOptions("x+4 yp w72"), "置顶：关",
+        PanelUiScaleFactor)
     WindowModeButton.OnEvent("Click", ToggleWindowMode)
-    CloseButton := AddUiButton(Panel, "x+4 yp w48", "关闭")
+    CloseButton := AddUiButton(Panel,
+        ScalePanelGuiOptions("x+4 yp w48"), "关闭", PanelUiScaleFactor)
     CloseButton.OnEvent("Click", HidePanel)
     ToolbarControls := [workspaceLabel, WorkspaceSelector, RefreshButton,
         PinnedGroupLeftSeparator, PinnedDropButton, RemovePinnedButton,
@@ -50,7 +66,7 @@ BuildPanel() {
         SettingsButton, WindowModeButton, CloseButton]
 
     TextBlockSearchEdit := AddUiEdit(Panel,
-        "x184 y8 w196 h26 Hidden", "")
+        ScalePanelGuiOptions("x184 y8 w196 h26 Hidden"), "")
     TextBlockSearchEdit.OnEvent("Change", TextBlockSearchChanged)
     DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
         "uint", 0x1501, "ptr", 1,
@@ -60,17 +76,18 @@ BuildPanel() {
     ; Pre-create the compact folder-only drop surface. It occupies the same
     ; toolbar band and never changes the ListView geometry.
     FolderDropAddSourceButton := Panel.AddButton(
-        "x12 y4 w510 h36 Hidden -Tabstop +0x2000",
+        ScalePanelGuiOptions("x12 y4 w510 h36 Hidden -Tabstop +0x2000"),
         "＋ 添加为来源`n当前工作区")
     FolderDropPinnedButton := Panel.AddButton(
-        "x530 y4 w224 h36 Hidden -Tabstop +0x2000",
+        ScalePanelGuiOptions("x530 y4 w224 h36 Hidden -Tabstop +0x2000"),
         "☆ 加入固定项`n不会移动文件夹")
     FolderDropAddSourceButton.Visible := false
     FolderDropPinnedButton.Visible := false
 
     ; Multi-select is the native ListView default. In icon view this enables
     ; Ctrl-click, Shift range selection and marquee selection on blank space.
-    FileView := Panel.AddListView("xm y42 w716 h492 Icon +0x100", ["文件", "修改时间"])
+    FileView := Panel.AddListView(ScalePanelGuiOptions(
+        "xm y42 w716 h492 Icon +0x100"), ["文件", "修改时间"])
     FileView.OnEvent("Click", FileViewClick)
     FileView.OnEvent("DoubleClick", OpenFileViewItem)
     FileView.OnEvent("ContextMenu", FileViewContextMenu)
@@ -80,19 +97,23 @@ BuildPanel() {
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1036,
         "ptr", 0x410000, "ptr", 0x410000, "ptr")
     
-    RecentLabel := Panel.AddText("x740 y42 w220 h22 +0x200", "最近打开")
-    RecentLabel.SetFont("s10 Bold")
-    RecentView := Panel.AddListView("x740 y68 w220 h466 Report -Hdr -Multi", ["文件"])
+    RecentLabel := Panel.AddText(ScalePanelGuiOptions(
+        "x740 y42 w220 h22 +0x200"), "最近打开")
+    RecentLabel.SetFont("s" Round(10 * PanelUiScaleFactor) " Bold")
+    RecentView := Panel.AddListView(ScalePanelGuiOptions(
+        "x740 y68 w220 h466 Report -Hdr -Multi"), ["文件"])
     RecentView.OnEvent("Click", FileViewClick)
     RecentView.OnEvent("DoubleClick", OpenRecentItem)
     RecentView.OnEvent("ContextMenu", RecentContextMenu)
     RecentView.OnEvent("ItemSelect", RecentItemSelect)
 
-    StatusText := Panel.AddText("xm y+0 w372 h42 +0xD +0x100", "已是最新")
+    StatusText := Panel.AddText(ScalePanelGuiOptions(
+        "xm y+0 w372 h42 +0xD +0x100"), "已是最新")
     StatusText.OnEvent("Click", HandleStatusAction)
-    ItemCountText := Panel.AddText("x+8 yp w112 h42 +0xD +0x100", "共0项")
+    ItemCountText := Panel.AddText(ScalePanelGuiOptions(
+        "x+8 yp w112 h42 +0xD +0x100"), "共0项")
     TransferStatusText := Panel.AddText(
-        "x+8 yp w208 h42 +0xD +0x100", "↓ 下载")
+        ScalePanelGuiOptions("x+8 yp w208 h42 +0xD +0x100"), "↓ 下载")
     TransferStatusText.OnEvent("Click", OpenTransferCenter)
     Panel.OnEvent("Close", HandlePanelClose)
     Panel.OnEvent("Escape", HandlePanelEscape)
@@ -135,7 +156,7 @@ UpdateWorkspaceTypeUi() {
     if IsObject(TextBlockSearchEdit) {
         TextBlockSearchEdit.Visible := textMode
         if textMode
-            TextBlockSearchEdit.Move(184, 7, 122, 26)
+            MovePanelControl(TextBlockSearchEdit, 184, 7, 122, 26)
         if !textMode {
             TextBlockSearchQuery := ""
             TextBlockSearchEdit.Value := ""
@@ -145,35 +166,38 @@ UpdateWorkspaceTypeUi() {
         RefreshButton.Visible := !textMode
     if IsObject(PinnedGroupLeftSeparator) {
         PinnedGroupLeftSeparator.Visible := true
-        PinnedGroupLeftSeparator.Move(textMode ? 312 : 242, 10, 2, 20)
+        MovePanelControl(PinnedGroupLeftSeparator,
+            textMode ? 312 : 242, 10, 2, 20)
     }
     if IsObject(PinnedDropButton) {
         PinnedDropButton.Visible := true
         PinnedDropButton.Text := "＋固定项"
-        PinnedDropButton.Move(textMode ? 320 : 250, 7,
+        MovePanelControl(PinnedDropButton, textMode ? 320 : 250, 7,
             textMode ? 72 : 70, 26)
     }
     if IsObject(RemovePinnedButton)
         RemovePinnedButton.Visible := !textMode
     if IsObject(RemovePinnedButton) && !textMode
-        RemovePinnedButton.Move(324, 7, 70, 26)
+        MovePanelControl(RemovePinnedButton, 324, 7, 70, 26)
     if IsObject(ClipboardPinnedButton) {
         ClipboardPinnedButton.Visible := textMode
         if textMode
-            ClipboardPinnedButton.Move(396, 7, 42, 26)
+            MovePanelControl(ClipboardPinnedButton, 396, 7, 42, 26)
     }
     if IsObject(PinnedGroupRightSeparator) {
         PinnedGroupRightSeparator.Visible := true
-        PinnedGroupRightSeparator.Move(textMode ? 444 : 400, 10, 2, 20)
+        MovePanelControl(PinnedGroupRightSeparator,
+            textMode ? 444 : 400, 10, 2, 20)
     }
     if IsObject(DisplayButton)
-        DisplayButton.Move(textMode ? 452 : 408, 7, 56, 26)
+        MovePanelControl(DisplayButton, textMode ? 452 : 408, 7, 56, 26)
     if IsObject(SettingsButton)
-        SettingsButton.Move(textMode ? 512 : 468, 7, 52, 26)
+        MovePanelControl(SettingsButton, textMode ? 512 : 468, 7, 52, 26)
     if IsObject(WindowModeButton)
-        WindowModeButton.Move(textMode ? 568 : 524, 7, 72, 26)
+        MovePanelControl(WindowModeButton,
+            textMode ? 568 : 524, 7, 72, 26)
     if IsObject(CloseButton)
-        CloseButton.Move(textMode ? 644 : 600, 7, 48, 26)
+        MovePanelControl(CloseButton, textMode ? 644 : 600, 7, 48, 26)
     UpdateClipboardPinnedButton()
     RedrawPanelToolbar()
 }
@@ -199,7 +223,8 @@ RedrawPanelToolbar() {
     if !dpi
         dpi := A_ScreenDPI
     toolbarBottom := DllCall("kernel32\MulDiv",
-        "int", PANEL_TOOLBAR_HEIGHT, "int", dpi, "int", 96, "int")
+        "int", PanelScale(PANEL_TOOLBAR_HEIGHT),
+        "int", dpi, "int", 96, "int")
     NumPut("int", 0, clientRect, 0)
     NumPut("int", 0, clientRect, 4)
     NumPut("int", Max(0, NumGet(clientRect, 8, "int")), clientRect, 8)
@@ -1049,7 +1074,7 @@ ShowAndRefresh(*) {
         BuildTrayMenu()
     }
     AutoHideNativeShownTick := A_TickCount
-    Panel.Show("w" WindowWidth " h" WindowHeight)
+    Panel.Show("w" PanelScale(WindowWidth) " h" PanelScale(WindowHeight))
     PanelVisible := true
     ; A hidden panel has no legitimate modal/menu pause owner. Begin every
     ; visible session clean so no previous session can poison later summons.
@@ -1155,22 +1180,30 @@ ResizePanel(guiObj, minMax, width, height) {
     ; Reserve exactly 42 DIPs at each edge. The list owns every DIP between
     ; those bands, which keeps the file-manager content area as large as
     ; possible without making either control band feel cramped.
-    contentHeight := Max(160,
-        height - PANEL_TOOLBAR_HEIGHT - PANEL_FOOTER_HEIGHT)
+    toolbarHeight := PanelScale(PANEL_TOOLBAR_HEIGHT)
+    footerHeight := PanelScale(PANEL_FOOTER_HEIGHT)
+    outerMargin := PanelScale(12)
+    contentHeight := Max(PanelScale(160),
+        height - toolbarHeight - footerHeight)
     if ShowRecentSidebar {
-        sidebarWidth := Min(280, Max(190, Floor(width * 0.28)))
-        mainWidth := Max(280, width - sidebarWidth - 36)
-        sidebarX := 24 + mainWidth
-        FileView.Move(12, PANEL_TOOLBAR_HEIGHT, mainWidth, contentHeight)
-        RecentLabel.Move(sidebarX, PANEL_TOOLBAR_HEIGHT, sidebarWidth, 22)
-        RecentView.Move(sidebarX, PANEL_TOOLBAR_HEIGHT + 26,
-            sidebarWidth, Max(154, contentHeight - 26))
-        RecentView.ModifyCol(1, Max(120, sidebarWidth - 8))
+        sidebarWidth := Min(PanelScale(280),
+            Max(PanelScale(190), Floor(width * 0.28)))
+        mainWidth := Max(PanelScale(280),
+            width - sidebarWidth - PanelScale(36))
+        sidebarX := PanelScale(24) + mainWidth
+        FileView.Move(outerMargin, toolbarHeight, mainWidth, contentHeight)
+        RecentLabel.Move(sidebarX, toolbarHeight,
+            sidebarWidth, PanelScale(22))
+        RecentView.Move(sidebarX, toolbarHeight + PanelScale(26),
+            sidebarWidth, Max(PanelScale(154),
+                contentHeight - PanelScale(26)))
+        RecentView.ModifyCol(1,
+            Max(PanelScale(120), sidebarWidth - PanelScale(8)))
         RecentLabel.Visible := true
         RecentView.Visible := true
     } else {
-        FileView.Move(12, PANEL_TOOLBAR_HEIGHT,
-            Max(200, width - 24), contentHeight)
+        FileView.Move(outerMargin, toolbarHeight,
+            Max(PanelScale(200), width - PanelScale(24)), contentHeight)
         RecentLabel.Visible := false
         RecentView.Visible := false
     }
@@ -1178,16 +1211,19 @@ ResizePanel(guiObj, minMax, width, height) {
     ; the footer. Both controls occupy the same 42-DIP band and start at the
     ; same Y coordinate. Their shared owner-draw path centers a two-line text
     ; block and uses DT_EDITCONTROL to suppress a partially visible third line.
-    transferWidth := Min(220, Max(140, Floor(width * 0.22)))
-    statusWidth := Max(100, width - transferWidth - 32)
-    footerTop := height - PANEL_FOOTER_HEIGHT
-    countWidth := 112
-    stateWidth := Max(100, statusWidth - countWidth - 8)
-    StatusText.Move(12, footerTop, stateWidth, PANEL_FOOTER_HEIGHT)
-    ItemCountText.Move(20 + stateWidth, footerTop, countWidth,
-        PANEL_FOOTER_HEIGHT)
-    TransferStatusText.Move(20 + statusWidth, footerTop,
-        transferWidth, PANEL_FOOTER_HEIGHT)
+    transferWidth := Min(PanelScale(220),
+        Max(PanelScale(140), Floor(width * 0.22)))
+    statusWidth := Max(PanelScale(100),
+        width - transferWidth - PanelScale(32))
+    footerTop := height - footerHeight
+    countWidth := PanelScale(112)
+    stateWidth := Max(PanelScale(100),
+        statusWidth - countWidth - PanelScale(8))
+    StatusText.Move(outerMargin, footerTop, stateWidth, footerHeight)
+    ItemCountText.Move(PanelScale(20) + stateWidth,
+        footerTop, countWidth, footerHeight)
+    TransferStatusText.Move(PanelScale(20) + statusWidth,
+        footerTop, transferWidth, footerHeight)
 }
 
 ResizeFolderDropControls(width) {
@@ -1195,16 +1231,19 @@ ResizeFolderDropControls(width) {
     if !IsObject(FolderDropAddSourceButton)
         return
     if IsTextWorkspace() {
-        FolderDropAddSourceButton.Move(12, 4, Max(160, width - 24), 36)
+        FolderDropAddSourceButton.Move(PanelScale(12), PanelScale(4),
+            Max(PanelScale(160), width - PanelScale(24)), PanelScale(36))
         return
     }
-    gap := 8
-    available := Max(300, width - 24 - gap)
+    gap := PanelScale(8)
+    available := Max(PanelScale(300), width - PanelScale(24) - gap)
     primaryWidth := Floor(available * 0.7)
     secondaryWidth := available - primaryWidth
-    FolderDropAddSourceButton.Move(12, 4, primaryWidth, 36)
+    FolderDropAddSourceButton.Move(PanelScale(12), PanelScale(4),
+        primaryWidth, PanelScale(36))
     FolderDropPinnedButton.Move(
-        12 + primaryWidth + gap, 4, secondaryWidth, 36)
+        PanelScale(12) + primaryWidth + gap, PanelScale(4),
+        secondaryWidth, PanelScale(36))
 }
 
 ShowFolderDropMode() {
@@ -1466,8 +1505,8 @@ ApplyViewMode() {
     if ViewMode = "List" {
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x108E,
             "ptr", 1, "ptr", 0, "ptr") ; LVM_SETVIEW, LV_VIEW_DETAILS
-        FileView.ModifyCol(1, 360)
-        FileView.ModifyCol(2, 132)
+        FileView.ModifyCol(1, PanelScale(360))
+        FileView.ModifyCol(2, PanelScale(132))
         ApplyFileViewLabels(false)
     } else {
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x108E,
@@ -1487,9 +1526,13 @@ ApplyThumbnailLayout() {
     ; LVS_NOLABELWRAP makes the one-line setting control actual label wrapping,
     ; instead of merely reducing the reserved height and clipping line two.
     FileView.Opt(ThumbnailTextLines = 1 ? "+0x80" : "-0x80")
-    horizontalSpacing := ThumbnailSize + ThumbnailHorizontalGap
-    verticalSpacing := ThumbnailSize + GetThumbnailLabelReserve()
-        + ThumbnailVerticalGap
+    ; LVM_SETICONSPACING uses raw pixels, matching the configured thumbnail
+    ; edge and ImageList. Windows DPI must not multiply these values again.
+    horizontalSpacing := PanelScale(
+        ThumbnailSize + ThumbnailHorizontalGap)
+    verticalSpacing := PanelScale(
+        ThumbnailSize + ThumbnailVerticalGap)
+        + GetThumbnailLabelReserve()
     horizontalSpacing := Max(4, Min(horizontalSpacing, 0xFFFF))
     verticalSpacing := Max(4, Min(verticalSpacing, 0xFFFF))
     packedSpacing := (horizontalSpacing & 0xFFFF)
@@ -1505,7 +1548,7 @@ GetThumbnailLabelReserve() {
 
     ; Use the ListView's real font metrics so the safety reserve also follows
     ; Windows DPI/font scaling. The fallback matches the 9 pt UI font.
-    lineHeight := 20
+    lineHeight := PanelScale(20)
     hdc := DllCall("user32\GetDC", "ptr", FileView.Hwnd, "ptr")
     if hdc {
         hFont := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
@@ -1564,7 +1607,7 @@ FitThumbnailLabel(label, hdc) {
     ; Native icon labels add a small horizontal margin around the measured
     ; text. Leave six pixels on each side so the complete painted label stays
     ; within the square thumbnail width and cannot touch a neighbouring item.
-    maxTextWidth := Max(8, ThumbnailSize - 12)
+    maxTextWidth := Max(PanelScale(8), PanelScale(ThumbnailSize - 12))
     measuredWidth := MeasureListViewText(label, hdc)
     if measuredWidth >= 0 && measuredWidth <= maxTextWidth
         return label
@@ -1574,7 +1617,8 @@ FitThumbnailLabel(label, hdc) {
     if measuredWidth < 0 || ellipsisWidth < 0 {
         ; GetDC is expected to succeed for a live ListView. Keep a conservative
         ; fallback for unusual themes or teardown timing.
-        fallbackLength := Max(1, Floor(maxTextWidth / 14))
+        fallbackCharWidth := PanelScale(14)
+        fallbackLength := Max(1, Floor(maxTextWidth / fallbackCharWidth))
         return StrLen(label) <= fallbackLength
             ? label
             : SubStr(label, 1, Max(0, fallbackLength - 1)) ellipsis

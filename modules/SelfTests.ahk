@@ -630,7 +630,7 @@ SelfTestSourceIdFactory(state) {
 }
 
 RunFolderSourceConfigSelfTests() {
-    global ConfigPath
+    global ConfigPath, ConfigReentrySelfTestRejected
     testRoot := A_Temp "\PopDrop-source-config-self-test-"
         . DllCall("kernel32\GetCurrentProcessId", "uint")
         . "-" A_TickCount
@@ -750,10 +750,31 @@ RunFolderSourceConfigSelfTests() {
         AssertSelfTest(failed
             && BuffersEqual(beforeFailure, afterFailure),
             "原子保存失败不留下部分来源")
+
+        ConfigReentrySelfTestRejected := false
+        AtomicConfigEdit(TestConfigTransactionReentry)
+        AssertSelfTest(ConfigReentrySelfTestRejected
+            && IniRead(testPath, "General", "ConfigReentryProbe", "") = "1",
+            "配置事务拒绝同进程重入且外层写入仍可提交")
     } finally {
         ConfigPath := hadConfigPath ? previousConfigPath : ""
         try DirDelete(testRoot, true)
     }
+}
+
+TestConfigTransactionReentry(tempPath) {
+    global ConfigReentrySelfTestRejected
+    try AtomicConfigEdit(UnexpectedNestedConfigWrite)
+    catch as err
+        ConfigReentrySelfTestRejected := InStr(
+            err.Message, "配置写入事务正在进行") > 0
+    doc := OpenPopDropConfig(tempPath)
+    doc.SetValue("General", "ConfigReentryProbe", "1", 1)
+    doc.Save()
+}
+
+UnexpectedNestedConfigWrite(tempPath) {
+    throw Error("嵌套配置写入不应被执行：" tempPath)
 }
 
 FailFolderSourceTransaction(tempPath) {

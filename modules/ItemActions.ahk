@@ -156,18 +156,87 @@ IsPopDropPanelActive(*) {
 SwitchWorkspaceByPosition(position, *) {
     global Workspaces
     if position >= 1 && position <= Workspaces.Length
-        ActivateWorkspace(Workspaces[position].Id)
+        QueuePanelWorkspaceSwitch(Workspaces[position].Id)
 }
 
 CycleWorkspace(direction, *) {
-    global Workspaces, ActiveWorkspaceId
+    QueuePanelWorkspaceCycle(direction)
+}
+
+QueuePanelWorkspaceSwitch(workspaceId) {
+    global PendingPanelWorkspaceId, PanelWorkspaceSwitchGeneration
+    found := FindWorkspace(workspaceId)
+    if !IsObject(found)
+        return false
+    previousCritical := A_IsCritical
+    Critical("On")
+    try {
+        PendingPanelWorkspaceId := found.Value.Id
+        generation := ++PanelWorkspaceSwitchGeneration
+        SetTimer(CommitPanelWorkspaceSwitch.Bind(generation), -25)
+    } finally {
+        Critical(previousCritical)
+    }
+    return true
+}
+
+QueuePanelWorkspaceCycle(direction) {
+    global Workspaces, ActiveWorkspaceId, PendingPanelWorkspaceId
+    global PanelWorkspaceSwitchGeneration
     if Workspaces.Length < 2
-        return
-    found := FindWorkspace(ActiveWorkspaceId)
-    current := IsObject(found) ? found.Index : 1
-    next := Mod(current - 1 + direction + Workspaces.Length,
-        Workspaces.Length) + 1
-    ActivateWorkspace(Workspaces[next].Id)
+        return false
+    previousCritical := A_IsCritical
+    Critical("On")
+    try {
+        baseId := PendingPanelWorkspaceId != ""
+            ? PendingPanelWorkspaceId : ActiveWorkspaceId
+        found := FindWorkspace(baseId)
+        current := IsObject(found) ? found.Index : 1
+        next := Mod(current - 1 + direction + Workspaces.Length,
+            Workspaces.Length) + 1
+        PendingPanelWorkspaceId := Workspaces[next].Id
+        generation := ++PanelWorkspaceSwitchGeneration
+        SetTimer(CommitPanelWorkspaceSwitch.Bind(generation), -25)
+    } finally {
+        Critical(previousCritical)
+    }
+    return true
+}
+
+CommitPanelWorkspaceSwitch(generation) {
+    global PendingPanelWorkspaceId, PanelWorkspaceSwitchGeneration
+    global PanelWorkspaceSwitchRunning
+    previousCritical := A_IsCritical
+    Critical("On")
+    try {
+        if generation != PanelWorkspaceSwitchGeneration
+            return
+        ; The active dispatcher owns the current switch. Leave the newest
+        ; target pending; its finally block schedules exactly one successor.
+        if PanelWorkspaceSwitchRunning
+            return
+        workspaceId := PendingPanelWorkspaceId
+        if workspaceId = ""
+            return
+        PendingPanelWorkspaceId := ""
+        PanelWorkspaceSwitchRunning := true
+    } finally {
+        Critical(previousCritical)
+    }
+    try ActivateWorkspace(workspaceId)
+    finally {
+        previousCritical := A_IsCritical
+        Critical("On")
+        try {
+            PanelWorkspaceSwitchRunning := false
+            if PendingPanelWorkspaceId != "" {
+                generation := PanelWorkspaceSwitchGeneration
+                SetTimer(CommitPanelWorkspaceSwitch.Bind(generation), -1)
+            }
+        } finally {
+            Critical(previousCritical)
+        }
+    }
 }
 
 IsPanelFileViewActive(*) {

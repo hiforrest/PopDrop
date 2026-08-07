@@ -1003,9 +1003,11 @@ ApplyTextBlockCardView() {
     dpi := DllCall("user32\GetDpiForWindow", "ptr", FileView.Hwnd, "uint")
     if !dpi
         dpi := 96
-    cardWidthPx := DllCall("kernel32\MulDiv", "int", TextBlockCardWidth,
+    cardWidthPx := DllCall("kernel32\MulDiv",
+        "int", PanelScale(TextBlockCardWidth),
         "int", dpi, "int", 96, "int")
-    cardHeightPx := DllCall("kernel32\MulDiv", "int", TextBlockCardHeight,
+    cardHeightPx := DllCall("kernel32\MulDiv",
+        "int", PanelScale(TextBlockCardHeight),
         "int", dpi, "int", 96, "int")
     NumPut("uint", 3, info, 8) ; LVTVIF_FIXEDWIDTH | LVTVIF_FIXEDHEIGHT
     NumPut("int", cardWidthPx, info, 12)

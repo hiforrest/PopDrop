@@ -55,18 +55,20 @@ DrawTextBlockCard(customDraw) {
     if !dpi
         dpi := 96
     marginX := Max(1, DllCall("kernel32\MulDiv",
-        "int", 2, "int", dpi, "int", 96, "int"))
+        "int", PanelScale(2), "int", dpi, "int", 96, "int"))
     paddingX := Max(4, DllCall("kernel32\MulDiv",
-        "int", 8, "int", dpi, "int", 96, "int"))
+        "int", PanelScale(8), "int", dpi, "int", 96, "int"))
     paddingY := Max(3, DllCall("kernel32\MulDiv",
-        "int", 5, "int", dpi, "int", 96, "int"))
+        "int", PanelScale(5), "int", dpi, "int", 96, "int"))
     radius := Max(4, DllCall("kernel32\MulDiv",
-        "int", 7, "int", dpi, "int", 96, "int"))
+        "int", PanelScale(7), "int", dpi, "int", 96, "int"))
 
+    insetTop := PanelPhysicalScale(4, FileView.Hwnd)
+    insetBottom := PanelPhysicalScale(5, FileView.Hwnd)
     left := NumGet(customDraw + rectOffset, "int") + marginX
-    top := NumGet(customDraw + rectOffset + 4, "int") + 4
+    top := NumGet(customDraw + rectOffset + 4, "int") + insetTop
     right := NumGet(customDraw + rectOffset + 8, "int") - marginX
-    bottom := NumGet(customDraw + rectOffset + 12, "int") - 5
+    bottom := NumGet(customDraw + rectOffset + 12, "int") - insetBottom
     if right <= left || bottom <= top
         return 0x4 ; CDRF_SKIPDEFAULT
     state := NumGet(customDraw + stateOffset, "uint")
@@ -87,7 +89,8 @@ DrawTextBlockCard(customDraw) {
     borderColor := selected ? 0x00D77800
         : DllCall("user32\GetSysColor", "int", 16, "uint")
     pen := DllCall("gdi32\CreatePen", "int", 0,
-        "int", selected ? 2 : 1,
+        "int", selected ? Max(2, PanelPhysicalScale(2, FileView.Hwnd))
+            : Max(1, PanelPhysicalScale(1, FileView.Hwnd)),
         "uint", borderColor, "ptr")
     if !pen
         return 0x4
@@ -131,9 +134,9 @@ DrawTextBlockCard(customDraw) {
         ; it close to the card edge, especially horizontally, while retaining
         ; a small DPI-scaled safety gap from the rounded border.
         badgeInsetX := Max(1, DllCall("kernel32\MulDiv",
-            "int", 2, "int", dpi, "int", 96, "int"))
+            "int", PanelScale(2), "int", dpi, "int", 96, "int"))
         badgeInsetY := Max(1, DllCall("kernel32\MulDiv",
-            "int", 2, "int", dpi, "int", 96, "int"))
+            "int", PanelScale(2), "int", dpi, "int", 96, "int"))
         if showLinkIcon
             DrawPinnedLinkIcon(hdc, right, bottom, dpi,
                 badgeInsetX, badgeInsetY)
@@ -143,10 +146,11 @@ DrawTextBlockCard(customDraw) {
     }
     if state & 0x10 { ; CDIS_FOCUS
         focusRect := Buffer(16, 0)
-        NumPut("int", left + 2, focusRect, 0)
-        NumPut("int", top + 2, focusRect, 4)
-        NumPut("int", right - 2, focusRect, 8)
-        NumPut("int", bottom - 2, focusRect, 12)
+        focusInset := PanelPhysicalScale(2, FileView.Hwnd)
+        NumPut("int", left + focusInset, focusRect, 0)
+        NumPut("int", top + focusInset, focusRect, 4)
+        NumPut("int", right - focusInset, focusRect, 8)
+        NumPut("int", bottom - focusInset, focusRect, 12)
         DllCall("user32\DrawFocusRect", "ptr", hdc, "ptr", focusRect.Ptr)
     }
     if oldFont
@@ -229,7 +233,7 @@ PinnedLinkIconSize(dpi) {
 
 TextBlockBadgeIconSize(dpi) {
     return Max(12, DllCall("kernel32\MulDiv",
-        "int", 14, "int", dpi, "int", 96, "int"))
+        "int", PanelScale(14), "int", dpi, "int", 96, "int"))
 }
 
 IsTextSourcePinnedRow(row) {

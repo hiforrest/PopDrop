@@ -134,10 +134,18 @@ WriteInitialTransferFavoritesConfig(favorites, tempPath) {
 }
 
 AtomicConfigEdit(editor) {
-    global ConfigPath
+    global ConfigPath, ConfigEditInProgress, ConfigEditSerial
+    previousCritical := A_IsCritical
+    Critical("On")
+    if ConfigEditInProgress {
+        Critical(previousCritical)
+        throw Error("配置写入事务正在进行，不能重复进入。")
+    }
+    ConfigEditInProgress := true
+    ConfigEditSerial += 1
     tempPath := ConfigPath ".tmp-"
         . DllCall("kernel32\GetCurrentProcessId", "uint")
-        . "-" A_TickCount
+        . "-" A_TickCount "-" ConfigEditSerial
     try FileDelete(tempPath)
     try {
         configExisted := FileExist(ConfigPath) != ""
@@ -178,6 +186,9 @@ AtomicConfigEdit(editor) {
     } catch {
         try FileDelete(tempPath)
         throw
+    } finally {
+        ConfigEditInProgress := false
+        Critical(previousCritical)
     }
 }
 

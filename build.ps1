@@ -26,6 +26,8 @@ $script:AppIcoPath = Join-Path $ProjectRoot "assets\app.ico"
 $script:TrayIcoPath = Join-Path $ProjectRoot "assets\tray.ico"
 $script:LinkIcoPath = Join-Path $ProjectRoot "assets\icon-lnk.ico"
 $script:PinIcoPath = Join-Path $ProjectRoot "assets\pin.ico"
+$script:EmptyFolderIcoPath = Join-Path $ProjectRoot "assets\empty-folder.ico"
+$script:UnknownFileIcoPath = Join-Path $ProjectRoot "assets\unknown-file.ico"
 $script:LogDir = Join-Path $ProjectRoot "build_logs"
 $script:CompilerPath = "C:\Program Files\AutoHotkey\Compiler\Ahk2Exe.exe"
 $script:BasePath64 = "C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe"
@@ -184,6 +186,20 @@ if (-not (Test-Path -LiteralPath $PinIcoPath -PathType Leaf)) {
     exit 14
 }
 Write-OK "Text-source pin icon found: $PinIcoPath"
+
+Write-Step "Checking empty-folder icon: $EmptyFolderIcoPath"
+if (-not (Test-Path -LiteralPath $EmptyFolderIcoPath -PathType Leaf)) {
+    Write-Err "Empty-folder icon not found: $EmptyFolderIcoPath"
+    exit 16
+}
+Write-OK "Empty-folder icon found: $EmptyFolderIcoPath"
+
+Write-Step "Checking unknown-file icon: $UnknownFileIcoPath"
+if (-not (Test-Path -LiteralPath $UnknownFileIcoPath -PathType Leaf)) {
+    Write-Err "Unknown-file icon not found: $UnknownFileIcoPath"
+    exit 17
+}
+Write-OK "Unknown-file icon found: $UnknownFileIcoPath"
 
 # 8. Check output directory writable
 Write-Step "Checking output directory writable: $ProjectRoot"
