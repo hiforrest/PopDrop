@@ -1,10 +1,543 @@
-; Native control construction, owner drawing and DPI corrections.
+﻿; Native control construction, owner drawing and DPI corrections.
 
 AddUiButton(guiObj, options, text, scaleFactor := 1.0) {
     global UI_SINGLE_LINE_HEIGHT
     return guiObj.AddButton(
         options " h" Round(UI_SINGLE_LINE_HEIGHT * scaleFactor)
         . " -Wrap", text)
+}
+
+AddPanelIconButton(guiObj, options, imagePath, tooltipText, action,
+    alternateImagePath := "") {
+    global PanelIconButtons, PanelIconSubclassCallback
+    EnsurePanelIconGraphics()
+    fullPath := ResolvePanelAssetPath(imagePath)
+    image := LoadPanelIconImage(fullPath)
+    alternateImage := alternateImagePath != ""
+        ? LoadPanelIconImage(ResolvePanelAssetPath(alternateImagePath)) : 0
+    control := guiObj.AddText(options " +Tabstop +0x100", "") ; SS_NOTIFY
+    state := {
+        Control: control,
+        Image: image,
+        AlternateImage: alternateImage,
+        UseAlternate: false,
+        Tooltip: tooltipText,
+        Action: action,
+        Hovered: false,
+        Pressed: false,
+        Selected: false,
+        Enabled: true
+    }
+    PanelIconButtons[control.Hwnd] := state
+    if !PanelIconSubclassCallback
+        PanelIconSubclassCallback := CallbackCreate(
+            PanelIconButtonSubclass, "", 6)
+    if !DllCall("comctl32\SetWindowSubclass",
+        "ptr", control.Hwnd,
+        "ptr", PanelIconSubclassCallback,
+        "uptr", 0x50444942,
+        "uptr", control.Hwnd,
+        "int") {
+        DisposePanelIconImage(image)
+        DisposePanelIconImage(alternateImage)
+        PanelIconButtons.Delete(control.Hwnd)
+        throw OSError(A_LastError, "无法创建图标工具栏按钮")
+    }
+    control.OnEvent("Click", InvokePanelIconButton.Bind(control.Hwnd))
+    return control
+}
+
+ResolvePanelAssetPath(path) {
+    if RegExMatch(path, "i)^(?:[A-Z]:\\|\\\\)")
+        return path
+    return A_ScriptDir "\\" path
+}
+
+EnsurePanelIconGraphics() {
+    global PanelIconGdipToken
+    if PanelIconGdipToken
+        return
+    inputSize := A_PtrSize = 8 ? 24 : 16
+    input := Buffer(inputSize, 0)
+    NumPut("uint", 1, input, 0)
+    token := 0
+    status := DllCall("gdiplus\GdiplusStartup",
+        "ptr*", &token, "ptr", input.Ptr, "ptr", 0, "uint")
+    if status || !token
+        throw Error("无法初始化 PNG 图标绘制组件（GDI+ 状态 " status "）。")
+    PanelIconGdipToken := token
+}
+
+LoadPanelIconImage(path) {
+    if !FileExist(path)
+        throw Error("工具栏图标不存在：" path)
+    image := 0
+    status := DllCall("gdiplus\GdipCreateBitmapFromFile",
+        "wstr", path, "ptr*", &image, "uint")
+    if status || !image
+        throw Error("无法加载工具栏图标：" path "（GDI+ 状态 " status "）")
+    return image
+}
+
+DisposePanelIconImage(image) {
+    if image
+        DllCall("gdiplus\GdipDisposeImage", "ptr", image, "uint")
+}
+
+InvokePanelIconButton(hwnd, *) {
+    global PanelIconButtons
+    if !PanelIconButtons.Has(hwnd)
+        return
+    state := PanelIconButtons[hwnd]
+    if state.Enabled && IsObject(state.Action)
+        state.Action.Call()
+}
+
+PanelIconButtonSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
+    global PanelIconButtons, PanelIconHoverHwnd
+    try {
+        if msg = 0x000F { ; WM_PAINT
+            DrawPanelIconButton(hwnd)
+            return 0
+        }
+        if msg = 0x0014 ; WM_ERASEBKGND
+            return 1
+        if PanelIconButtons.Has(hwnd) {
+            state := PanelIconButtons[hwnd]
+            if msg = 0x0200 { ; WM_MOUSEMOVE
+                if !state.Hovered {
+                    if PanelIconHoverHwnd && PanelIconHoverHwnd != hwnd
+                        ClearPanelIconHover(PanelIconHoverHwnd)
+                    state.Hovered := true
+                    PanelIconHoverHwnd := hwnd
+                    TrackPanelIconMouseLeave(hwnd)
+                    InvalidatePanelIconButton(hwnd)
+                    SchedulePanelIconTooltip(hwnd)
+                }
+            } else if msg = 0x02A3 { ; WM_MOUSELEAVE
+                ClearPanelIconHover(hwnd)
+            } else if msg = 0x0201 { ; WM_LBUTTONDOWN
+                if state.Enabled {
+                    DllCall("user32\SetFocus", "ptr", hwnd, "ptr")
+                    state.Pressed := true
+                    InvalidatePanelIconButton(hwnd)
+                }
+            } else if msg = 0x0202 || msg = 0x0215 { ; UP / CAPTURECHANGED
+                if state.Pressed {
+                    state.Pressed := false
+                    InvalidatePanelIconButton(hwnd)
+                }
+            } else if msg = 0x0087
+                && (wParam = 13 || wParam = 32) { ; WM_GETDLGCODE
+                return 0x0004 ; DLGC_WANTALLKEYS
+            } else if msg = 0x0100
+                && (wParam = 13 || wParam = 32) { ; WM_KEYDOWN
+                if state.Enabled && !state.Pressed {
+                    state.Pressed := true
+                    InvalidatePanelIconButton(hwnd)
+                }
+                return 0
+            } else if msg = 0x0101
+                && (wParam = 13 || wParam = 32) { ; WM_KEYUP
+                shouldInvoke := state.Enabled && state.Pressed
+                state.Pressed := false
+                InvalidatePanelIconButton(hwnd)
+                if shouldInvoke
+                    SetTimer(InvokePanelIconButton.Bind(hwnd), -1)
+                return 0
+            } else if msg = 0x0007 || msg = 0x0008 { ; FOCUS / KILLFOCUS
+                InvalidatePanelIconButton(hwnd)
+            } else if msg = 0x0082 { ; WM_NCDESTROY
+                RemovePanelIconButton(hwnd, subclassId)
+            }
+        }
+    }
+    return DllCall("comctl32\DefSubclassProc",
+        "ptr", hwnd, "uint", msg, "ptr", wParam, "ptr", lParam, "ptr")
+}
+
+TrackPanelIconMouseLeave(hwnd) {
+    size := A_PtrSize = 8 ? 24 : 16
+    tracking := Buffer(size, 0)
+    NumPut("uint", size, tracking, 0)
+    NumPut("uint", 0x00000002, tracking, 4) ; TME_LEAVE
+    NumPut("ptr", hwnd, tracking, 8)
+    DllCall("user32\TrackMouseEvent", "ptr", tracking.Ptr, "int")
+}
+
+ClearPanelIconHover(hwnd) {
+    global PanelIconButtons, PanelIconHoverHwnd, PanelIconTooltipGeneration
+    if PanelIconButtons.Has(hwnd) {
+        state := PanelIconButtons[hwnd]
+        state.Hovered := false
+        state.Pressed := false
+        InvalidatePanelIconButton(hwnd)
+    }
+    if PanelIconHoverHwnd = hwnd
+        PanelIconHoverHwnd := 0
+    PanelIconTooltipGeneration += 1
+    ToolTip()
+}
+
+ResetPanelIconHover() {
+    global PanelIconHoverHwnd, PanelIconTooltipGeneration
+    if PanelIconHoverHwnd
+        ClearPanelIconHover(PanelIconHoverHwnd)
+    else {
+        PanelIconTooltipGeneration += 1
+        ToolTip()
+    }
+}
+
+SchedulePanelIconTooltip(hwnd) {
+    global PanelIconTooltipGeneration
+    PanelIconTooltipGeneration += 1
+    generation := PanelIconTooltipGeneration
+    SetTimer(ShowPanelIconTooltip.Bind(hwnd, generation), -450)
+}
+
+ShowPanelIconTooltip(hwnd, generation) {
+    global PanelIconButtons, PanelIconHoverHwnd, PanelIconTooltipGeneration
+    if generation != PanelIconTooltipGeneration
+        || PanelIconHoverHwnd != hwnd || !PanelIconButtons.Has(hwnd)
+        return
+    state := PanelIconButtons[hwnd]
+    if !state.Hovered || state.Tooltip = ""
+        return
+    previousMouseMode := A_CoordModeMouse
+    previousToolTipMode := A_CoordModeToolTip
+    try {
+        CoordMode("Mouse", "Screen")
+        CoordMode("ToolTip", "Screen")
+        MouseGetPos(&mouseX, &mouseY)
+        ToolTip(state.Tooltip, mouseX + 16, mouseY + 20)
+    } finally {
+        CoordMode("Mouse", previousMouseMode)
+        CoordMode("ToolTip", previousToolTipMode)
+    }
+}
+
+DrawPanelIconButton(hwnd) {
+    global PanelIconButtons
+    if !PanelIconButtons.Has(hwnd)
+        return
+    state := PanelIconButtons[hwnd]
+    paint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
+    hdc := DllCall("user32\BeginPaint", "ptr", hwnd,
+        "ptr", paint.Ptr, "ptr")
+    if !hdc
+        return
+    try {
+        rect := Buffer(16, 0)
+        DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect.Ptr)
+        width := NumGet(rect, 8, "int")
+        height := NumGet(rect, 12, "int")
+        active := state.Hovered || state.Selected
+        if active {
+            fillColor := state.Pressed ? 0xFFE8CC : 0xFFF3E5
+            brush := DllCall("gdi32\CreateSolidBrush",
+                "uint", fillColor, "ptr")
+            DllCall("user32\FillRect", "ptr", hdc,
+                "ptr", rect.Ptr, "ptr", brush)
+            DllCall("gdi32\DeleteObject", "ptr", brush)
+            border := DllCall("gdi32\CreateSolidBrush",
+                "uint", 0xE9AF66, "ptr")
+            DllCall("user32\FrameRect", "ptr", hdc,
+                "ptr", rect.Ptr, "ptr", border)
+            DllCall("gdi32\DeleteObject", "ptr", border)
+        } else {
+            DllCall("user32\FillRect", "ptr", hdc,
+                "ptr", rect.Ptr,
+                "ptr", DllCall("user32\GetSysColorBrush",
+                    "int", 15, "ptr")) ; COLOR_BTNFACE
+        }
+        image := state.UseAlternate && state.AlternateImage
+            ? state.AlternateImage : state.Image
+        if image {
+            graphics := 0
+            if DllCall("gdiplus\GdipCreateFromHDC",
+                "ptr", hdc, "ptr*", &graphics, "uint") = 0 && graphics {
+                try {
+                    DllCall("gdiplus\GdipSetInterpolationMode",
+                        "ptr", graphics, "int", 7, "uint")
+                    ; The PNG is already a 64x64 toolbar canvas. Draw the
+                    ; entire canvas edge-to-edge so the button adds no padding.
+                    DllCall("gdiplus\GdipDrawImageRectI",
+                        "ptr", graphics, "ptr", image,
+                        "int", 0, "int", 0,
+                        "int", width, "int", height, "uint")
+                } finally {
+                    DllCall("gdiplus\GdipDeleteGraphics",
+                        "ptr", graphics, "uint")
+                }
+            }
+        }
+        if DllCall("user32\GetFocus", "ptr") = hwnd {
+            focusRect := Buffer(16, 0)
+            NumPut("int", 3, focusRect, 0)
+            NumPut("int", 3, focusRect, 4)
+            NumPut("int", Max(3, width - 3), focusRect, 8)
+            NumPut("int", Max(3, height - 3), focusRect, 12)
+            DllCall("user32\DrawFocusRect", "ptr", hdc,
+                "ptr", focusRect.Ptr, "int")
+        }
+    } finally {
+        DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
+    }
+}
+
+InvalidatePanelIconButton(hwnd) {
+    DllCall("user32\InvalidateRect", "ptr", hwnd,
+        "ptr", 0, "int", 0)
+}
+
+SetPanelIconButtonHovered(control, hovered) {
+    global PanelIconButtons
+    if !IsObject(control) || !PanelIconButtons.Has(control.Hwnd)
+        return
+    PanelIconButtons[control.Hwnd].Hovered := !!hovered
+    InvalidatePanelIconButton(control.Hwnd)
+}
+
+SetPanelIconButtonSelected(control, selected) {
+    global PanelIconButtons
+    if !IsObject(control) || !PanelIconButtons.Has(control.Hwnd)
+        return
+    PanelIconButtons[control.Hwnd].Selected := !!selected
+    InvalidatePanelIconButton(control.Hwnd)
+}
+
+SetPanelIconButtonAlternate(control, useAlternate) {
+    global PanelIconButtons
+    if !IsObject(control) || !PanelIconButtons.Has(control.Hwnd)
+        return
+    PanelIconButtons[control.Hwnd].UseAlternate := !!useAlternate
+    InvalidatePanelIconButton(control.Hwnd)
+}
+
+SetPanelIconButtonTooltip(control, text) {
+    global PanelIconButtons
+    if IsObject(control) && PanelIconButtons.Has(control.Hwnd)
+        PanelIconButtons[control.Hwnd].Tooltip := text
+}
+
+SetPanelIconButtonEnabled(control, enabled) {
+    global PanelIconButtons
+    if !IsObject(control) || !PanelIconButtons.Has(control.Hwnd)
+        return
+    PanelIconButtons[control.Hwnd].Enabled := !!enabled
+    InvalidatePanelIconButton(control.Hwnd)
+}
+
+RemovePanelIconButton(hwnd, subclassId := 0x50444942) {
+    global PanelIconButtons, PanelIconSubclassCallback
+    if !PanelIconButtons.Has(hwnd)
+        return
+    state := PanelIconButtons[hwnd]
+    if PanelIconSubclassCallback
+        DllCall("comctl32\RemoveWindowSubclass",
+            "ptr", hwnd, "ptr", PanelIconSubclassCallback,
+            "uptr", subclassId, "int")
+    DisposePanelIconImage(state.Image)
+    DisposePanelIconImage(state.AlternateImage)
+    PanelIconButtons.Delete(hwnd)
+}
+
+CleanupPanelIconButtons() {
+    global PanelIconButtons, PanelIconSubclassCallback, PanelIconGdipToken
+    global PanelIconTooltipGeneration, PanelIconHoverHwnd
+    PanelIconTooltipGeneration += 1
+    PanelIconHoverHwnd := 0
+    ToolTip()
+    handles := []
+    for hwnd in PanelIconButtons
+        handles.Push(hwnd)
+    for hwnd in handles
+        RemovePanelIconButton(hwnd)
+    if PanelIconSubclassCallback
+        CallbackFree(PanelIconSubclassCallback)
+    PanelIconSubclassCallback := 0
+    if PanelIconGdipToken
+        DllCall("gdiplus\GdiplusShutdown", "ptr", PanelIconGdipToken)
+    PanelIconGdipToken := 0
+}
+
+AddPanelSolidRule(guiObj, options, colorRef) {
+    global PanelSolidRuleControls, PanelSolidRuleSubclassCallback
+    control := guiObj.AddText(options, "")
+    PanelSolidRuleControls[control.Hwnd] := colorRef
+    if !PanelSolidRuleSubclassCallback
+        PanelSolidRuleSubclassCallback := CallbackCreate(
+            PanelSolidRuleSubclass, "", 6)
+    if !DllCall("comctl32\SetWindowSubclass",
+        "ptr", control.Hwnd,
+        "ptr", PanelSolidRuleSubclassCallback,
+        "uptr", 0x50445352,
+        "uptr", 0,
+        "int") {
+        PanelSolidRuleControls.Delete(control.Hwnd)
+        throw OSError(A_LastError, "无法创建 Tab 分界线")
+    }
+    return control
+}
+
+PanelSolidRuleSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
+    global PanelSolidRuleControls, PanelSolidRuleSubclassCallback
+    try {
+        if msg = 0x000F { ; WM_PAINT
+            DrawPanelSolidRule(hwnd)
+            return 0
+        }
+        if msg = 0x0014 ; WM_ERASEBKGND
+            return 1
+        if msg = 0x0082 { ; WM_NCDESTROY
+            DllCall("comctl32\RemoveWindowSubclass",
+                "ptr", hwnd, "ptr", PanelSolidRuleSubclassCallback,
+                "uptr", subclassId, "int")
+            if PanelSolidRuleControls.Has(hwnd)
+                PanelSolidRuleControls.Delete(hwnd)
+        }
+    }
+    return DllCall("comctl32\DefSubclassProc",
+        "ptr", hwnd, "uint", msg, "ptr", wParam, "ptr", lParam, "ptr")
+}
+
+DrawPanelSolidRule(hwnd) {
+    global PanelSolidRuleControls
+    paint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
+    hdc := DllCall("user32\BeginPaint", "ptr", hwnd,
+        "ptr", paint.Ptr, "ptr")
+    if !hdc
+        return
+    try {
+        rect := Buffer(16, 0)
+        DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect.Ptr)
+        colorRef := PanelSolidRuleControls.Has(hwnd)
+            ? PanelSolidRuleControls[hwnd] : 0x00908782
+        brush := DllCall("gdi32\CreateSolidBrush",
+            "uint", colorRef, "ptr")
+        DllCall("user32\FillRect", "ptr", hdc,
+            "ptr", rect.Ptr, "ptr", brush)
+        DllCall("gdi32\DeleteObject", "ptr", brush)
+    } finally {
+        DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
+    }
+}
+
+CleanupPanelSolidRules() {
+    global PanelSolidRuleControls, PanelSolidRuleSubclassCallback
+    if PanelSolidRuleSubclassCallback {
+        handles := []
+        for hwnd in PanelSolidRuleControls
+            handles.Push(hwnd)
+        for hwnd in handles {
+            if DllCall("user32\IsWindow", "ptr", hwnd, "int")
+                DllCall("comctl32\RemoveWindowSubclass",
+                    "ptr", hwnd, "ptr", PanelSolidRuleSubclassCallback,
+                    "uptr", 0x50445352, "int")
+        }
+        CallbackFree(PanelSolidRuleSubclassCallback)
+    }
+    PanelSolidRuleSubclassCallback := 0
+    PanelSolidRuleControls.Clear()
+}
+
+AddPanelDashedSeparator(guiObj, options) {
+    global PanelSeparatorControls, PanelSeparatorSubclassCallback
+    control := guiObj.AddText(options, "")
+    PanelSeparatorControls[control.Hwnd] := true
+    if !PanelSeparatorSubclassCallback
+        PanelSeparatorSubclassCallback := CallbackCreate(
+            PanelDashedSeparatorSubclass, "", 6)
+    if !DllCall("comctl32\SetWindowSubclass",
+        "ptr", control.Hwnd,
+        "ptr", PanelSeparatorSubclassCallback,
+        "uptr", 0x50445350,
+        "uptr", 0,
+        "int") {
+        PanelSeparatorControls.Delete(control.Hwnd)
+        throw OSError(A_LastError, "无法创建工具栏分割线")
+    }
+    return control
+}
+
+PanelDashedSeparatorSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
+    global PanelSeparatorControls, PanelSeparatorSubclassCallback
+    try {
+        if msg = 0x000F { ; WM_PAINT
+            DrawPanelDashedSeparator(hwnd)
+            return 0
+        }
+        if msg = 0x0014 ; WM_ERASEBKGND
+            return 1
+        if msg = 0x0082 { ; WM_NCDESTROY
+            DllCall("comctl32\RemoveWindowSubclass",
+                "ptr", hwnd, "ptr", PanelSeparatorSubclassCallback,
+                "uptr", subclassId, "int")
+            if PanelSeparatorControls.Has(hwnd)
+                PanelSeparatorControls.Delete(hwnd)
+        }
+    }
+    return DllCall("comctl32\DefSubclassProc",
+        "ptr", hwnd, "uint", msg, "ptr", wParam, "ptr", lParam, "ptr")
+}
+
+DrawPanelDashedSeparator(hwnd) {
+    paint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
+    hdc := DllCall("user32\BeginPaint", "ptr", hwnd,
+        "ptr", paint.Ptr, "ptr")
+    if !hdc
+        return
+    try {
+        rect := Buffer(16, 0)
+        DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect.Ptr)
+        width := NumGet(rect, 8, "int")
+        height := NumGet(rect, 12, "int")
+        DllCall("user32\FillRect", "ptr", hdc, "ptr", rect.Ptr,
+            "ptr", DllCall("user32\GetSysColorBrush",
+                "int", 15, "ptr")) ; COLOR_BTNFACE
+        if width > 0 && height > 0 {
+            ; Literal 1-device-pixel dashes are reliable across fractional DPI
+            ; and don't depend on PS_DASH rendering behavior.
+            lineY := Floor((height - 1) / 2)
+            dashBrush := DllCall("gdi32\CreateSolidBrush",
+                "uint", 0x00686868, "ptr") ; RGB(104,104,104)
+            dashWidth := 4
+            dashGap := 3
+            dashX := 0
+            while dashX < width {
+                dashRect := Buffer(16, 0)
+                NumPut("int", dashX, dashRect, 0)
+                NumPut("int", lineY, dashRect, 4)
+                NumPut("int", Min(width, dashX + dashWidth), dashRect, 8)
+                NumPut("int", lineY + 1, dashRect, 12)
+                DllCall("user32\FillRect", "ptr", hdc,
+                    "ptr", dashRect.Ptr, "ptr", dashBrush)
+                dashX += dashWidth + dashGap
+            }
+            DllCall("gdi32\DeleteObject", "ptr", dashBrush)
+        }
+    } finally {
+        DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
+    }
+}
+
+CleanupPanelDashedSeparators() {
+    global PanelSeparatorControls, PanelSeparatorSubclassCallback
+    if PanelSeparatorSubclassCallback {
+        handles := []
+        for hwnd in PanelSeparatorControls
+            handles.Push(hwnd)
+        for hwnd in handles {
+            if DllCall("user32\IsWindow", "ptr", hwnd, "int")
+                DllCall("comctl32\RemoveWindowSubclass",
+                    "ptr", hwnd, "ptr", PanelSeparatorSubclassCallback,
+                    "uptr", 0x50445350, "int")
+        }
+        CallbackFree(PanelSeparatorSubclassCallback)
+    }
+    PanelSeparatorSubclassCallback := 0
+    PanelSeparatorControls.Clear()
 }
 
 AddUiEdit(guiObj, options, text := "") {
@@ -51,6 +584,17 @@ AddUiDropDownList(guiObj, options, items, scaleFactor := 1.0) {
 PanelScale(value) {
     global PanelUiScaleFactor
     return Round(value * PanelUiScaleFactor)
+}
+
+PanelPixelsToGui(value, hwnd := 0) {
+    dpi := hwnd
+        ? DllCall("user32\GetDpiForWindow", "ptr", hwnd, "uint")
+        : A_ScreenDPI
+    if !dpi
+        dpi := 96
+    ; Gui.Add/Move applies monitor DPI afterwards. Keep this floating-point so
+    ; the final Win32 rounding happens only once.
+    return value * 96.0 / dpi
 }
 
 PanelPhysicalScale(value, hwnd := 0) {

@@ -1196,16 +1196,13 @@ SetPinnedDropDiscovery(active) {
     if active = PinnedDropDiscoveryActive
         return
     PinnedDropDiscoveryActive := active
-    try PinnedDropButton.Opt(active ? "+Default" : "-Default")
-    DllCall("user32\InvalidateRect", "ptr", PinnedDropButton.Hwnd,
-        "ptr", 0, "int", 1)
+    SetPanelIconButtonSelected(PinnedDropButton, active)
 }
 
 SetPinnedDropHover(active) {
     global PinnedDropButton, FolderDropPinnedButton
     if IsObject(PinnedDropButton)
-        DllCall("user32\SendMessageW", "ptr", PinnedDropButton.Hwnd,
-            "uint", 0x00F3, "ptr", active ? 1 : 0, "ptr", 0, "ptr")
+        SetPanelIconButtonHovered(PinnedDropButton, active)
     if IsObject(FolderDropPinnedButton)
         DllCall("user32\SendMessageW", "ptr", FolderDropPinnedButton.Hwnd,
             "uint", 0x00F3, "ptr", active ? 1 : 0, "ptr", 0, "ptr")

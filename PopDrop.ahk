@@ -141,11 +141,9 @@ global PinnedDropButton := 0
 global ClipboardPinnedButton := 0
 global RefreshButton := 0
 global RemovePinnedButton := 0
-global PinnedGroupLeftSeparator := 0
-global PinnedGroupRightSeparator := 0
 global SettingsButton := 0
-global CloseButton := 0
 global ToolbarControls := []
+global ToolbarSeparators := []
 global FolderDropAddSourceButton := 0
 global FolderDropPinnedButton := 0
 global FolderDropUiVisible := false
@@ -166,8 +164,12 @@ global FolderSettings := []
 global Workspaces := []
 global ActiveWorkspaceId := ""
 global ActiveWorkspaceName := ""
-global WorkspaceSelector := 0
-global WorkspaceSelectorIds := []
+global WorkspaceTabs := 0
+global WorkspaceTabIds := []
+global WorkspaceMoreButton := 0
+global WorkspaceMoreMenu := 0
+global WorkspaceOverflowIds := []
+global WORKSPACE_VISIBLE_TAB_LIMIT := 8
 global ActiveWorkspaceType := WORKSPACE_TYPE_FILES
 global SettingsController := 0
 global MaxFilesPerFolder := 8
@@ -200,6 +202,35 @@ global UI_SINGLE_LINE_HEIGHT := 26
 global UI_DROPDOWN_FIELD_HEIGHT := 22
 global PANEL_TOOLBAR_HEIGHT := 42
 global PANEL_FOOTER_HEIGHT := 42
+; Navigation/rail metrics below are visible-pixel targets. The main panel is
+; DPI-aware, so convert them back to Gui units before Add/Move.
+global PANEL_TAB_HEIGHT_PX := 54
+global PANEL_TAB_FONT_PX := 12
+; Native Tab control default padding is approximately 6/3 on this layout.
+; Add the requested +4 horizontal and +3 vertical without changing font size.
+global PANEL_TAB_PADDING_X_PX := 22
+global PANEL_TAB_PADDING_Y_PX := 0 ;无效
+global PANEL_TAB_BOTTOM_MARGIN_PX := 8 ; tab菜单距离底部的距离
+global PANEL_TAB_TEXT_VERTICAL_EXTRA_PX := 3
+global PANEL_TAB_TEXT_Y_OFFSET_PX := 4
+global WorkspaceTabPaintSubclassCallback := 0
+global PANEL_CONTENT_TOP_OFFSET_PX := 0
+global PANEL_SIDE_BUTTON_SIZE := 64
+global PANEL_SIDE_TOOLBAR_WIDTH := 64
+global PANEL_SIDE_TOOLBAR_GAP := 2
+global PANEL_SIDE_TOOLBAR_EDGE_GAP := 2
+global PANEL_SIDE_BUTTON_GAP := 2
+global PANEL_SIDE_SEPARATOR_GAP := 5
+global PANEL_SIDE_SEPARATOR_HEIGHT := 1
+global PanelIconButtons := Map()
+global PanelIconSubclassCallback := 0
+global PanelIconGdipToken := 0
+global PanelIconHoverHwnd := 0
+global PanelIconTooltipGeneration := 0
+global PanelSeparatorControls := Map()
+global PanelSeparatorSubclassCallback := 0
+global PanelSolidRuleControls := Map()
+global PanelSolidRuleSubclassCallback := 0
 ; Physical-pixel correction applied to every DropDownList after creation.
 ; Positive values move it down; negative values move it up.
 global UI_DROPDOWN_Y_OFFSET_PX := 1

@@ -1,4 +1,4 @@
-; PopDrop configuration bootstrap, migration, validation and filtering.
+﻿; PopDrop configuration bootstrap, migration, validation and filtering.
 
 ConfigDefaultValue(section, key, fallback := "") {
     global ConfigExamplePath
@@ -702,7 +702,7 @@ LoadSettings(*) {
         WindowHeight := 576
     ; Restore a useful, toolbar-driven width instead of reopening at a
     ; previously maximized desktop width. The window remains freely resizable.
-    WindowWidth := Max(760, Min(WindowWidth, 980))
+    WindowWidth := Max(660, Min(WindowWidth, 980))
     WindowHeight := Max(380, Min(WindowHeight, 2000))
 
     configuredView := StrLower(Trim(IniRead(ConfigPath, "General", "ViewMode", "Thumbnail")))

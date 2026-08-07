@@ -38,6 +38,14 @@ RunSelfTests() {
         AssertSelfTest(!ShouldCaptureTextBlockPaste(
             false, true, "Cards", true),
             "非活动面板不接管 Ctrl+V")
+        tabIndexes := ResolveWorkspaceTabIndexes(12, 10, 8)
+        AssertSelfTest(tabIndexes.Length = 8
+            && tabIndexes[1] = 1 && tabIndexes[7] = 7
+            && tabIndexes[8] = 10,
+            "顶部最多显示八个工作区并保留当前工作区")
+        tabIndexes := ResolveWorkspaceTabIndexes(4, 3, 8)
+        AssertSelfTest(tabIndexes.Length = 4 && tabIndexes[3] = 3,
+            "八个以内的工作区全部显示为 Tab")
         searchTerms := TextBlockSearchTerms(
             " Alpha   beta　GAMMA alpha ")
         AssertSelfTest(searchTerms.Length = 3

@@ -28,6 +28,7 @@ $script:LinkIcoPath = Join-Path $ProjectRoot "assets\icon-lnk.ico"
 $script:PinIcoPath = Join-Path $ProjectRoot "assets\pin.ico"
 $script:EmptyFolderIcoPath = Join-Path $ProjectRoot "assets\empty-folder.ico"
 $script:UnknownFileIcoPath = Join-Path $ProjectRoot "assets\unknown-file.ico"
+$script:ToolbarIconDir = Join-Path $ProjectRoot "assets\toolbar"
 $script:LogDir = Join-Path $ProjectRoot "build_logs"
 $script:CompilerPath = "C:\Program Files\AutoHotkey\Compiler\Ahk2Exe.exe"
 $script:BasePath64 = "C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe"
@@ -200,6 +201,20 @@ if (-not (Test-Path -LiteralPath $UnknownFileIcoPath -PathType Leaf)) {
     exit 17
 }
 Write-OK "Unknown-file icon found: $UnknownFileIcoPath"
+
+Write-Step "Checking toolbar PNG icons: $ToolbarIconDir"
+$toolbarIconNames = @(
+    "btn-refresh.png", "btn-paste.png", "btn-add.png", "btn-remove.png",
+    "btn-eye.png", "btn-setting.png", "btn-pin-off.png", "btn-pin-on.png"
+)
+foreach ($iconName in $toolbarIconNames) {
+    $iconPath = Join-Path $ToolbarIconDir $iconName
+    if (-not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
+        Write-Err "Toolbar icon not found: $iconPath"
+        exit 18
+    }
+}
+Write-OK "Toolbar PNG icons found"
 
 # 8. Check output directory writable
 Write-Step "Checking output directory writable: $ProjectRoot"

@@ -527,7 +527,8 @@ UpdateClipboardPinnedButton(dataType := -1) {
         return
     hasText := (dataType = -1 || dataType = 1)
         && ClipboardTextForPinnedBlock() != ""
-    ClipboardPinnedButton.Enabled := IsTextWorkspace() && hasText
+    SetPanelIconButtonEnabled(ClipboardPinnedButton,
+        IsTextWorkspace() && hasText)
     ; Some producers briefly retain the clipboard lock while broadcasting the
     ; change. Retry once after the notification instead of leaving a valid
     ; text clipboard disabled until the next workspace switch.

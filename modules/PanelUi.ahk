@@ -1,18 +1,22 @@
-; Main panel construction, layout, display modes and window behavior.
+﻿; Main panel construction, layout, display modes and window behavior.
 
 BuildPanel() {
     global Panel, FileView, RecentLabel, RecentView
     global DisplayButton, WindowModeButton, PinnedDropButton, StatusText
     global ItemCountText
     global ClipboardPinnedButton, RefreshButton, RemovePinnedButton
-    global PinnedGroupLeftSeparator, PinnedGroupRightSeparator
-    global SettingsButton, CloseButton, TextBlockSearchEdit
+    global SettingsButton, TextBlockSearchEdit
     global TransferStatusText
-    global APP_VERSION, WorkspaceSelector, UiScaleFactor, PanelUiScaleFactor
+    global APP_VERSION, WorkspaceTabs, WorkspaceMoreButton
+    global WorkspaceBottomRule
+    global UiScaleFactor, PanelUiScaleFactor
+    global PANEL_TAB_HEIGHT_PX, PANEL_TAB_FONT_PX
+    global PANEL_TAB_PADDING_X_PX, PANEL_TAB_PADDING_Y_PX
     global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
+    global ToolbarSeparators
 
     PanelUiScaleFactor := UiScaleFactor
-    Panel := Gui("+Resize +MinSize" PanelScale(760) "x" PanelScale(380),
+    Panel := Gui("+Resize +MinSize" PanelScale(660) "x" PanelScale(380),
         "PopDrop v" APP_VERSION)
     Panel.MarginX := PanelScale(12)
     ; The toolbar is a fixed 42-DIP band. Keep the tuned control row one DIP
@@ -20,53 +24,64 @@ BuildPanel() {
     Panel.MarginY := PanelScale(7)
     Panel.SetFont("s" Round(9 * UiScaleFactor), "Microsoft YaHei UI")
 
-    workspaceLabel := Panel.AddText(ScalePanelGuiOptions(
-        "xm ym+6 w52 h22 +0x200"), "工作区：")
-    WorkspaceSelector := AddUiDropDownList(Panel,
-        ScalePanelGuiOptions("x+2 yp-5 w110"), [], PanelUiScaleFactor)
-    OffsetGuiControlYPhysical(workspaceLabel, PanelScale(-4))
-    WorkspaceSelector.OnEvent("Change", MainWorkspaceChanged)
-    RefreshButton := AddUiButton(Panel,
-        ScalePanelGuiOptions("x+6 yp w52"), "刷新", PanelUiScaleFactor)
-    RefreshButton.OnEvent("Click", RefreshPanel)
-    PinnedGroupLeftSeparator := Panel.AddText(ScalePanelGuiOptions(
-        "x+7 yp+3 w2 h20 +0x11"), "") ; SS_ETCHEDVERT
-    PinnedDropButton := AddUiButton(Panel,
-        ScalePanelGuiOptions("x+7 yp-3 w70"), "＋固定项",
+    ; Navigation owns the top row. The native tab strip preserves keyboard
+    ; focus and Windows theming; at most eight workspaces are materialized.
+    tabHeight := PanelPixelsToGui(PANEL_TAB_HEIGHT_PX, Panel.Hwnd)
+    WorkspaceTabs := Panel.AddTab3(
+        "xm ym w" PanelScale(620) " h" tabHeight " -Wrap", [""])
+    ; AHK's sNN uses points, not pixels. 14 px at 96 DPI equals 10.5 pt.
+    tabPointSize := PANEL_TAB_FONT_PX * 72.0 / 96.0
+    WorkspaceTabs.SetFont("s" tabPointSize, "Microsoft YaHei UI")
+    ApplyWorkspaceTabPadding()
+    EnableWorkspaceTabItemPadding()
+    WorkspaceTabs.OnEvent("Change", MainWorkspaceChanged)
+    WorkspaceTabs.UseTab()
+    WorkspaceMoreButton := AddUiButton(Panel,
+        ScalePanelGuiOptions("x640 ym+1 w82"), "更多 ▾",
         PanelUiScaleFactor)
-    PinnedDropButton.OnEvent("Click", AddPinnedFiles)
-    RemovePinnedButton := AddUiButton(Panel,
-        ScalePanelGuiOptions("x+4 yp w70"), "－固定项",
-        PanelUiScaleFactor)
-    RemovePinnedButton.OnEvent("Click", RemovePinnedFile)
-    ClipboardPinnedButton := AddUiButton(
-        Panel, ScalePanelGuiOptions("x+4 yp w42 Hidden Disabled"), "📋+",
-        PanelUiScaleFactor)
-    ClipboardPinnedButton.OnEvent("Click", AddClipboardTextToPinned)
-    PinnedGroupRightSeparator := Panel.AddText(ScalePanelGuiOptions(
-        "x+7 yp+3 w2 h20 +0x11"), "") ; SS_ETCHEDVERT
-    DisplayButton := AddUiButton(Panel,
-        ScalePanelGuiOptions("x+7 yp-3 w56"), "显示 ▾",
-        PanelUiScaleFactor)
-    DisplayButton.OnEvent("Click", ShowDisplayMenu)
+    WorkspaceMoreButton.OnEvent("Click", ShowWorkspaceMoreMenu)
+
+    ; The action rail is intentionally separate from the content ListView so
+    ; its hover surface can never cover the native vertical scrollbar.
+    RefreshButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "assets\toolbar\btn-refresh.png", "刷新当前工作区内容", RefreshPanel)
+    ClipboardPinnedButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "assets\toolbar\btn-paste.png",
+        "将剪贴板文本添加到固定项（文本块工作区）",
+        AddClipboardTextToPinned)
+    PinnedDropButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "assets\toolbar\btn-add.png", "添加固定项", AddPinnedFiles)
+    RemovePinnedButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "assets\toolbar\btn-remove.png", "移除所选固定项",
+        RemovePinnedFile)
+    DisplayButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "assets\toolbar\btn-eye.png", "显示方式与预览选项",
+        ShowDisplayMenu)
     BuildDisplayMenu()
-    SettingsButton := AddUiButton(Panel,
-        ScalePanelGuiOptions("x+4 yp w52"), "设置", PanelUiScaleFactor)
-    SettingsButton.OnEvent("Click", OpenConfig)
-    WindowModeButton := AddUiButton(Panel,
-        ScalePanelGuiOptions("x+4 yp w72"), "置顶：关",
-        PanelUiScaleFactor)
-    WindowModeButton.OnEvent("Click", ToggleWindowMode)
-    CloseButton := AddUiButton(Panel,
-        ScalePanelGuiOptions("x+4 yp w48"), "关闭", PanelUiScaleFactor)
-    CloseButton.OnEvent("Click", HidePanel)
-    ToolbarControls := [workspaceLabel, WorkspaceSelector, RefreshButton,
-        PinnedGroupLeftSeparator, PinnedDropButton, RemovePinnedButton,
-        ClipboardPinnedButton, PinnedGroupRightSeparator, DisplayButton,
-        SettingsButton, WindowModeButton, CloseButton]
+    SettingsButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "assets\toolbar\btn-setting.png", "打开设置", OpenConfig)
+    WindowModeButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "assets\toolbar\btn-pin-off.png", "窗口置顶：关",
+        ToggleWindowMode, "assets\toolbar\btn-pin-on.png")
+    ToolbarSeparators := []
+    Loop 5
+        ToolbarSeparators.Push(AddPanelDashedSeparator(Panel,
+            "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h1"))
+    ToolbarControls := [WorkspaceTabs, WorkspaceMoreButton, RefreshButton,
+        ClipboardPinnedButton, PinnedDropButton, RemovePinnedButton,
+        DisplayButton, SettingsButton, WindowModeButton]
+    for separator in ToolbarSeparators
+        ToolbarControls.Push(separator)
 
     TextBlockSearchEdit := AddUiEdit(Panel,
-        ScalePanelGuiOptions("x184 y8 w196 h26 Hidden"), "")
+        ScalePanelGuiOptions("x430 y8 w196 h26 Hidden"), "")
     TextBlockSearchEdit.OnEvent("Change", TextBlockSearchChanged)
     DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
         "uint", 0x1501, "ptr", 1,
@@ -107,6 +122,15 @@ BuildPanel() {
     RecentView.OnEvent("ContextMenu", RecentContextMenu)
     RecentView.OnEvent("ItemSelect", RecentItemSelect)
 
+    ; The native Tab3 border is theme-dependent and does not reach the action
+    ; rail. Draw one explicit divider over the ListView top edge instead.
+    ; Lighter divider per review: #b9b9b9. It overlays the selected tab
+    ; bottom edge and the file area top border.
+    WorkspaceBottomRule := AddPanelSolidRule(Panel,
+        "x0 y0 w10 h1",
+        0x00B9B9B9)
+    ToolbarControls.Push(WorkspaceBottomRule)
+
     StatusText := Panel.AddText(ScalePanelGuiOptions(
         "xm y+0 w372 h42 +0xD +0x100"), "已是最新")
     StatusText.OnEvent("Click", HandleStatusAction)
@@ -126,78 +150,136 @@ BuildPanel() {
 }
 
 SyncWorkspaceControls() {
-    global WorkspaceSelector, WorkspaceSelectorIds
+    global WorkspaceTabs, WorkspaceTabIds, WorkspaceMoreButton
+    global WorkspaceMoreMenu, WorkspaceOverflowIds
+    global WORKSPACE_VISIBLE_TAB_LIMIT
     global Workspaces, ActiveWorkspaceId, SettingsController
-    if IsObject(WorkspaceSelector) {
-        WorkspaceSelectorIds := []
+    if IsObject(WorkspaceTabs) {
+        activeIndex := 0
+        for index, workspace in Workspaces {
+            if StrLower(workspace.Id) = StrLower(ActiveWorkspaceId)
+                activeIndex := index
+        }
+        visibleIndexes := ResolveWorkspaceTabIndexes(
+            Workspaces.Length, activeIndex, WORKSPACE_VISIBLE_TAB_LIMIT)
+        WorkspaceTabIds := []
+        WorkspaceOverflowIds := []
         names := []
         selected := 1
         for index, workspace in Workspaces {
-            names.Push(workspace.Name)
-            WorkspaceSelectorIds.Push(workspace.Id)
-            if StrLower(workspace.Id) = StrLower(ActiveWorkspaceId)
-                selected := index
+            if ArrayContainsNumber(visibleIndexes, index) {
+                names.Push(workspace.Name)
+                WorkspaceTabIds.Push(workspace.Id)
+                if index = activeIndex
+                    selected := names.Length
+            } else {
+                WorkspaceOverflowIds.Push(workspace.Id)
+            }
         }
-        ReplaceUiDropDownItems(WorkspaceSelector, names)
-        if names.Length
-            WorkspaceSelector.Choose(selected)
+        WorkspaceTabs.Delete()
+        if names.Length {
+            WorkspaceTabs.Add(names)
+            WorkspaceTabs.Choose(selected)
+        }
+        WorkspaceMoreMenu := BuildWorkspaceMoreMenu()
+        WorkspaceMoreButton.Visible := WorkspaceOverflowIds.Length > 0
+        ApplyWorkspaceTabPadding()
     }
     if IsObject(SettingsController)
         try RefreshSettingsWorkspaceControls(SettingsController)
     UpdateWorkspaceTypeUi()
 }
 
+ResolveWorkspaceTabIndexes(workspaceCount, activeIndex, visibleLimit := 8) {
+    result := []
+    visibleCount := Min(Max(0, visibleLimit), Max(0, workspaceCount))
+    Loop visibleCount
+        result.Push(A_Index)
+    ; Keep the active workspace represented by a real selected tab even when
+    ; it was originally beyond the first eight entries.
+    if activeIndex > visibleLimit && activeIndex <= workspaceCount
+        && result.Length
+        result[result.Length] := activeIndex
+    return result
+}
+
+ArrayContainsNumber(values, needle) {
+    for value in values {
+        if value = needle
+            return true
+    }
+    return false
+}
+
+BuildWorkspaceMoreMenu() {
+    global WorkspaceOverflowIds
+    menuObj := Menu()
+    labels := Map()
+    for workspaceId in WorkspaceOverflowIds {
+        found := FindWorkspace(workspaceId)
+        if !IsObject(found)
+            continue
+        label := found.Value.Name
+        baseLabel := label
+        suffix := 2
+        while labels.Has(StrLower(label)) {
+            label := baseLabel " (" suffix ")"
+            suffix += 1
+        }
+        labels[StrLower(label)] := true
+        menuObj.Add(label, SelectWorkspaceFromMoreMenu.Bind(workspaceId))
+    }
+    return menuObj
+}
+
+ShowWorkspaceMoreMenu(*) {
+    global WorkspaceMoreButton, WorkspaceMoreMenu, WorkspaceOverflowIds
+    if !IsObject(WorkspaceMoreButton) || !IsObject(WorkspaceMoreMenu)
+        || !WorkspaceOverflowIds.Length
+        return
+    rect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", WorkspaceMoreButton.Hwnd,
+        "ptr", rect.Ptr, "int")
+        return
+    previousMenuCoordMode := A_CoordModeMenu
+    BeginAutoHidePause()
+    try {
+        CoordMode("Menu", "Screen")
+        WorkspaceMoreMenu.Show(
+            NumGet(rect, 0, "int"), NumGet(rect, 12, "int"))
+    } finally {
+        CoordMode("Menu", previousMenuCoordMode)
+        EndAutoHidePause()
+    }
+}
+
+SelectWorkspaceFromMoreMenu(workspaceId, *) {
+    QueuePanelWorkspaceSwitch(workspaceId)
+}
+
 UpdateWorkspaceTypeUi() {
     global TextBlockSearchEdit, RefreshButton, PinnedDropButton
     global ClipboardPinnedButton, RemovePinnedButton, TextBlockSearchQuery
-    global PinnedGroupLeftSeparator, PinnedGroupRightSeparator
-    global DisplayButton, SettingsButton, WindowModeButton, CloseButton
+    global WorkspaceTabs, WorkspaceMoreButton, WorkspaceOverflowIds
+    global PanelLayoutWidth
     textMode := IsTextWorkspace()
     if IsObject(TextBlockSearchEdit) {
         TextBlockSearchEdit.Visible := textMode
-        if textMode
-            MovePanelControl(TextBlockSearchEdit, 184, 7, 122, 26)
         if !textMode {
             TextBlockSearchQuery := ""
             TextBlockSearchEdit.Value := ""
         }
     }
-    if IsObject(RefreshButton)
-        RefreshButton.Visible := !textMode
-    if IsObject(PinnedGroupLeftSeparator) {
-        PinnedGroupLeftSeparator.Visible := true
-        MovePanelControl(PinnedGroupLeftSeparator,
-            textMode ? 312 : 242, 10, 2, 20)
-    }
-    if IsObject(PinnedDropButton) {
-        PinnedDropButton.Visible := true
-        PinnedDropButton.Text := "＋固定项"
-        MovePanelControl(PinnedDropButton, textMode ? 320 : 250, 7,
-            textMode ? 72 : 70, 26)
-    }
-    if IsObject(RemovePinnedButton)
-        RemovePinnedButton.Visible := !textMode
-    if IsObject(RemovePinnedButton) && !textMode
-        MovePanelControl(RemovePinnedButton, 324, 7, 70, 26)
     if IsObject(ClipboardPinnedButton) {
-        ClipboardPinnedButton.Visible := textMode
-        if textMode
-            MovePanelControl(ClipboardPinnedButton, 396, 7, 42, 26)
+        ClipboardPinnedButton.Visible := true
+        SetPanelIconButtonEnabled(ClipboardPinnedButton, textMode)
     }
-    if IsObject(PinnedGroupRightSeparator) {
-        PinnedGroupRightSeparator.Visible := true
-        MovePanelControl(PinnedGroupRightSeparator,
-            textMode ? 444 : 400, 10, 2, 20)
-    }
-    if IsObject(DisplayButton)
-        MovePanelControl(DisplayButton, textMode ? 452 : 408, 7, 56, 26)
-    if IsObject(SettingsButton)
-        MovePanelControl(SettingsButton, textMode ? 512 : 468, 7, 52, 26)
-    if IsObject(WindowModeButton)
-        MovePanelControl(WindowModeButton,
-            textMode ? 568 : 524, 7, 72, 26)
-    if IsObject(CloseButton)
-        MovePanelControl(CloseButton, textMode ? 644 : 600, 7, 48, 26)
+    if IsObject(WorkspaceMoreButton)
+        WorkspaceMoreButton.Visible := WorkspaceOverflowIds.Length > 0
+    LayoutWorkspaceNavigation(PanelLayoutWidth)
+    if IsObject(Panel) && Panel.Hwnd
+        && DllCall("user32\IsWindowVisible", "ptr", Panel.Hwnd, "int")
+        RequestNativeLayout()
     UpdateClipboardPinnedButton()
     RedrawPanelToolbar()
 }
@@ -236,12 +318,12 @@ RedrawPanelToolbar() {
 }
 
 MainWorkspaceChanged(control, *) {
-    global WorkspaceSelectorIds, ActiveWorkspaceId
+    global WorkspaceTabIds, ActiveWorkspaceId
     global InactiveScanJob
     index := control.Value
-    if index < 1 || index > WorkspaceSelectorIds.Length
+    if index < 1 || index > WorkspaceTabIds.Length
         return
-    targetId := WorkspaceSelectorIds[index]
+    targetId := WorkspaceTabIds[index]
     if StrLower(targetId) = StrLower(ActiveWorkspaceId)
         return
     if IsObject(InactiveScanJob)
@@ -1099,6 +1181,9 @@ ShowAndRefresh(*) {
     UpdateWindowModeButton()
     CheckRefreshPolicyOnShow()
     RestoreTextBlockSearchFocus()
+    ; First-show stabilization pass: some workspace-dependent controls settle
+    ; only after the native window is visible and populated.
+    SetTimer(RequestNativeLayout, -30)
 }
 
 ApplyWindowIcon() {
@@ -1139,6 +1224,7 @@ HidePanel(*) {
     if IsObject(SourceRemovalDialog)
         SourceRemovalDialog := 0
     CancelFilePointerGesture()
+    ResetPanelIconHover()
     CloseExternalQuickPreview(true, false)
     PreviewPanelHidden()
     CancelAutoHideCheck()
@@ -1169,61 +1255,488 @@ HandlePanelEscape(*) {
 
 ResizePanel(guiObj, minMax, width, height) {
     global FileView, RecentLabel, RecentView, StatusText, ItemCountText
-    global TransferStatusText
+    global TransferStatusText, WorkspaceBottomRule
+    global TextBlockSearchEdit
     global ShowRecentSidebar, PanelLayoutWidth
     global PANEL_TOOLBAR_HEIGHT, PANEL_FOOTER_HEIGHT
+    global PANEL_SIDE_TOOLBAR_WIDTH, PANEL_SIDE_TOOLBAR_GAP
+    global PANEL_SIDE_TOOLBAR_EDGE_GAP, PANEL_CONTENT_TOP_OFFSET_PX
     if minMax = -1
         return
     PreviewSuppress("resize", true)
     PanelLayoutWidth := width
     ResizeFolderDropControls(width)
-    ; Reserve exactly 42 DIPs at each edge. The list owns every DIP between
-    ; those bands, which keeps the file-manager content area as large as
-    ; possible without making either control band feel cramped.
-    toolbarHeight := PanelScale(PANEL_TOOLBAR_HEIGHT)
+    LayoutWorkspaceNavigation(width)
+    ; Start content at the real visible bottom edge of the cropped Tab3.
+    ; This removes the parent-background strip between the tab and ListView.
+    ; Keep the tuned tab header fully visible by moving the content band
+    ; down as a unit. This shifts the divider and file region together.
+    contentTop := GetWorkspaceContentTop()
+        + PanelPixelsToGui(PANEL_CONTENT_TOP_OFFSET_PX, guiObj.Hwnd)
     footerHeight := PanelScale(PANEL_FOOTER_HEIGHT)
     outerMargin := PanelScale(12)
+    ; ResizePanel width/height are Gui units. Convert the requested visible
+    ; pixels first so monitor DPI does not enlarge the rail again.
+    sideToolbarWidth := PanelPixelsToGui(
+        PANEL_SIDE_TOOLBAR_WIDTH, guiObj.Hwnd)
+    sideToolbarGap := PanelPixelsToGui(
+        PANEL_SIDE_TOOLBAR_GAP, guiObj.Hwnd)
+    sideToolbarEdgeGap := PanelPixelsToGui(
+        PANEL_SIDE_TOOLBAR_EDGE_GAP, guiObj.Hwnd)
+    contentWidth := Max(PanelScale(200),
+        width - outerMargin - sideToolbarWidth - sideToolbarGap
+            - sideToolbarEdgeGap)
     contentHeight := Max(PanelScale(160),
-        height - toolbarHeight - footerHeight)
+        height - contentTop - footerHeight)
+
+    searchVisible := IsTextWorkspace()
+        && IsObject(TextBlockSearchEdit) && TextBlockSearchEdit.Visible
+    searchHeight := searchVisible ? PanelScale(26) : 0
+    contentTopGap := PanelPixelsToGui(
+        searchVisible ? 2 : 1, guiObj.Hwnd)
+    fileContentTop := contentTop + searchHeight + contentTopGap
+    fileContentHeight := Max(PanelScale(100),
+        contentHeight - searchHeight - contentTopGap)
+
+    LayoutSideToolbar(width, contentTop, contentHeight)
+    fileRight := outerMargin + contentWidth
     if ShowRecentSidebar {
         sidebarWidth := Min(PanelScale(280),
-            Max(PanelScale(190), Floor(width * 0.28)))
+            Max(PanelScale(190), Floor(contentWidth * 0.28)))
+        contentGap := PanelScale(12)
         mainWidth := Max(PanelScale(280),
-            width - sidebarWidth - PanelScale(36))
-        sidebarX := PanelScale(24) + mainWidth
-        FileView.Move(outerMargin, toolbarHeight, mainWidth, contentHeight)
-        RecentLabel.Move(sidebarX, toolbarHeight,
+            contentWidth - sidebarWidth - contentGap)
+        sidebarX := outerMargin + mainWidth + contentGap
+        if searchVisible
+            TextBlockSearchEdit.Move(outerMargin, contentTop + contentTopGap,
+                mainWidth, searchHeight)
+        FileView.Move(outerMargin, fileContentTop,
+            mainWidth, fileContentHeight)
+        fileRight := outerMargin + mainWidth
+        RecentLabel.Move(sidebarX, fileContentTop,
             sidebarWidth, PanelScale(22))
-        RecentView.Move(sidebarX, toolbarHeight + PanelScale(26),
+        RecentView.Move(sidebarX, fileContentTop + PanelScale(26),
             sidebarWidth, Max(PanelScale(154),
-                contentHeight - PanelScale(26)))
+                fileContentHeight - PanelScale(26)))
         RecentView.ModifyCol(1,
             Max(PanelScale(120), sidebarWidth - PanelScale(8)))
         RecentLabel.Visible := true
         RecentView.Visible := true
     } else {
-        FileView.Move(outerMargin, toolbarHeight,
-            Max(PanelScale(200), width - PanelScale(24)), contentHeight)
+        if searchVisible
+            TextBlockSearchEdit.Move(outerMargin, contentTop + contentTopGap,
+                contentWidth, searchHeight)
+        FileView.Move(outerMargin, fileContentTop,
+            contentWidth, fileContentHeight)
         RecentLabel.Visible := false
         RecentView.Visible := false
     }
-    ; Keep the transfer affordance compact so long selected paths get most of
-    ; the footer. Both controls occupy the same 42-DIP band and start at the
-    ; same Y coordinate. Their shared owner-draw path centers a two-line text
-    ; block and uses DT_EDITCONTROL to suppress a partially visible third line.
+
+    LayoutWorkspaceBottomRule(outerMargin, fileRight - outerMargin, contentTop)
+
+
+    ; Keep the transfer affordance inside the file region. Its right edge is
+    ; exactly the same as FileView's right edge, never under the icon rail.
     transferWidth := Min(PanelScale(220),
         Max(PanelScale(140), Floor(width * 0.22)))
-    statusWidth := Max(PanelScale(100),
-        width - transferWidth - PanelScale(32))
     footerTop := height - footerHeight
+    footerGap := PanelScale(8)
     countWidth := PanelScale(112)
+    transferX := fileRight - transferWidth
+    countX := transferX - footerGap - countWidth
     stateWidth := Max(PanelScale(100),
-        statusWidth - countWidth - PanelScale(8))
+        countX - footerGap - outerMargin)
     StatusText.Move(outerMargin, footerTop, stateWidth, footerHeight)
-    ItemCountText.Move(PanelScale(20) + stateWidth,
+    ItemCountText.Move(outerMargin + stateWidth + footerGap,
         footerTop, countWidth, footerHeight)
-    TransferStatusText.Move(PanelScale(20) + statusWidth,
+    TransferStatusText.Move(transferX,
         footerTop, transferWidth, footerHeight)
+}
+
+LayoutWorkspaceBottomRule(fileLeft, fileWidth, contentTop) {
+    global Panel, WorkspaceBottomRule
+    if !IsObject(Panel) || !IsObject(WorkspaceBottomRule)
+        || !Panel.Hwnd || !WorkspaceBottomRule.Hwnd
+        return
+
+    ruleHeight := Max(1, PanelPixelsToGui(1, Panel.Hwnd))
+    WorkspaceBottomRule.Move(
+        fileLeft, contentTop, Max(1, fileWidth), ruleHeight)
+    DllCall("user32\SetWindowPos", "ptr", WorkspaceBottomRule.Hwnd,
+        "ptr", 0, "int", 0, "int", 0, "int", 0, "int", 0,
+        "uint", 0x0013, "int")
+    DllCall("user32\InvalidateRect", "ptr", WorkspaceBottomRule.Hwnd,
+        "ptr", 0, "int", 1)
+    DllCall("user32\UpdateWindow", "ptr", WorkspaceBottomRule.Hwnd)
+}
+
+EnableWorkspaceTabItemPadding() {
+    global WorkspaceTabs, WorkspaceTabPaintSubclassCallback
+    if !IsObject(WorkspaceTabs) || !WorkspaceTabs.Hwnd
+        return
+    if !WorkspaceTabPaintSubclassCallback
+        WorkspaceTabPaintSubclassCallback := CallbackCreate(
+            WorkspaceTabItemSubclass, "", 6)
+    DllCall("comctl32\SetWindowSubclass",
+        "ptr", WorkspaceTabs.Hwnd,
+        "ptr", WorkspaceTabPaintSubclassCallback,
+        "uptr", 0x50445449,
+        "uptr", 0,
+        "int")
+}
+
+WorkspaceTabItemSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
+    global WorkspaceTabPaintSubclassCallback
+    if msg = 0x000F { ; WM_PAINT
+        ; Paint exactly once. The previous version let Windows paint first and
+        ; then painted a second expanded selected tab on top, creating the
+        ; visible double white layer.
+        DrawWorkspaceTabItems(hwnd)
+        return 0
+    }
+    if msg = 0x0014 ; WM_ERASEBKGND
+        return 1
+    if msg = 0x0082 { ; WM_NCDESTROY
+        if WorkspaceTabPaintSubclassCallback
+            DllCall("comctl32\RemoveWindowSubclass",
+                "ptr", hwnd, "ptr", WorkspaceTabPaintSubclassCallback,
+                "uptr", subclassId, "int")
+    }
+    return DllCall("comctl32\DefSubclassProc",
+        "ptr", hwnd, "uint", msg, "ptr", wParam, "ptr", lParam, "ptr")
+}
+
+DrawWorkspaceTabItems(hwnd) {
+    global PANEL_TAB_BOTTOM_MARGIN_PX
+    itemCount := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1304, "ptr", 0, "ptr", 0, "ptr") ; TCM_GETITEMCOUNT
+
+    paint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
+    hdc := DllCall("user32\BeginPaint", "ptr", hwnd,
+        "ptr", paint.Ptr, "ptr")
+    if !hdc
+        return
+
+    clientRect := Buffer(16, 0)
+    DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", clientRect.Ptr)
+    backgroundBrush := DllCall("user32\GetSysColorBrush",
+        "int", 15, "ptr") ; COLOR_BTNFACE
+    DllCall("user32\FillRect", "ptr", hdc,
+        "ptr", clientRect.Ptr, "ptr", backgroundBrush)
+
+    if itemCount <= 0 {
+        DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
+        return
+    }
+    theme := DllCall("uxtheme\OpenThemeData",
+        "ptr", hwnd, "wstr", "TAB", "ptr")
+    selectedIndex := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x130B, "ptr", 0, "ptr", 0, "int") ; TCM_GETCURSEL
+
+    hFont := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x0031, "ptr", 0, "ptr", 0, "ptr") ; WM_GETFONT
+    oldFont := hFont
+        ? DllCall("gdi32\SelectObject", "ptr", hdc, "ptr", hFont, "ptr")
+        : 0
+    oldBkMode := DllCall("gdi32\SetBkMode",
+        "ptr", hdc, "int", 1, "int") ; TRANSPARENT
+    oldTextColor := DllCall("gdi32\SetTextColor", "ptr", hdc,
+        "uint", DllCall("user32\GetSysColor",
+            "int", 8, "uint"), "uint") ; COLOR_WINDOWTEXT
+
+    try {
+        ; Draw normal items first, selected item last so its native overlap is
+        ; preserved exactly like a normal Windows tab strip.
+        Loop itemCount {
+            itemIndex := A_Index - 1
+            if itemIndex != selectedIndex
+                DrawWorkspaceTabItem(hwnd, hdc, theme, itemIndex, false)
+        }
+        if selectedIndex >= 0 && selectedIndex < itemCount
+            DrawWorkspaceTabItem(hwnd, hdc, theme, selectedIndex, true)
+    } finally {
+        if oldFont
+            DllCall("gdi32\SelectObject", "ptr", hdc,
+                "ptr", oldFont, "ptr")
+        DllCall("gdi32\SetBkMode", "ptr", hdc, "int", oldBkMode)
+        DllCall("gdi32\SetTextColor", "ptr", hdc, "uint", oldTextColor)
+        if theme
+            DllCall("uxtheme\CloseThemeData", "ptr", theme)
+        DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
+    }
+}
+
+DrawWorkspaceTabItem(hwnd, hdc, theme, itemIndex, selected) {
+    global PANEL_TAB_BOTTOM_MARGIN_PX
+    global PANEL_TAB_TEXT_VERTICAL_EXTRA_PX, PANEL_TAB_TEXT_Y_OFFSET_PX
+
+    itemRect := Buffer(16, 0)
+    if !DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x130A, "ptr", itemIndex,
+        "ptr", itemRect.Ptr, "ptr") ; TCM_GETITEMRECT
+        return
+
+    label := WorkspaceTabLabelAt(itemIndex)
+    if label = ""
+        return
+
+    left := NumGet(itemRect, 0, "int")
+    top := NumGet(itemRect, 4, "int")
+    right := NumGet(itemRect, 8, "int")
+    bottom := NumGet(itemRect, 12, "int")
+
+    ; Expand the BUTTON itself downward. Padding increases available space;
+    ; it never takes space away from the text.
+    selectedExpandX := selected ? 2 : 0
+	selectedExpandTop := selected ? 2 : 0
+	selectedExpandBottom := selected ? 1 : 0
+
+	paintRect := Buffer(16, 0)
+	NumPut("int", left - selectedExpandX, paintRect, 0)
+	NumPut("int", top - selectedExpandTop, paintRect, 4)
+	NumPut("int", right + selectedExpandX, paintRect, 8)
+	NumPut("int",
+	    bottom + PANEL_TAB_BOTTOM_MARGIN_PX + selectedExpandBottom,
+	    paintRect, 12)
+
+    stateId := selected ? 3 : 1 ; TIS_SELECTED / TIS_NORMAL
+    if theme {
+        DllCall("uxtheme\DrawThemeBackground",
+            "ptr", theme, "ptr", hdc,
+            "int", 1, "int", stateId,
+            "ptr", paintRect.Ptr, "ptr", 0, "int")
+    } else {
+        brushIndex := selected ? 5 : 15
+        brush := DllCall("user32\GetSysColorBrush",
+            "int", brushIndex, "ptr")
+        DllCall("user32\FillRect", "ptr", hdc,
+            "ptr", paintRect.Ptr, "ptr", brush)
+    }
+
+    ; Give the label MORE vertical room than the native item, rather than
+    ; subtracting top/bottom padding from it. This is the opposite of v5.7.
+    textRect := Buffer(16, 0)
+    extra := Max(0, PANEL_TAB_TEXT_VERTICAL_EXTRA_PX)
+    yOffset := PANEL_TAB_TEXT_Y_OFFSET_PX
+    NumPut("int", left + 4, textRect, 0)
+    NumPut("int", top - extra + yOffset, textRect, 4)
+    NumPut("int", Max(left + 5, right - 4), textRect, 8)
+    NumPut("int", bottom + extra + yOffset, textRect, 12)
+
+    drawFlags := 0x0001 | 0x0004 | 0x0020 | 0x0800 | 0x8000
+        ; CENTER | VCENTER | SINGLELINE | NOPREFIX | END_ELLIPSIS
+    if theme {
+        DllCall("uxtheme\DrawThemeText",
+            "ptr", theme, "ptr", hdc,
+            "int", 1, "int", stateId,
+            "wstr", label, "int", -1,
+            "uint", drawFlags, "uint", 0,
+            "ptr", textRect.Ptr, "int")
+    } else {
+        DllCall("user32\DrawTextW", "ptr", hdc,
+            "wstr", label, "int", -1,
+            "ptr", textRect.Ptr, "uint", drawFlags, "int")
+    }
+}
+
+WorkspaceTabLabelAt(itemIndex) {
+    global WorkspaceTabIds, Workspaces
+    arrayIndex := itemIndex + 1
+    if arrayIndex < 1 || arrayIndex > WorkspaceTabIds.Length
+        return ""
+    workspaceId := WorkspaceTabIds[arrayIndex]
+    for workspace in Workspaces {
+        if StrLower(workspace.Id) = StrLower(workspaceId)
+            return workspace.Name
+    }
+    return ""
+}
+
+CleanupWorkspaceTabItemPadding() {
+    global WorkspaceTabs, WorkspaceTabPaintSubclassCallback
+    if WorkspaceTabPaintSubclassCallback {
+        if IsObject(WorkspaceTabs) && WorkspaceTabs.Hwnd
+            && DllCall("user32\IsWindow", "ptr", WorkspaceTabs.Hwnd, "int")
+            DllCall("comctl32\RemoveWindowSubclass",
+                "ptr", WorkspaceTabs.Hwnd,
+                "ptr", WorkspaceTabPaintSubclassCallback,
+                "uptr", 0x50445449, "int")
+        CallbackFree(WorkspaceTabPaintSubclassCallback)
+    }
+    WorkspaceTabPaintSubclassCallback := 0
+}
+
+ApplyWorkspaceTabPadding() {
+    global WorkspaceTabs
+    global PANEL_TAB_PADDING_X_PX, PANEL_TAB_PADDING_Y_PX
+    if !IsObject(WorkspaceTabs) || !WorkspaceTabs.Hwnd
+        return
+    ; TCM_SETPADDING applies to selected and unselected items alike.
+    packedPadding := (PANEL_TAB_PADDING_X_PX & 0xFFFF)
+        | ((PANEL_TAB_PADDING_Y_PX & 0xFFFF) << 16)
+    DllCall("user32\SendMessageW", "ptr", WorkspaceTabs.Hwnd,
+        "uint", 0x132B, "ptr", 0, "ptr", packedPadding, "ptr")
+    DllCall("user32\SetWindowPos", "ptr", WorkspaceTabs.Hwnd,
+        "ptr", 0, "int", 0, "int", 0, "int", 0, "int", 0,
+        "uint", 0x0037, "int")
+    DllCall("user32\InvalidateRect", "ptr", WorkspaceTabs.Hwnd,
+        "ptr", 0, "int", 1)
+}
+
+LayoutWorkspaceNavigation(width) {
+    global Panel, WorkspaceTabs, WorkspaceMoreButton, TextBlockSearchEdit
+    global PANEL_TAB_HEIGHT_PX
+    global PANEL_SIDE_TOOLBAR_WIDTH, PANEL_SIDE_TOOLBAR_GAP
+    global PANEL_SIDE_TOOLBAR_EDGE_GAP
+    if !IsObject(WorkspaceTabs)
+        return
+    outer := PanelScale(12)
+    gap := PanelScale(6)
+    ; Lift the tab strip by exactly one visible pixel.
+    rowY := PanelScale(6) - PanelPixelsToGui(1, Panel.Hwnd)
+    rowHeight := PanelPixelsToGui(PANEL_TAB_HEIGHT_PX, Panel.Hwnd)
+    railWidth := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_WIDTH, Panel.Hwnd)
+    railGap := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_GAP, Panel.Hwnd)
+    railEdgeGap := PanelPixelsToGui(
+        PANEL_SIDE_TOOLBAR_EDGE_GAP, Panel.Hwnd)
+    right := width - railWidth - railGap - railEdgeGap
+    ; Text-block search is laid out inside the file region by ResizePanel.
+    if IsObject(WorkspaceMoreButton) && WorkspaceMoreButton.Visible {
+        moreWidth := PanelScale(82)
+        right -= moreWidth
+        WorkspaceMoreButton.Move(right, PanelScale(7),
+            moreWidth, PanelScale(26))
+        right -= gap
+    }
+    WorkspaceTabs.Move(outer, rowY,
+        Max(PanelScale(180), right - outer), rowHeight)
+    ApplyWorkspaceTabPadding()
+    FitWorkspaceTabsToHeader()
+}
+
+FitWorkspaceTabsToHeader() {
+    global WorkspaceTabs, PANEL_TAB_BOTTOM_MARGIN_PX
+    if !IsObject(WorkspaceTabs) || !WorkspaceTabs.Hwnd
+        return
+
+    ; TCM_ADJUSTRECT(FALSE) gives the first row of the page pane. Cropping at
+    ; exactly that boundary preserves the *entire native tab header*, including
+    ; its lower themed margin, without exposing the white Tab3 page background.
+    displayRect := Buffer(16, 0)
+    if !DllCall("user32\GetClientRect", "ptr", WorkspaceTabs.Hwnd,
+        "ptr", displayRect.Ptr, "int")
+        return
+    DllCall("user32\SendMessageW", "ptr", WorkspaceTabs.Hwnd,
+        "uint", 0x1328, "ptr", 0, "ptr", displayRect.Ptr, "ptr")
+    pageTop := NumGet(displayRect, 4, "int")
+
+    ; Fallback: find the lowest real tab item. The old code only inspected item
+    ; 0 and then took Min(pageTop, itemBottom+1), which could cut away the
+    ; header's lower margin and make the labels look visually bottom-heavy.
+    itemCount := DllCall("user32\SendMessageW", "ptr", WorkspaceTabs.Hwnd,
+        "uint", 0x1304, "ptr", 0, "ptr", 0, "ptr") ; TCM_GETITEMCOUNT
+    maxItemBottom := 0
+    itemRect := Buffer(16, 0)
+    Loop itemCount {
+        if DllCall("user32\SendMessageW", "ptr", WorkspaceTabs.Hwnd,
+            "uint", 0x130A, "ptr", A_Index - 1,
+            "ptr", itemRect.Ptr, "ptr") ; TCM_GETITEMRECT
+            maxItemBottom := Max(maxItemBottom,
+                NumGet(itemRect, 12, "int"))
+    }
+
+    ; The themed Tab3 can report pageTop above the visual bottom of the text
+    ; row. Keep the lowest real tab item plus an explicit lower breathing room.
+    ; This prevents glyph descenders / lower item border from being clipped.
+    bottomMargin := Max(0, PANEL_TAB_BOTTOM_MARGIN_PX)
+    itemTarget := maxItemBottom > 0
+        ? maxItemBottom + bottomMargin : 0
+    targetHeight := pageTop > 0
+        ? Max(pageTop, itemTarget) : itemTarget
+    if targetHeight <= 0
+        return
+
+    windowRect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", WorkspaceTabs.Hwnd,
+        "ptr", windowRect.Ptr, "int")
+        return
+    controlWidth := Max(1, NumGet(windowRect, 8, "int")
+        - NumGet(windowRect, 0, "int"))
+
+    ; Do not crop at an individual item's bottom. Keep the native lower header
+    ; margin, but stop before the white page pane starts.
+    DllCall("user32\SetWindowPos", "ptr", WorkspaceTabs.Hwnd, "ptr", 0,
+        "int", 0, "int", 0, "int", controlWidth,
+        "int", targetHeight, "uint", 0x0016, "int")
+}
+
+GetWorkspaceContentTop() {
+    global Panel, WorkspaceTabs, PANEL_TOOLBAR_HEIGHT
+    fallback := PanelScale(PANEL_TOOLBAR_HEIGHT)
+    if !IsObject(Panel) || !IsObject(WorkspaceTabs)
+        || !Panel.Hwnd || !WorkspaceTabs.Hwnd
+        return fallback
+
+    rect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", WorkspaceTabs.Hwnd,
+        "ptr", rect.Ptr, "int")
+        return fallback
+
+    ; RECT contains two POINTs. Map them from screen pixels into the panel's
+    ; client pixels. MapWindowPoints may validly return zero, so don't treat
+    ; its return value as a success/failure flag.
+    DllCall("user32\MapWindowPoints", "ptr", 0, "ptr", Panel.Hwnd,
+        "ptr", rect.Ptr, "uint", 2)
+
+    bottomPx := NumGet(rect, 12, "int")
+    if bottomPx <= 0
+        return fallback
+
+    ; RECT.bottom is exclusive. One physical pixel of overlap makes the
+    ; Tab3 bottom border and ListView top border occupy the same row.
+    return PanelPixelsToGui(Max(0, bottomPx - 1), Panel.Hwnd)
+}
+
+LayoutSideToolbar(width, contentTop, contentHeight) {
+    global Panel
+    global RefreshButton, ClipboardPinnedButton, PinnedDropButton
+    global RemovePinnedButton, DisplayButton, SettingsButton
+    global WindowModeButton, ToolbarSeparators
+    global PANEL_SIDE_BUTTON_SIZE, PANEL_SIDE_TOOLBAR_EDGE_GAP
+    global PANEL_SIDE_BUTTON_GAP, PANEL_SIDE_SEPARATOR_GAP
+    global PANEL_SIDE_SEPARATOR_HEIGHT
+    if !IsObject(RefreshButton)
+        return
+    ; Gui.Move is DPI-aware. Convert requested visible pixels to Gui units
+    ; first; otherwise Windows scales 64/2/5 a second time.
+    buttonSize := PanelPixelsToGui(PANEL_SIDE_BUTTON_SIZE, Panel.Hwnd)
+    edgeGap := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_EDGE_GAP, Panel.Hwnd)
+    buttonGap := PanelPixelsToGui(PANEL_SIDE_BUTTON_GAP, Panel.Hwnd)
+    separatorGap := PanelPixelsToGui(PANEL_SIDE_SEPARATOR_GAP, Panel.Hwnd)
+    separatorHeight := Max(1, PanelPixelsToGui(
+        PANEL_SIDE_SEPARATOR_HEIGHT, Panel.Hwnd))
+    topGap := PanelPixelsToGui(2, Panel.Hwnd)
+    x := width - edgeGap - buttonSize
+    y := contentTop + topGap
+    buttons := [RefreshButton, ClipboardPinnedButton, PinnedDropButton,
+        RemovePinnedButton, DisplayButton, SettingsButton,
+        WindowModeButton]
+    separatorAfter := Map(1, 1, 2, 2, 4, 3, 5, 4, 6, 5)
+    for index, control in buttons {
+        control.Move(x, y, buttonSize, buttonSize)
+        y += buttonSize
+        if separatorAfter.Has(index) {
+            separator := ToolbarSeparators[separatorAfter[index]]
+            y += separatorGap
+            separator.Move(x, y, buttonSize, separatorHeight)
+            DllCall("user32\InvalidateRect", "ptr", separator.Hwnd,
+                "ptr", 0, "int", 1)
+            DllCall("user32\UpdateWindow", "ptr", separator.Hwnd)
+            y += separatorHeight + separatorGap
+        } else if index < buttons.Length {
+            y += buttonGap
+        }
+    }
 }
 
 ResizeFolderDropControls(width) {
@@ -1257,6 +1770,7 @@ ShowFolderDropMode() {
     ResizeFolderDropControls(PanelLayoutWidth)
     if FolderDropUiVisible
         return
+    ResetPanelIconHover()
     for control in ToolbarControls
         control.Visible := false
     FolderDropAddSourceButton.Visible := true
@@ -1280,17 +1794,31 @@ HideFolderDropMode() {
 }
 
 RequestNativeLayout() {
-    global Panel
+    global WorkspaceTabs
+    ; Do not dereference the global Panel object here. During startup/workspace
+    ; synchronization this helper can run while that global is still in its
+    ; numeric sentinel state. The tab control already exists at every valid
+    ; call site, so obtain the owner HWND directly from Win32 instead.
+    if !IsObject(WorkspaceTabs) || !WorkspaceTabs.Hwnd
+        return
+    panelHwnd := DllCall("user32\GetParent",
+        "ptr", WorkspaceTabs.Hwnd, "ptr")
+    if !panelHwnd
+        return
+    if !DllCall("user32\IsWindowVisible", "ptr", panelHwnd, "int")
+        return
+
     ; Gui.OnEvent("Size") receives DPI-adjusted coordinates only when AHK
-    ; dispatches a real WM_SIZE.  Calling ResizePanel directly bypasses that
+    ; dispatches a real WM_SIZE. Calling ResizePanel directly bypasses that
     ; conversion and makes controls too wide on high-DPI displays.
     clientRect := Buffer(16, 0)
-    if !DllCall("user32\GetClientRect", "ptr", Panel.Hwnd, "ptr", clientRect.Ptr)
+    if !DllCall("user32\GetClientRect",
+        "ptr", panelHwnd, "ptr", clientRect.Ptr)
         return
     clientWidth := NumGet(clientRect, 8, "int") - NumGet(clientRect, 0, "int")
     clientHeight := NumGet(clientRect, 12, "int") - NumGet(clientRect, 4, "int")
     packedSize := (clientWidth & 0xFFFF) | ((clientHeight & 0xFFFF) << 16)
-    DllCall("user32\PostMessageW", "ptr", Panel.Hwnd, "uint", 0x0005,
+    DllCall("user32\PostMessageW", "ptr", panelHwnd, "uint", 0x0005,
         "uptr", 0, "uptr", packedSize) ; WM_SIZE
 }
 
@@ -1490,10 +2018,13 @@ ToggleWindowMode(*) {
 UpdateWindowModeButton() {
     global WindowModeButton
     global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP
-    if IsObject(WindowModeButton)
-        WindowModeButton.Text := WindowMode = WINDOW_MODE_ALWAYS_ON_TOP
-            ? "置顶：开"
-            : "置顶：关"
+    if IsObject(WindowModeButton) {
+        enabled := WindowMode = WINDOW_MODE_ALWAYS_ON_TOP
+        SetPanelIconButtonAlternate(WindowModeButton, enabled)
+        SetPanelIconButtonSelected(WindowModeButton, enabled)
+        SetPanelIconButtonTooltip(WindowModeButton,
+            enabled ? "窗口置顶：开（点击关闭）" : "窗口置顶：关（点击开启）")
+    }
 }
 
 ApplyViewMode() {

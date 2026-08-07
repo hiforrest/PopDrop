@@ -1,4 +1,4 @@
-; Process cleanup and native resource release.
+﻿; Process cleanup and native resource release.
 
 Cleanup(*) {
     global DropCallbacks, DataCallbacks, ThumbnailImageList, MainInstanceMutex
@@ -23,6 +23,10 @@ Cleanup(*) {
     CleanupPreview()
     CleanupPinnedLinkIcons()
     CleanupTextSourcePinIcons()
+    CleanupPanelIconButtons()
+    CleanupPanelDashedSeparators()
+    CleanupPanelSolidRules()
+    CleanupWorkspaceTabItemPadding()
     for taskId, task in OpenAppActionSerialTasks {
         try SetTimer(task.PollCallback, 0)
         if task.ProcessHandle

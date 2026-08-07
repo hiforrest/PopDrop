@@ -1,4 +1,4 @@
-; PopDrop native settings UI (AutoHotkey v2).
+﻿; PopDrop native settings UI (AutoHotkey v2).
 ; All controls edit an isolated draft. Disk and runtime state are touched only
 ; by SaveSettingsDraft().
 
@@ -267,6 +267,7 @@ LoadSettingsIntoDraft() {
     global ContentUpdateMode
     global UiScaleMode, ThumbnailSize, ThumbnailHorizontalGap
     global ThumbnailVerticalGap, ThumbnailTextLines
+    global WindowWidth, WindowHeight
     global TextBlockCardWidth, TextBlockCardHeight
     global ThumbnailPolicy
     global ExternalQuickPreviewProvider
@@ -338,6 +339,8 @@ LoadSettingsIntoDraft() {
             QuickLookPath: QuickLookPath,
             ContentUpdateMode: ContentUpdateMode,
             UiScaleMode: UiScaleMode,
+            WindowWidth: WindowWidth,
+            WindowHeight: WindowHeight,
             ThumbnailPolicy: ThumbnailPolicy,
             ThumbnailSize: ThumbnailSize,
             ThumbnailHorizontalGap: ThumbnailHorizontalGap,
@@ -1487,6 +1490,16 @@ BuildInterfaceSettingsPage(c, tabs) {
     g.AddText("x224 y515 w744 c666666",
         "宽度和高度用于调整文本块工作区中的卡片尺寸。")
 
+    g.AddGroupBox("x200 y584 w818 h132", "窗口尺寸 · 主面板")
+    g.AddText("x224 y622 w92", "窗口宽度：")
+    c.WindowWidth := AddUiEdit(g, "x320 yp-4 w82 Number")
+    g.AddText("x414 yp+4 w100 c666666", "660–980")
+    g.AddText("x540 yp w92", "窗口高度：")
+    c.WindowHeight := AddUiEdit(g, "x636 yp-4 w82 Number")
+    g.AddText("x730 yp+4 w120 c666666", "380–2000")
+    g.AddText("x224 y666 w744 c666666",
+        "保存后用于主面板下次显示；窗口仍可手动拖动调整。")
+
     c.UiScale.OnEvent("Change", InterfaceControlChanged.Bind(c))
     c.ThumbnailPolicy.OnEvent("Change", InterfaceControlChanged.Bind(c))
     c.ThumbnailSize.OnEvent("Change", InterfaceControlChanged.Bind(c))
@@ -1495,6 +1508,8 @@ BuildInterfaceSettingsPage(c, tabs) {
     c.ThumbnailTextLines.OnEvent("Change", InterfaceControlChanged.Bind(c))
     c.TextBlockCardWidth.OnEvent("Change", InterfaceControlChanged.Bind(c))
     c.TextBlockCardHeight.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.WindowWidth.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.WindowHeight.OnEvent("Change", InterfaceControlChanged.Bind(c))
 }
 
 BuildAboutSettingsPage(c, tabs) {
@@ -1615,6 +1630,8 @@ LoadInterfaceControls(c) {
         c.ThumbnailTextLines.Choose(d.ThumbnailTextLines = 1 ? 1 : 2)
         c.TextBlockCardWidth.Value := d.TextBlockCardWidth
         c.TextBlockCardHeight.Value := d.TextBlockCardHeight
+        c.WindowWidth.Value := d.WindowWidth
+        c.WindowHeight.Value := d.WindowHeight
     } finally c.Loading := false
 }
 
@@ -1636,6 +1653,8 @@ InterfaceControlChanged(c, *) {
     c.Draft.General.ThumbnailTextLines := c.ThumbnailTextLines.Value = 1 ? 1 : 2
     c.Draft.General.TextBlockCardWidth := Trim(c.TextBlockCardWidth.Value)
     c.Draft.General.TextBlockCardHeight := Trim(c.TextBlockCardHeight.Value)
+    c.Draft.General.WindowWidth := Trim(c.WindowWidth.Value)
+    c.Draft.General.WindowHeight := Trim(c.WindowHeight.Value)
 }
 
 GeneralControlChanged(c, *) {
@@ -3578,6 +3597,7 @@ SettingsDraftSignature(draft) {
         g.DoubleHotkeyWorkspaceId, g.WindowMode,
         g.EscapeHidesPanel ? "1" : "0",
         g.UiScaleMode,
+        g.WindowWidth "", g.WindowHeight "",
         g.ThumbnailPolicy,
         g.ThumbnailSize "", g.ThumbnailHorizontalGap "",
         g.ThumbnailVerticalGap "", g.ThumbnailTextLines "",
@@ -3766,6 +3786,10 @@ ValidateSettingsDraft(c) {
     if !ValueInArray(d.General.UiScaleMode,
         ["100", "125", "150", "175", "200"])
         errors.Push("界面缩放设置无效。")
+    if !IsIntegerText(d.General.WindowWidth, 660, 980)
+        errors.Push("窗口宽度必须是 660–980 的整数。")
+    if !IsIntegerText(d.General.WindowHeight, 380, 2000)
+        errors.Push("窗口高度必须是 380–2000 的整数。")
     if !ValueInArray(d.General.ThumbnailPolicy, ["Fast", "Full"])
         errors.Push("图标质量设置无效。")
     if !IsIntegerText(d.General.ThumbnailSize, 48, 256)
@@ -4202,6 +4226,8 @@ WriteSettingsDraft(draft, tempPath) {
     doc.SetValue("General", "ContentUpdateMode",
         g.ContentUpdateMode, 1)
     doc.SetValue("General", "UiScale", g.UiScaleMode, 1)
+    doc.SetValue("General", "WindowWidth", g.WindowWidth, 1)
+    doc.SetValue("General", "WindowHeight", g.WindowHeight, 1)
     doc.SetValue("General", "ThumbnailPolicy", g.ThumbnailPolicy, 1)
     doc.SetValue("General", "ThumbnailSize", g.ThumbnailSize, 1)
     doc.SetValue("General", "ThumbnailHorizontalGap",
