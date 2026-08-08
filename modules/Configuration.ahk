@@ -592,6 +592,7 @@ LoadSettings(*) {
     global WindowWidth, WindowHeight, RecentFileCount
     global ThumbnailPolicy, CachePathSetting, CacheDir, CacheFilePath, CacheWritable
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
+    global CurrentScanComplete, CurrentScanRevision
     global CurrentHiddenBySource
     global WorkspaceScanSnapshots, PanelRenderSignature, RecentRenderSignature
     global ConsistencyCheckMinutes, ContentUpdateMode
@@ -614,11 +615,17 @@ LoadSettings(*) {
     global FileManagerProvider, FileManagerExecutable
     global FILE_MANAGER_WINDOWS_SHELL
     global GlobalNoiseFilter, NOISE_FILTER_INHERIT
+    ; A full reload must not read an older Active value while a fast runtime
+    ; workspace switch is still waiting for its coalesced persistence timer.
+    if !FlushPendingActiveWorkspacePersistence(true)
+        throw Error("无法在重新加载设置前保存当前工作区。")
     FlushPendingScanCacheWrite()
     previousWorkspaceId := ActiveWorkspaceId
     previousFingerprint := CurrentConfigFingerprint
     previousResult := CurrentScanResult
     previousLoaded := ScanResultLoaded
+    previousComplete := CurrentScanComplete
+    previousRevision := CurrentScanRevision
     settingErrors := []
     LoadPreviewSettings(settingErrors)
     LoadQuickPreviewSettings(settingErrors)
@@ -799,34 +806,23 @@ LoadSettings(*) {
     ActiveWorkspaceType := activeWorkspace.Type
     FolderSettings := activeWorkspace.SourceRefs
     PinnedPaths := activeWorkspace.PinnedPaths
-    result := {
-        Valid: activeWorkspace.Valid,
-        Settings: activeWorkspace.Sources,
-        Errors: activeWorkspace.Errors
-    }
-
     ; 验证并解析当前工作区，错误回退不得跨工作区串用来源。
     ConfigErrorsShown := false
-    if result.Valid {
-        LastValidFolderSettings := result.Settings
+    if activeWorkspace.Valid {
+        LastValidFolderSettings := activeWorkspace.Sources
         LastValidWorkspaceId := ActiveWorkspaceId
-        ConfigErrors := settingErrors
-    } else {
-        ConfigErrors := settingErrors.Clone()
-        for errorMessage in result.Errors
-            ConfigErrors.Push(errorMessage)
-        if LastValidFolderSettings.Length
-            && StrLower(LastValidWorkspaceId) = StrLower(ActiveWorkspaceId) {
-            ; 保留 LastValidFolderSettings
-        } else {
-            LastValidFolderSettings := result.Settings
-            LastValidWorkspaceId := ActiveWorkspaceId
-        }
+    } else if !LastValidFolderSettings.Length
+        || StrLower(LastValidWorkspaceId) != StrLower(ActiveWorkspaceId) {
+        LastValidFolderSettings := activeWorkspace.Sources
+        LastValidWorkspaceId := ActiveWorkspaceId
     }
 
     if previousLoaded && previousWorkspaceId != "" {
         WorkspaceScanSnapshots[StrLower(previousWorkspaceId)] := {
-            Fingerprint: previousFingerprint, Result: previousResult}
+            Fingerprint: previousFingerprint,
+            Result: previousResult,
+            Complete: previousComplete,
+            Revision: previousRevision}
     }
     CacheDir := ResolveCacheDirectory(CachePathSetting)
     CacheWritable := EnsureCacheDirectory(CacheDir)
@@ -840,12 +836,21 @@ LoadSettings(*) {
         snapshotKey := StrLower(ActiveWorkspaceId)
         if WorkspaceScanSnapshots.Has(snapshotKey)
             && WorkspaceScanSnapshots[snapshotKey].Fingerprint = newFingerprint {
-            CurrentScanResult := WorkspaceScanSnapshots[snapshotKey].Result
+            snapshot := WorkspaceScanSnapshots[snapshotKey]
+            CurrentScanResult := snapshot.Result
             ScanResultLoaded := true
+            CurrentScanComplete := HasProp(snapshot, "Complete")
+                ? snapshot.Complete
+                : IsScanResultStructurallyComplete(
+                    CurrentScanResult, LastValidFolderSettings)
+            CurrentScanRevision := HasProp(snapshot, "Revision")
+                ? snapshot.Revision : NextScanContentRevision()
         } else {
             CurrentScanResult := {
                 Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
             ScanResultLoaded := false
+            CurrentScanComplete := false
+            CurrentScanRevision := NextScanContentRevision()
         }
         PanelRenderSignature := ""
         RecentRenderSignature := ""
@@ -855,7 +860,7 @@ LoadSettings(*) {
     for app in OpenApps {
         for action in app.Actions {
             if !action.Valid
-                ConfigErrors.Push("工具动作配置无效：[OpenAppAction:"
+                settingErrors.Push("工具动作配置无效：[OpenAppAction:"
                     app.Id ":" action.Id "] " action.ValidationError)
         }
     }
@@ -865,12 +870,21 @@ LoadSettings(*) {
             OpenAppsConfigNeedsMigration := false
         } catch as err {
             message := "无法把旧版软件列表迁移到简化格式：" err.Message
-            ConfigErrors.Push(message)
+            settingErrors.Push(message)
         }
     }
     TransferFavorites := LoadTransferFavorites(settingErrors)
     TransferFavoriteLabels := LoadTransferFavoriteLabels(TransferFavorites)
     RecentTargets := LoadPathListSection("RecentTargets", 3)
+    ; Freeze complete validation on each in-memory workspace. Runtime
+    ; activation can then switch errors and validated sources without parsing
+    ; config.ini again.
+    for workspace in Workspaces {
+        workspace.RuntimeErrors := settingErrors.Clone()
+        for errorMessage in workspace.Errors
+            workspace.RuntimeErrors.Push(errorMessage)
+    }
+    ConfigErrors := activeWorkspace.RuntimeErrors.Clone()
     SyncWorkspaceControls()
 }
 

@@ -99,18 +99,7 @@ BuildPanel() {
     FolderDropAddSourceButton.Visible := false
     FolderDropPinnedButton.Visible := false
 
-    ; Multi-select is the native ListView default. In icon view this enables
-    ; Ctrl-click, Shift range selection and marquee selection on blank space.
-    FileView := Panel.AddListView(ScalePanelGuiOptions(
-        "xm y42 w716 h492 Icon +0x100"), ["文件", "修改时间"])
-    FileView.OnEvent("Click", FileViewClick)
-    FileView.OnEvent("DoubleClick", OpenFileViewItem)
-    FileView.OnEvent("ContextMenu", FileViewContextMenu)
-    FileView.OnEvent("ItemSelect", FileViewItemSelect)
-    ; LVS_EX_DOUBLEBUFFER | LVS_EX_GROUPHEADERCLICK reduces flicker and
-    ; enables clicking group headers to open folders.
-    DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1036,
-        "ptr", 0x410000, "ptr", 0x410000, "ptr")
+    FileView := CreatePanelFileView()
     
     RecentLabel := Panel.AddText(ScalePanelGuiOptions(
         "x740 y42 w220 h22 +0x200"), "最近打开")
@@ -149,12 +138,39 @@ BuildPanel() {
     UpdateWorkspaceTypeUi()
 }
 
-SyncWorkspaceControls() {
+CreatePanelFileView(visible := true) {
+    global Panel, DropTargetObjects
+    ; Multi-select is the native ListView default. In icon view this enables
+    ; Ctrl-click, Shift range selection and marquee selection on blank space.
+    options := "xm y42 w716 h492 Icon +0x100"
+    if !visible
+        options .= " Hidden"
+    view := Panel.AddListView(ScalePanelGuiOptions(options),
+        ["文件", "修改时间"])
+    view.OnEvent("Click", FileViewClick)
+    view.OnEvent("DoubleClick", OpenFileViewItem)
+    view.OnEvent("ContextMenu", FileViewContextMenu)
+    view.OnEvent("ItemSelect", FileViewItemSelect)
+    ; LVS_EX_DOUBLEBUFFER | LVS_EX_GROUPHEADERCLICK reduces flicker and
+    ; enables clicking group headers to open folders.
+    DllCall("user32\SendMessageW", "ptr", view.Hwnd, "uint", 0x1036,
+        "ptr", 0x410000, "ptr", 0x410000, "ptr")
+    ; The first view exists before InitDropTarget. Lazy hot views are children
+    ; created later and must join the already registered OLE target explicitly.
+    for targetPtr, _ in DropTargetObjects {
+        RegisterDropTargetWindow(view.Hwnd, targetPtr)
+        break
+    }
+    return view
+}
+
+SyncWorkspaceControls(forceTabRebuild := true, updateTypeUi := true) {
     global WorkspaceTabs, WorkspaceTabIds, WorkspaceMoreButton
     global WorkspaceMoreMenu, WorkspaceOverflowIds
     global WORKSPACE_VISIBLE_TAB_LIMIT
     global Workspaces, ActiveWorkspaceId, SettingsController
     if IsObject(WorkspaceTabs) {
+        previousTabIds := WorkspaceTabIds.Clone()
         activeIndex := 0
         for index, workspace in Workspaces {
             if StrLower(workspace.Id) = StrLower(ActiveWorkspaceId)
@@ -176,18 +192,31 @@ SyncWorkspaceControls() {
                 WorkspaceOverflowIds.Push(workspace.Id)
             }
         }
-        WorkspaceTabs.Delete()
-        if names.Length {
-            WorkspaceTabs.Add(names)
-            WorkspaceTabs.Choose(selected)
+        membershipChanged := forceTabRebuild
+            || WorkspaceTabIds.Length != previousTabIds.Length
+        if !membershipChanged {
+            for index, workspaceId in WorkspaceTabIds {
+                if StrLower(workspaceId) != StrLower(previousTabIds[index]) {
+                    membershipChanged := true
+                    break
+                }
+            }
         }
-        WorkspaceMoreMenu := BuildWorkspaceMoreMenu()
-        WorkspaceMoreButton.Visible := WorkspaceOverflowIds.Length > 0
-        ApplyWorkspaceTabPadding()
+        if membershipChanged {
+            WorkspaceTabs.Delete()
+            if names.Length
+                WorkspaceTabs.Add(names)
+            WorkspaceMoreMenu := BuildWorkspaceMoreMenu()
+            WorkspaceMoreButton.Visible := WorkspaceOverflowIds.Length > 0
+            ApplyWorkspaceTabPadding()
+        }
+        if names.Length && WorkspaceTabs.Value != selected
+            WorkspaceTabs.Choose(selected)
     }
     if IsObject(SettingsController)
         try RefreshSettingsWorkspaceControls(SettingsController)
-    UpdateWorkspaceTypeUi()
+    if updateTypeUi
+        UpdateWorkspaceTypeUi()
 }
 
 ResolveWorkspaceTabIndexes(workspaceCount, activeIndex, visibleLimit := 8) {
@@ -329,7 +358,10 @@ MainWorkspaceChanged(control, *) {
     if IsObject(InactiveScanJob)
         && StrLower(InactiveScanJob.WorkspaceId) = StrLower(targetId)
         CancelInactiveWorkspaceScan(false)
-    if !RequestActivateWorkspace(targetId, "main")
+    ; Native tab clicks use the same latest-target dispatcher as keyboard
+    ; switching.  Do not run a complete activation synchronously from the
+    ; control notification: a second click must be able to replace this one.
+    if !QueuePanelWorkspaceSwitch(targetId, 4, "main")
         SyncWorkspaceControls()
 }
 
@@ -343,9 +375,10 @@ RequestActivateWorkspace(workspaceId, origin := "main") {
 
 ActivateWorkspace(workspaceId) {
     global ActiveWorkspaceId, PanelVisible, StatusKind, FileView
-    global LastFileWorkspaceId, WORKSPACE_TYPE_FILES
+    global LastFileWorkspaceId
     global SourceWatcherRecentDirty
     global ContentUpdateMode, CONTENT_UPDATE_ACCURACY
+    global CurrentScanComplete
     found := FindWorkspace(workspaceId)
     if !IsObject(found)
         return false
@@ -353,34 +386,60 @@ ActivateWorkspace(workspaceId) {
         SyncWorkspaceControls()
         return true
     }
-    nextLastFileId := LastFileWorkspaceId
-    if ParseWorkspaceType(found.Value.Type) = WORKSPACE_TYPE_FILES
-        nextLastFileId := found.Value.Id
-    try AtomicConfigEdit(
-        WriteActiveWorkspaceState.Bind(workspaceId, nextLastFileId))
-    catch as err {
-        ShowPanelMsgBox("无法切换工作区：`n" err.Message,
-            "工作区切换失败", "Iconx")
-        return false
-    }
     PreviewSuppress("workspace", false)
+    RememberActiveWorkspaceFileView()
     ClearTextBlockSearch(false)
-    LoadSettings()
+    if !BindRuntimeWorkspace(found.Value)
+        return false
+    CancelStaleWorkspaceWorker()
     if !ScanResultLoaded
         LoadDiskScanCache()
-    InstallWorkspaceHotkeys()
     StatusKind := "default"
-    PopulatePanel()
-    PopulateRecentSidebar()
+    hotViewReady := ActivateWorkspaceFileView()
+    if !hotViewReady
+        PopulatePanel()
     if PanelVisible && IsObject(FileView) {
         if IsTextWorkspace()
             RestoreTextBlockSearchFocus()
         else
             FileView.Focus()
     }
+    ; Persist only after the new workspace has completed its synchronous paint.
+    ; The shared timer makes rapid A -> B -> C switching write only C.
+    ScheduleActiveWorkspacePersistence(
+        ActiveWorkspaceId, LastFileWorkspaceId)
+    ; Recent/sidebar maintenance and source reconciliation are not required to
+    ; expose an already-rendered hot view.  Queue them after returning to the
+    ; message loop so a burst of clicks can commit the next target first.
+    QueueWorkspaceActivationMaintenance(ActiveWorkspaceId)
+    return true
+}
+
+QueueWorkspaceActivationMaintenance(workspaceId) {
+    global WorkspaceActivationMaintenanceGeneration
+    global WorkspaceActivationMaintenanceWorkspaceId
+    generation := ++WorkspaceActivationMaintenanceGeneration
+    WorkspaceActivationMaintenanceWorkspaceId := workspaceId
+    SetTimer(FinishWorkspaceActivation.Bind(workspaceId, generation), -1)
+    return true
+}
+
+FinishWorkspaceActivation(workspaceId, generation) {
+    global ActiveWorkspaceId, WorkspaceActivationMaintenanceGeneration
+    global WorkspaceActivationMaintenanceWorkspaceId
+    global ScanResultLoaded, CurrentScanComplete, ContentUpdateMode
+    global CONTENT_UPDATE_ACCURACY, ShowRecentSidebar, SourceWatcherRecentDirty
+    if generation != WorkspaceActivationMaintenanceGeneration
+        return false
+    if StrLower(workspaceId) != StrLower(WorkspaceActivationMaintenanceWorkspaceId)
+        return false
+    if StrLower(workspaceId) != StrLower(ActiveWorkspaceId)
+        return false
+
+    PopulateRecentSidebar()
     ReconcileSourceWatchers()
     refreshKeys := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, true)
-    needsFullScan := !ScanResultLoaded
+    needsFullScan := !ScanResultLoaded || !CurrentScanComplete
         || ContentUpdateMode = CONTENT_UPDATE_ACCURACY
     includeRecent := ShowRecentSidebar && (!ScanResultLoaded
         || SourceWatcherRecentDirty)
@@ -389,6 +448,318 @@ ActivateWorkspace(workspaceId) {
     else if refreshKeys.Count || includeRecent
         StartBackgroundScan(refreshKeys, "workspace", includeRecent)
     return true
+}
+
+RememberActiveWorkspaceFileView() {
+    global ActiveWorkspaceId, FileView, WorkspaceFileViewStates
+    global ItemPaths, ItemLabels, ItemFolderPaths, ItemKinds, ItemOpenContexts
+    global GroupFolderPaths, GroupDropTargets, SelectedFilePaths
+    global ThumbnailImageList, ThumbnailImageListEdge, ThumbnailIconCache
+    global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
+    global PanelRenderSignature, PanelRenderedWorkspaceId
+    global TextBlockSearchIndex, TextBlockSearchQueue, TextBlockSearchQuery
+    global TextBlockSelectFirstPending, ItemCountText, StatusText, StatusKind
+    global CurrentScanResult, CurrentConfigFingerprint, PinnedPaths
+    global ViewMode, ThumbnailSize, PanelRenderedScanRevision
+    if ActiveWorkspaceId = "" || !IsObject(FileView)
+        return false
+    SetTimer(EnhanceNextThumbnail, 0)
+    SetTimer(BuildNextTextBlockSearchIndex, 0)
+    WorkspaceFileViewStates[StrLower(ActiveWorkspaceId)] := {
+        Control: FileView,
+        ItemPaths: ItemPaths,
+        ItemLabels: ItemLabels,
+        ItemFolderPaths: ItemFolderPaths,
+        ItemKinds: ItemKinds,
+        ItemOpenContexts: ItemOpenContexts,
+        GroupFolderPaths: GroupFolderPaths,
+        GroupDropTargets: GroupDropTargets,
+        SelectedFilePaths: SelectedFilePaths,
+        ImageList: ThumbnailImageList,
+        ImageListEdge: ThumbnailImageListEdge,
+        IconCache: ThumbnailIconCache,
+        EnhanceQueue: ThumbnailEnhanceQueue,
+        EnhanceGeneration: ThumbnailEnhanceGeneration,
+        RenderSignature: PanelRenderSignature,
+        RenderedWorkspaceId: PanelRenderedWorkspaceId,
+        SearchIndex: TextBlockSearchIndex,
+        SearchQueue: TextBlockSearchQueue,
+        SearchQuery: TextBlockSearchQuery,
+        SelectFirstPending: TextBlockSelectFirstPending,
+        CountText: IsObject(ItemCountText) ? ItemCountText.Text : "",
+        StatusText: IsObject(StatusText) ? StatusText.Text : "",
+        StatusKind: StatusKind,
+        ScanResult: CurrentScanResult,
+        ConfigFingerprint: CurrentConfigFingerprint,
+        PinnedPaths: PinnedPaths,
+        ViewMode: ViewMode,
+        ThumbnailSize: ThumbnailSize,
+        RenderRevision: PanelRenderedScanRevision
+    }
+    return true
+}
+
+ActivateWorkspaceFileView() {
+    global ActiveWorkspaceId, FileView, WorkspaceFileViewStates
+    global ItemPaths, ItemLabels, ItemFolderPaths, ItemKinds, ItemOpenContexts
+    global GroupFolderPaths, GroupDropTargets, SelectedFilePaths
+    global ThumbnailImageList, ThumbnailImageListEdge, ThumbnailIconCache
+    global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
+    global PanelRenderSignature, PanelRenderedWorkspaceId
+    global TextBlockSearchIndex, TextBlockSearchQueue, TextBlockSearchQuery
+    global TextBlockSelectFirstPending, TextBlockSearchEdit
+    global ItemCountText, StatusText, StatusKind
+    global CurrentScanResult, CurrentConfigFingerprint, PinnedPaths
+    global ViewMode, ThumbnailSize, CurrentScanComplete
+    global CurrentScanRevision, PanelRenderedScanRevision
+
+    oldView := FileView
+    key := StrLower(ActiveWorkspaceId)
+    if WorkspaceFileViewStates.Has(key) {
+        state := WorkspaceFileViewStates[key]
+        ; The map owns inactive views only. Once restored, remove this entry so
+        ; a later active refresh cannot leave stale maps or a destroyed image
+        ; list referenced by cleanup; leaving the workspace saves it anew.
+        WorkspaceFileViewStates.Delete(key)
+        FileView := state.Control
+        ItemPaths := state.ItemPaths
+        ItemLabels := state.ItemLabels
+        ItemFolderPaths := state.ItemFolderPaths
+        ItemKinds := state.ItemKinds
+        ItemOpenContexts := state.ItemOpenContexts
+        GroupFolderPaths := state.GroupFolderPaths
+        GroupDropTargets := state.GroupDropTargets
+        SelectedFilePaths := state.SelectedFilePaths
+        ThumbnailImageList := state.ImageList
+        ThumbnailImageListEdge := state.ImageListEdge
+        ThumbnailIconCache := state.IconCache
+        ThumbnailEnhanceQueue := state.EnhanceQueue
+        ThumbnailEnhanceGeneration := state.EnhanceGeneration
+        PanelRenderSignature := state.RenderSignature
+        PanelRenderedWorkspaceId := state.RenderedWorkspaceId
+        PanelRenderedScanRevision := state.RenderRevision
+        TextBlockSearchIndex := state.SearchIndex
+        TextBlockSearchQueue := state.SearchQueue
+        TextBlockSearchQuery := state.SearchQuery
+        TextBlockSelectFirstPending := state.SelectFirstPending
+        if IsObject(ItemCountText)
+            ItemCountText.Text := state.CountText
+        if IsObject(StatusText)
+            StatusText.Text := state.StatusText
+        StatusKind := state.StatusKind
+    } else {
+        FileView := CreatePanelFileView(false)
+        ItemPaths := Map()
+        ItemLabels := Map()
+        ItemFolderPaths := Map()
+        ItemKinds := Map()
+        ItemOpenContexts := Map()
+        GroupFolderPaths := Map()
+        GroupDropTargets := Map()
+        SelectedFilePaths := []
+        ThumbnailImageList := 0
+        ThumbnailImageListEdge := 0
+        ThumbnailIconCache := Map()
+        ThumbnailEnhanceQueue := []
+        ThumbnailEnhanceGeneration += 1
+        PanelRenderSignature := ""
+        PanelRenderedWorkspaceId := ""
+        PanelRenderedScanRevision := 0
+        TextBlockSearchIndex := Map()
+        TextBlockSearchQueue := []
+        TextBlockSearchQuery := ""
+        TextBlockSelectFirstPending := true
+    }
+
+    ; Every cached view follows the active view's current geometry. This keeps
+    ; hidden views correct after the panel was resized while another tab was
+    ; active, without running the full layout pipeline on the switch path.
+    if IsObject(oldView) && oldView.Hwnd != FileView.Hwnd {
+        oldView.GetPos(&x, &y, &width, &height)
+        FileView.Move(x, y, width, height)
+        oldView.Visible := false
+    }
+    FileView.Visible := true
+    if IsObject(TextBlockSearchEdit)
+        TextBlockSearchEdit.Value := TextBlockSearchQuery
+
+    ; Constant-time validity check. ComputePanelRenderSignature walks every
+    ; scanned row, which would make a supposedly hot switch scale with folder
+    ; size. Every content publication advances an explicit revision; unlike
+    ; object identity this also detects in-place mutation by partial workers.
+    hotViewReady := IsSet(state) && CurrentScanComplete
+        && PanelRenderSignature != ""
+        && state.ConfigFingerprint = CurrentConfigFingerprint
+        && state.RenderRevision = CurrentScanRevision
+        && ObjPtr(state.PinnedPaths) = ObjPtr(PinnedPaths)
+        && state.ViewMode = ViewMode
+        && state.ThumbnailSize = ThumbnailSize
+        && state.SearchQuery = TextBlockSearchQuery
+    if hotViewReady {
+        if ThumbnailEnhanceQueue.Length
+            SetTimer(EnhanceNextThumbnail, -1)
+        if TextBlockSearchQueue.Length
+            SetTimer(BuildNextTextBlockSearchIndex, -1)
+    }
+    return hotViewReady
+}
+
+BindRuntimeWorkspace(workspace) {
+    global ActiveWorkspaceId, ActiveWorkspaceName, ActiveWorkspaceType
+    global LastFileWorkspaceId, WORKSPACE_TYPE_FILES
+    global FolderSettings, PinnedPaths, LastValidFolderSettings
+    global LastValidWorkspaceId, ConfigErrors, ConfigErrorsShown
+    global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
+    global CurrentScanComplete, CurrentScanRevision
+    global CurrentHiddenBySource, WorkspaceScanSnapshots
+    global CacheDir, CacheFilePath
+    global PanelRenderSignature, RecentRenderSignature
+
+    if !IsObject(workspace) || workspace.Id = ""
+        return false
+    DeferPendingCurrentScanCacheWrite()
+    RememberCurrentWorkspaceSnapshot()
+
+    previousWorkspaceType := ActiveWorkspaceType
+    ActiveWorkspaceId := workspace.Id
+    ActiveWorkspaceName := workspace.Name
+    ActiveWorkspaceType := workspace.Type
+    FolderSettings := workspace.SourceRefs
+    PinnedPaths := workspace.PinnedPaths
+    if ParseWorkspaceType(workspace.Type) = WORKSPACE_TYPE_FILES
+        LastFileWorkspaceId := workspace.Id
+
+    ConfigErrorsShown := false
+    ConfigErrors := HasProp(workspace, "RuntimeErrors")
+        ? workspace.RuntimeErrors.Clone() : workspace.Errors.Clone()
+    if workspace.Valid {
+        LastValidFolderSettings := workspace.Sources
+        LastValidWorkspaceId := workspace.Id
+    } else if !LastValidFolderSettings.Length
+        || StrLower(LastValidWorkspaceId) != StrLower(workspace.Id) {
+        LastValidFolderSettings := workspace.Sources
+        LastValidWorkspaceId := workspace.Id
+    }
+
+    CurrentConfigFingerprint := ComputeConfigFingerprint(
+        LastValidFolderSettings, workspace.Id, workspace.Type,
+        workspace.PinnedPaths)
+    CacheFilePath := CacheDir "\workspace-"
+        . HashString(StrLower(workspace.Id)) ".ini"
+    CurrentHiddenBySource := Map()
+    snapshotKey := StrLower(workspace.Id)
+    if WorkspaceScanSnapshots.Has(snapshotKey)
+        && WorkspaceScanSnapshots[snapshotKey].Fingerprint
+            = CurrentConfigFingerprint {
+        snapshot := WorkspaceScanSnapshots[snapshotKey]
+        CurrentScanResult := snapshot.Result
+        ScanResultLoaded := true
+        CurrentScanComplete := HasProp(snapshot, "Complete")
+            ? snapshot.Complete
+            : IsScanResultStructurallyComplete(
+                CurrentScanResult, LastValidFolderSettings)
+        CurrentScanRevision := HasProp(snapshot, "Revision")
+            ? snapshot.Revision : NextScanContentRevision()
+    } else {
+        CurrentScanResult := {
+            Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
+        ScanResultLoaded := false
+        CurrentScanComplete := false
+        CurrentScanRevision := NextScanContentRevision()
+    }
+    PanelRenderSignature := ""
+    RecentRenderSignature := ""
+    typeChanged := ParseWorkspaceType(previousWorkspaceType)
+        != ParseWorkspaceType(workspace.Type)
+    SyncWorkspaceControls(false, typeChanged)
+    return true
+}
+
+DeferPendingCurrentScanCacheWrite() {
+    global ScanCacheWritePending
+    global ActiveWorkspaceId, CurrentConfigFingerprint, CurrentScanResult
+    if !ScanCacheWritePending || ActiveWorkspaceId = ""
+        return false
+    ; The existing cache timer uses active globals. Capture the old identity
+    ; before rebinding them, then let the exact snapshot write after first
+    ; paint instead of performing disk I/O on the switch path.
+    SetTimer(FlushPendingScanCacheWrite, 0)
+    ScanCacheWritePending := false
+    SetTimer(WriteWorkspaceSnapshot.Bind(
+        CurrentScanResult, ActiveWorkspaceId, CurrentConfigFingerprint), -1)
+    return true
+}
+
+CancelStaleWorkspaceWorker() {
+    global WorkerRunning, WorkerWorkspaceId, ActiveWorkspaceId
+    global WorkerPid, PendingRefresh, PendingFullRefresh
+    global PendingScanSourceKeys, PendingIncludeRecent
+    global InactiveScanJob
+    if IsObject(InactiveScanJob)
+        && StrLower(InactiveScanJob.WorkspaceId) = StrLower(ActiveWorkspaceId)
+        CancelInactiveWorkspaceScan(false)
+    if !WorkerRunning
+        return
+    if StrLower(WorkerWorkspaceId) = StrLower(ActiveWorkspaceId)
+        return
+    if WorkerPid && ProcessExist(WorkerPid)
+        try ProcessClose(WorkerPid)
+    FinishWorker(false)
+    PendingRefresh := false
+    PendingFullRefresh := false
+    PendingScanSourceKeys := Map()
+    PendingIncludeRecent := false
+}
+
+ScheduleActiveWorkspacePersistence(workspaceId, lastFileWorkspaceId) {
+    global PendingActiveWorkspacePersistId
+    global PendingLastFileWorkspacePersistId
+    global ActiveWorkspacePersistAttempts
+    global ACTIVE_WORKSPACE_PERSIST_DELAY_MS
+    PendingActiveWorkspacePersistId := workspaceId
+    PendingLastFileWorkspacePersistId := lastFileWorkspaceId
+    ActiveWorkspacePersistAttempts := 0
+    SetTimer(PersistPendingActiveWorkspaceState,
+        -ACTIVE_WORKSPACE_PERSIST_DELAY_MS)
+}
+
+PersistPendingActiveWorkspaceState(*) {
+    global PendingActiveWorkspacePersistId
+    global PendingLastFileWorkspacePersistId
+    global ActiveWorkspacePersistAttempts
+    workspaceId := PendingActiveWorkspacePersistId
+    lastFileWorkspaceId := PendingLastFileWorkspacePersistId
+    if workspaceId = ""
+        return true
+    try AtomicConfigEdit(
+        WriteActiveWorkspaceState.Bind(workspaceId, lastFileWorkspaceId))
+    catch {
+        ActiveWorkspacePersistAttempts += 1
+        if ActiveWorkspacePersistAttempts < 2
+            SetTimer(PersistPendingActiveWorkspaceState, -1000)
+        else
+            SetBackgroundStatus("工作区已切换，状态保存失败", 3000)
+        return false
+    }
+    if StrLower(PendingActiveWorkspacePersistId) = StrLower(workspaceId)
+        && StrLower(PendingLastFileWorkspacePersistId)
+            = StrLower(lastFileWorkspaceId) {
+        PendingActiveWorkspacePersistId := ""
+        PendingLastFileWorkspacePersistId := ""
+        ActiveWorkspacePersistAttempts := 0
+    }
+    return true
+}
+
+FlushPendingActiveWorkspacePersistence(throwOnFailure := false) {
+    global PendingActiveWorkspacePersistId
+    SetTimer(PersistPendingActiveWorkspaceState, 0)
+    if PendingActiveWorkspacePersistId = ""
+        return true
+    saved := PersistPendingActiveWorkspaceState()
+    if !saved && throwOnFailure
+        throw Error("当前工作区状态尚未写入配置文件。")
+    return saved
 }
 
 WriteActiveWorkspaceState(workspaceId, lastFileWorkspaceId, tempPath) {
@@ -1147,6 +1518,7 @@ ShowAndRefresh(*) {
     global ScanResultLoaded, StatusKind, AutoHidePanelShownTick
     global WindowMode, WINDOW_MODE_TEMPORARY, AutoHidePauseDepth
     global AutoHideNativeShownTick
+    global CurrentScanComplete, WorkerRunning, ShowRecentSidebar
     PreviewBeginPanelSession()
     LoadSettings()
     InstallWorkspaceHotkeys()
@@ -1180,6 +1552,11 @@ ShowAndRefresh(*) {
     }
     UpdateWindowModeButton()
     CheckRefreshPolicyOnShow()
+    ; A worker may have been canceled after publishing only part of a cold
+    ; scan. Reopening within the same process must actively repair it instead
+    ; of waiting for the next daily/consistency calibration.
+    if !CurrentScanComplete && !WorkerRunning
+        StartBackgroundScan(0, "incomplete-show", ShowRecentSidebar)
     RestoreTextBlockSearchFocus()
     ; First-show stabilization pass: some workspace-dependent controls settle
     ; only after the native window is visible and populated.

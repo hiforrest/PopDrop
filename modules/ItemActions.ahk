@@ -163,8 +163,9 @@ CycleWorkspace(direction, *) {
     QueuePanelWorkspaceCycle(direction)
 }
 
-QueuePanelWorkspaceSwitch(workspaceId) {
-    global PendingPanelWorkspaceId, PanelWorkspaceSwitchGeneration
+QueuePanelWorkspaceSwitch(workspaceId, delayMs := 25, origin := "queued") {
+    global PendingPanelWorkspaceId, PendingPanelWorkspaceOrigin
+    global PanelWorkspaceSwitchGeneration
     found := FindWorkspace(workspaceId)
     if !IsObject(found)
         return false
@@ -172,8 +173,11 @@ QueuePanelWorkspaceSwitch(workspaceId) {
     Critical("On")
     try {
         PendingPanelWorkspaceId := found.Value.Id
+        PendingPanelWorkspaceOrigin := origin
         generation := ++PanelWorkspaceSwitchGeneration
-        SetTimer(CommitPanelWorkspaceSwitch.Bind(generation), -25)
+        ; A short debounce lets a burst of native-tab clicks collapse to the
+        ; final target without adding a visible delay to a single click.
+        SetTimer(CommitPanelWorkspaceSwitch.Bind(generation), -Max(1, delayMs))
     } finally {
         Critical(previousCritical)
     }
@@ -182,6 +186,7 @@ QueuePanelWorkspaceSwitch(workspaceId) {
 
 QueuePanelWorkspaceCycle(direction) {
     global Workspaces, ActiveWorkspaceId, PendingPanelWorkspaceId
+    global PendingPanelWorkspaceOrigin
     global PanelWorkspaceSwitchGeneration
     if Workspaces.Length < 2
         return false
@@ -195,6 +200,7 @@ QueuePanelWorkspaceCycle(direction) {
         next := Mod(current - 1 + direction + Workspaces.Length,
             Workspaces.Length) + 1
         PendingPanelWorkspaceId := Workspaces[next].Id
+        PendingPanelWorkspaceOrigin := "queued"
         generation := ++PanelWorkspaceSwitchGeneration
         SetTimer(CommitPanelWorkspaceSwitch.Bind(generation), -25)
     } finally {
@@ -205,7 +211,7 @@ QueuePanelWorkspaceCycle(direction) {
 
 CommitPanelWorkspaceSwitch(generation) {
     global PendingPanelWorkspaceId, PanelWorkspaceSwitchGeneration
-    global PanelWorkspaceSwitchRunning
+    global PendingPanelWorkspaceOrigin, PanelWorkspaceSwitchRunning
     previousCritical := A_IsCritical
     Critical("On")
     try {
@@ -216,14 +222,21 @@ CommitPanelWorkspaceSwitch(generation) {
         if PanelWorkspaceSwitchRunning
             return
         workspaceId := PendingPanelWorkspaceId
+        origin := PendingPanelWorkspaceOrigin
         if workspaceId = ""
             return
         PendingPanelWorkspaceId := ""
+        PendingPanelWorkspaceOrigin := ""
         PanelWorkspaceSwitchRunning := true
     } finally {
         Critical(previousCritical)
     }
-    try ActivateWorkspace(workspaceId)
+    try {
+        if origin = "main"
+            RequestActivateWorkspace(workspaceId, "main")
+        else
+            try ActivateWorkspace(workspaceId)
+    }
     finally {
         previousCritical := A_IsCritical
         Critical("On")

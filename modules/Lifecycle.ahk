@@ -14,6 +14,7 @@ Cleanup(*) {
     CleanupAutoHideForegroundHook()
     SetTimer(PollWorkerResult, 0)
     SetTimer(EnhanceNextThumbnail, 0)
+    FlushPendingActiveWorkspacePersistence()
     FlushPendingScanCacheWrite()
     CleanupSourceWatchers()
     ShutdownRuntimeIndex()
@@ -54,11 +55,25 @@ Cleanup(*) {
         CallbackFree(callbackPtr)
     for callbackPtr in DropTargetCallbacks
         CallbackFree(callbackPtr)
-    if ThumbnailImageList
-        DllCall("comctl32\ImageList_Destroy", "ptr", ThumbnailImageList)
+    CleanupWorkspaceFileViews()
     if PanelIconHandle
         DllCall("user32\DestroyIcon", "ptr", PanelIconHandle)
     if MainInstanceMutex
         DllCall("kernel32\CloseHandle", "ptr", MainInstanceMutex)
     DllCall("ole32\OleUninitialize")
+}
+
+CleanupWorkspaceFileViews() {
+    global WorkspaceFileViewStates, ThumbnailImageList
+    imageLists := Map()
+    if ThumbnailImageList
+        imageLists[ThumbnailImageList] := true
+    for _, state in WorkspaceFileViewStates {
+        if state.ImageList
+            imageLists[state.ImageList] := true
+    }
+    for imageList, _ in imageLists
+        DllCall("comctl32\ImageList_Destroy", "ptr", imageList)
+    WorkspaceFileViewStates.Clear()
+    ThumbnailImageList := 0
 }

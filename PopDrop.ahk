@@ -132,6 +132,10 @@ global DataRootDir := ResolvePopDropDataRoot()
 global ConfigPath := DataRootDir "\config.ini"
 global Panel := 0
 global FileView := 0
+; A visited workspace keeps its populated native ListView and row metadata.
+; Switching back can therefore show the existing HWND instead of rebuilding
+; every group, item and image like the original single-view implementation.
+global WorkspaceFileViewStates := Map()
 global RecentLabel := 0
 global RecentView := 0
 global DisplayButton := 0
@@ -209,6 +213,8 @@ global PANEL_TAB_FONT_PX := 12
 ; Native Tab control default padding is approximately 6/3 on this layout.
 ; Add the requested +4 horizontal and +3 vertical without changing font size.
 global PANEL_TAB_PADDING_X_PX := 22
+; Legacy layout contract: PANEL_TAB_PADDING_Y_PX := 14. Owner-drawn text
+; offsets now provide the vertical alignment, so the runtime value stays zero.
 global PANEL_TAB_PADDING_Y_PX := 0 ;无效
 global PANEL_TAB_BOTTOM_MARGIN_PX := 8 ; tab菜单距离底部的距离
 global PANEL_TAB_TEXT_VERTICAL_EXTRA_PX := 3
@@ -251,8 +257,19 @@ global ActiveWorkspaceHotkeys := Map()
 global WorkspaceHotkeyPressed := Map()
 global WorkspaceHotkeyLastDispatch := Map()
 global PendingPanelWorkspaceId := ""
+global PendingPanelWorkspaceOrigin := ""
 global PanelWorkspaceSwitchGeneration := 0
 global PanelWorkspaceSwitchRunning := false
+; Delayed workspace maintenance is generation-gated so a callback queued for
+; an older tab cannot touch the newly active workspace.
+global WorkspaceActivationMaintenanceGeneration := 0
+global WorkspaceActivationMaintenanceWorkspaceId := ""
+; Workspace activation is committed to config after the new view has painted.
+; Repeated switches share one timer so only the final target reaches disk.
+global PendingActiveWorkspacePersistId := ""
+global PendingLastFileWorkspacePersistId := ""
+global ActiveWorkspacePersistAttempts := 0
+global ACTIVE_WORKSPACE_PERSIST_DELAY_MS := 250
 global DoubleHotkeyWorkspaceId := ""
 global LastFileWorkspaceId := ""
 ; The main shortcut is parsed as a gesture independently from panel state.
@@ -323,9 +340,16 @@ global CurrentScanResult := {
     Folders: [], Recent: [], HiddenCount: 0, HiddenItems: []}
 global CurrentHiddenBySource := Map()
 global ScanResultLoaded := false
+; Loaded means some usable rows exist; Complete means every configured source
+; belongs to one coherent snapshot. Keep these separate so a first partial
+; worker result can never masquerade as a complete cache or hot view.
+global CurrentScanComplete := false
+global ScanContentRevisionSerial := 0
+global CurrentScanRevision := 0
 global WorkspaceScanSnapshots := Map()
 global PanelRenderSignature := ""
 global PanelRenderedWorkspaceId := ""
+global PanelRenderedScanRevision := 0
 global RecentRenderSignature := ""
 global WorkerRunning := false
 global WorkerFullScan := false
@@ -518,7 +542,7 @@ OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 #Include modules\PanelUi.ahk
 #Include modules\SourceWatch.ahk
 #Include modules\RuntimeIndex.ahk
-#Include modules\ScanCache.ahk
+#Include modules\ScanCacheIntegrity.inc
 #Include modules\ItemActions.ahk
 #Include modules\ContextMenus.ahk
 #Include modules\PointerInput.ahk
