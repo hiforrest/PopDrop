@@ -8,7 +8,7 @@
 ;@Ahk2Exe-AddResource assets\pin.ico, 557
 ;@Ahk2Exe-AddResource assets\empty-folder.ico, 558
 ;@Ahk2Exe-AddResource assets\unknown-file.ico, 559
-;@Ahk2Exe-SetVersion 1.1.0.0
+;@Ahk2Exe-SetVersion 1.1.2.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -20,7 +20,7 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global SORT_SMART := "Smart"
-global APP_VERSION := "1.1.0"
+global APP_VERSION := "1.1.2"
 global CONFIG_VERSION := "27"
 global CONTENT_UPDATE_FAST := "Fast"
 global CONTENT_UPDATE_ACCURACY := "Accuracy"
@@ -336,6 +336,11 @@ global CacheFilePath := ""
 global CacheWritable := false
 global CacheWriteWarningShown := false
 global ScanCacheWritePending := false
+global CacheCleanupEnabled := true
+global CacheRetentionDays := 7
+global CacheMaintenanceDirectory := ""
+global CacheMaintenanceLastTick := 0
+global CacheMaintenanceLastResult := 0
 global RuntimeIndexModule := 0
 global RuntimeIndexDb := 0
 global RuntimeIndexPath := ""
@@ -443,6 +448,7 @@ global SettingsDialog := 0
 global EscapeHidesPanel := true
 global TextBlockSearchEdit := 0
 global TextBlockSearchQuery := ""
+global TextBlockImeComposing := false
 global TextBlockSelectFirstPending := true
 global TextBlockSearchIndex := Map()
 global TextBlockSearchQueue := []
@@ -462,6 +468,10 @@ global CudaTextDragCapture := 0
 ; ──── 单击激活手势和重复激活抑制 ────
 global FilePointerGesture := 0
 global FilePointerGestureSerial := 0
+; A source group header owns its left-button gesture independently from file
+; rows. This prevents a header press from entering native item selection or
+; the single-click file activation state machine.
+global FolderGroupHeaderGesture := 0
 global LastPointerActivationKey := ""
 global LastPointerActivationTick := 0
 
@@ -470,6 +480,10 @@ global SortMode := SORT_MODIFIED_DESC
 ; ──── 每个行对应的分组文件夹路径（双击分组标题使用） ────
 global ItemFolderPaths := Map()
 global GroupFolderPaths := Map()
+; Session-scoped collapse state keyed by workspace and stable source ID.
+; Native hot views keep their own visual state; this map reapplies it when a
+; refresh rebuilds groups or a workspace view must be recreated.
+global CollapsedFolderGroups := Map()
 
 ; ──── 窗口模式 ────
 global WINDOW_MODE_ALWAYS_ON_TOP := "always_on_top"
@@ -518,6 +532,7 @@ OnMessage(0x0100, FileViewContextMenuKeyDown) ; WM_KEYDOWN
 OnMessage(0x0104, FileViewContextMenuKeyDown) ; WM_SYSKEYDOWN
 OnMessage(0x0102, TextBlockCharInput)          ; WM_CHAR direct filtering
 OnMessage(0x010D, TextBlockImeStart)           ; WM_IME_STARTCOMPOSITION
+OnMessage(0x010E, TextBlockImeEnd)             ; WM_IME_ENDCOMPOSITION
 OnMessage(0x020A, FileViewCancelInteraction) ; WM_MOUSEWHEEL
 OnMessage(0x020E, FileViewCancelInteraction) ; WM_MOUSEHWHEEL
 OnMessage(0x0114, FileViewCancelInteraction) ; WM_HSCROLL
@@ -546,6 +561,7 @@ OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 #Include modules\CudaTextIntegration.ahk
 #Include modules\PanelUi.ahk
 #Include modules\SourceWatch.ahk
+#Include modules\CacheMaintenance.ahk
 #Include modules\RuntimeIndex.ahk
 #Include modules\ScanCacheIntegrity.inc
 #Include modules\ItemActions.ahk

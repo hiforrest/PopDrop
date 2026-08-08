@@ -1693,13 +1693,20 @@ PreviewDrawFileInfo(targetDc, width, height, padding, dpi := 96) {
     infoHeight := DllCall("kernel32\MulDiv",
         "int", 112, "int", dpi, "int", 96)
     barTop := Max(0, height - infoHeight)
-    fontHeight := DllCall("kernel32\MulDiv",
+    nameFontHeight := DllCall("kernel32\MulDiv",
         "int", 15, "int", dpi, "int", 96)
-    font := DllCall("gdi32\CreateFontW", "int", -fontHeight,
+    detailsFontHeight := DllCall("kernel32\MulDiv",
+        "int", 14, "int", dpi, "int", 96)
+    nameFont := DllCall("gdi32\CreateFontW", "int", -nameFontHeight,
         "int", 0, "int", 0, "int", 0, "int", 400, "uint", 0,
         "uint", 0, "uint", 0, "uint", 1, "uint", 0, "uint", 0,
         "uint", 0, "uint", 0, "wstr", "Microsoft YaHei UI", "ptr")
-    old := DllCall("gdi32\SelectObject", "ptr", targetDc, "ptr", font, "ptr")
+    detailsFont := DllCall("gdi32\CreateFontW", "int", -detailsFontHeight,
+        "int", 0, "int", 0, "int", 0, "int", 400, "uint", 0,
+        "uint", 0, "uint", 0, "uint", 1, "uint", 0, "uint", 0,
+        "uint", 0, "uint", 0, "wstr", "Microsoft YaHei UI", "ptr")
+    old := DllCall("gdi32\SelectObject", "ptr", targetDc,
+        "ptr", nameFont, "ptr")
     DllCall("gdi32\SetTextColor", "ptr", targetDc, "uint", 0x00D5D5D5)
     DllCall("gdi32\SetBkMode", "ptr", targetDc, "int", 1)
     rect := Buffer(16, 0)
@@ -1713,13 +1720,16 @@ PreviewDrawFileInfo(targetDc, width, height, padding, dpi := 96) {
     NumPut("int", barTop + nameBottom, rect, 12)
     DllCall("user32\DrawTextW", "ptr", targetDc, "wstr", name,
         "int", -1, "ptr", rect.Ptr, "uint", 0x00000001 | 0x00000010 | 0x00000800)
+    DllCall("gdi32\SelectObject", "ptr", targetDc,
+        "ptr", detailsFont, "ptr")
     DllCall("gdi32\SetTextColor", "ptr", targetDc, "uint", 0x00B3A79E)
     NumPut("int", barTop + detailsTop, rect, 4)
     NumPut("int", barTop + detailsBottom, rect, 12)
     DllCall("user32\DrawTextW", "ptr", targetDc, "wstr", details,
         "int", -1, "ptr", rect.Ptr, "uint", 0x00000001 | 0x00000010 | 0x00000800)
     DllCall("gdi32\SelectObject", "ptr", targetDc, "ptr", old, "ptr")
-    DllCall("gdi32\DeleteObject", "ptr", font)
+    DllCall("gdi32\DeleteObject", "ptr", nameFont)
+    DllCall("gdi32\DeleteObject", "ptr", detailsFont)
 }
 
 PreviewPaintConfiguredBackground(targetDc, width, height,

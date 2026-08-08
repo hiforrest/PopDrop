@@ -958,7 +958,9 @@ UpdateTransferGroupHeaders() {
                 ? " · ↓ " Round(done * 100 / total) "%"
                 : " · ↓ 正在接收 " active " 项"
         }
-        SetListGroupHeader(FileView.Hwnd, groupId, header)
+        SetListGroupHeader(FileView.Hwnd, groupId,
+            FormatFolderGroupHeader(header,
+                IsListGroupCollapsed(FileView.Hwnd, groupId)))
     }
 }
 

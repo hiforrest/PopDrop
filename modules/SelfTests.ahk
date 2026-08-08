@@ -19,6 +19,7 @@ RunSelfTests() {
         RunSourceRemovalConfigSelfTests()
         RunNoiseFilterSelfTests()
         RunWorkspaceSelfTests()
+        RunCacheMaintenanceSelfTests()
         RunOpenAppActionSelfTests()
         AssertSelfTest(ShouldCaptureTextBlockPaste(
             true, true, "Cards", true),
@@ -59,6 +60,26 @@ RunSelfTests() {
         AssertSelfTest(!TextBlockHaystacksMatchTerms(
             "alpha title", "other body", ["alpha", "beta"]),
             "文本块多关键字使用 AND 语义")
+        AssertSelfTest(ShouldActivateTextBlockSearchResult(
+            true, true, false),
+            "文本搜索框空闲且结果就绪时 Enter 快速发送")
+        AssertSelfTest(!ShouldActivateTextBlockSearchResult(
+            true, true, true),
+            "IME 组合输入期间 Enter 保留给输入法")
+        AssertSelfTest(!ShouldActivateTextBlockSearchResult(
+            false, true, false),
+            "搜索框未聚焦时不接管 Enter")
+        AssertSelfTest(!ShouldActivateTextBlockSearchResult(
+            true, false, false),
+            "没有搜索结果时不接管 Enter")
+        AssertSelfTest(FormatFolderGroupHeader("下载", false) = "⋁ 下载"
+            && FormatFolderGroupHeader("下载", true) = "⋀ 下载",
+            "来源分栏标题使用展开与收起符号")
+        AssertSelfTest(FolderGroupCollapseKey(
+            "Workspace-A", "Source-A", "C:\One")
+            != FolderGroupCollapseKey(
+                "Workspace-B", "Source-A", "C:\One"),
+            "来源折叠状态按工作区隔离")
         AssertSelfTest(NormalizeEditedTextBlock(
             "`r`n正文`r`n`r`n") = "`n正文`n`n",
             "编辑文本块保留首尾空行")
@@ -457,6 +478,47 @@ RunWorkspaceSelfTests() {
     AssertSelfTest(ResolveFileWorkspaceId(
         "missing", workspaces, "text-a") = "files-a",
         "最近文件工作区失效时回退到首个文件工作区")
+    AssertSelfTest(MoveWorkspaceOrderItem(workspaces, 2, -1) = 1
+        && workspaces[1].Id = "text-a"
+        && workspaces[2].Id = "files-a",
+        "工作区上移保持对象及相对顺序")
+    AssertSelfTest(MoveWorkspaceOrderItem(workspaces, 1, -1) = 0
+        && MoveWorkspaceOrderItem(workspaces, workspaces.Length, 1) = 0,
+        "工作区排序拒绝越界移动")
+    AssertSelfTest(MoveWorkspaceOrderItem(workspaces, 1, 1) = 2
+        && workspaces[1].Id = "files-a"
+        && workspaces[2].Id = "text-a",
+        "工作区下移恢复原顺序")
+}
+
+RunCacheMaintenanceSelfTests() {
+    AssertSelfTest(CacheMaintenanceNameKind(
+        "request-00000000000000AA-00000001.ini", false) = "Transient",
+        "主扫描请求属于受管临时缓存")
+    AssertSelfTest(CacheMaintenanceNameKind(
+        "inactive-00000000000000AA-00000001.ready", true) = "Transient",
+        "非当前工作区结果目录属于受管临时缓存")
+    AssertSelfTest(CacheMaintenanceNameKind(
+        "preview-cache-v1", true) = "",
+        "AHK 维护器不越权删除原生预览缓存目录")
+    valid := Map("workspace-1234abcd.ini", true)
+    AssertSelfTest(!CacheMaintenanceShouldDelete(
+        "Transient", "request-x.ini", 899, 7, false, false, valid)
+        && CacheMaintenanceShouldDelete(
+            "Transient", "request-x.ini", 900, 7, false, false, valid),
+        "扫描临时缓存保留十五分钟安全窗口")
+    AssertSelfTest(!CacheMaintenanceShouldDelete(
+        "Transient", "request-x.ini", 999999, 7, true, true, valid),
+        "正在使用的扫描缓存永不清理")
+    AssertSelfTest(!CacheMaintenanceShouldDelete(
+        "Workspace", "workspace-1234abcd.ini", 999999, 7,
+        true, false, valid)
+        && CacheMaintenanceShouldDelete(
+            "Workspace", "workspace-deadbeef.ini", 999999, 7,
+            true, false, valid),
+        "只清理已删除工作区的孤立快照")
+    AssertSelfTest(FormatCacheByteCount(1536) = "1.5 KB",
+        "缓存容量使用易读单位")
 }
 
 RunFolderDropSelfTests() {
@@ -834,9 +896,25 @@ RunSourceManagementSelfTests() {
     AssertSelfTest(!IsObject(FindSourceGroupHeaderInRects(
         10, 10, descriptors, thumbnailRects)),
         "固定项标题不解析为来源管理目标")
+    pinnedHit := FindPinnedGroupHeaderInRects(
+        10, 10, descriptors, thumbnailRects)
+    AssertSelfTest(IsObject(pinnedHit)
+        && pinnedHit.GroupId = 1 && pinnedHit.Type = "Pinned",
+        "固定项标题解析为独立固定项菜单目标")
+    AssertSelfTest(!IsObject(FindPinnedGroupHeaderInRects(
+        20, 96, descriptors, thumbnailRects)),
+        "来源标题不误解析为固定项菜单目标")
     AssertSelfTest(!IsObject(FindSourceGroupHeaderInRects(
         10, 10, Map(), Map())),
         "空工作区占位不解析为来源管理目标")
+    missingPinnedPath := A_Temp "\PopDrop-missing-pinned-self-test"
+        . A_TickCount
+    partition := PartitionPinnedPathsByAvailability(
+        [A_ScriptFullPath, missingPinnedPath])
+    AssertSelfTest(partition.Remaining.Length = 1
+        && partition.Invalid.Length = 1
+        && PathsEqual(partition.Invalid[1], missingPinnedPath),
+        "固定项清理只筛选失效路径")
     offline := {
         Type: "Files", SourceId: "source-offline", Name: "离线",
         Path: A_Temp "\PopDrop-offline-source-self-test", Mode: "Files",

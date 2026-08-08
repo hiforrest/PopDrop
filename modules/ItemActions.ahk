@@ -121,8 +121,10 @@ InstallPanelHotkeys() {
     Hotkey("^f", FocusTextBlockSearch)
     Loop 9
         Hotkey("^" A_Index, SwitchWorkspaceByPosition.Bind(A_Index))
-    Hotkey("^Tab", CycleWorkspace.Bind(1))
-    Hotkey("^+Tab", CycleWorkspace.Bind(-1))
+    ; Force the low-level keyboard hook for Ctrl+Tab. Native Tab/Edit controls
+    ; must never receive the chord while the PopDrop panel owns foreground.
+    Hotkey("$^Tab", CycleWorkspace.Bind(1), "On T2")
+    Hotkey("$^+Tab", CycleWorkspace.Bind(-1), "On T2")
     HotIf(CanFocusTextBlockSearch)
     Hotkey("/", FocusTextBlockSearch)
     HotIf(IsTextBlockSearchActive)
@@ -148,9 +150,14 @@ InstallPanelHotkeys() {
 }
 
 IsPopDropPanelActive(*) {
-    global Panel, PanelVisible
-    return PanelVisible && IsObject(Panel)
-        && WinActive("ahk_id " Panel.Hwnd)
+    global Panel
+    if !IsObject(Panel) || !Panel.Hwnd
+        return false
+    ; PanelVisible is maintained by the AHK event layer and can briefly lag a
+    ; native show/activate transition. The foreground HWND is authoritative
+    ; for deciding whether Ctrl+Tab belongs to PopDrop.
+    return DllCall("user32\IsWindowVisible", "ptr", Panel.Hwnd, "int")
+        && DllCall("user32\GetForegroundWindow", "ptr") = Panel.Hwnd
 }
 
 SwitchWorkspaceByPosition(position, *) {
@@ -581,6 +588,55 @@ RemoveSelectionFromPinned(paths, *) {
         ShowPanelMsgBox("无法保存固定项：`n" err.Message,
             "移除固定项失败", "Iconx")
     }
+}
+
+PartitionPinnedPathsByAvailability(paths) {
+    partition := {Remaining: [], Invalid: []}
+    for path in paths {
+        if FileExist(path)
+            partition.Remaining.Push(path)
+        else
+            partition.Invalid.Push(path)
+    }
+    return partition
+}
+
+ClearInvalidPinnedItems(descriptor, *) {
+    global ActiveWorkspaceId, PinnedPaths
+    if !IsPinnedGroupDescriptor(descriptor)
+        return false
+    if !HasProp(descriptor, "WorkspaceId")
+        || StrLower(descriptor.WorkspaceId) != StrLower(ActiveWorkspaceId) {
+        SetUserStatus("当前工作区已经改变，未清理固定项")
+        return false
+    }
+
+    partition := PartitionPinnedPathsByAvailability(PinnedPaths)
+    removed := partition.Invalid.Length
+    if !removed {
+        SetUserStatus("当前固定项中没有失效项目")
+        return false
+    }
+
+    original := PinnedPaths.Clone()
+    PinnedPaths := partition.Remaining
+    try {
+        SavePinnedFiles()
+    } catch as err {
+        RestoreActivePinnedPaths(original)
+        ShowPanelMsgBox("无法保存固定项：`n" err.Message,
+            "清理失效固定项失败", "Iconx")
+        return false
+    }
+    try PopulatePanel()
+    catch as err {
+        ShowPanelMsgBox("失效固定项已清除，但界面刷新失败：`n"
+            . err.Message . "`n`n请点击刷新重试。",
+            "固定项已保存", "Icon!")
+        return true
+    }
+    SetUserStatus("已清除失效固定项：" removed " 项")
+    return true
 }
 
 PinDroppedFiles(guiObj, guiCtrlObj, fileArray, x, y) {

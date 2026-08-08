@@ -1,7 +1,7 @@
 ; List notifications, source management and selection context menus.
 
 FileViewNotify(wParam, lParam, msg, hwnd) {
-    global FileView, GroupFolderPaths, GroupDropTargets
+    global FileView
     ; NMHDR structure: hwndFrom, idFrom, code
     if !IsSet(FileView) || !IsObject(FileView)
         return
@@ -15,21 +15,104 @@ FileViewNotify(wParam, lParam, msg, hwnd) {
         return IsTextWorkspace()
             ? DrawTextBlockCard(lParam)
             : DrawPinnedFileLinkIcon(lParam)
-    ; LVN_GROUPHEADERCLICK = -150 (0xFFFFFF6A)
-    if code != -150
-        return
+}
 
-    ; NMLVGROUP: nmhdr (hwndFrom + idFrom + code), mask (4), iGroupId (4)
-    ; NMHDR size = A_PtrSize * 2 + 4
-    groupId := NumGet(lParam + A_PtrSize * 2 + 8, "int")
-    if GroupFolderPaths.Has(groupId) {
-        if GroupDropTargets.Has(groupId)
-            && GroupDropTargets[groupId].Type = "TextSource"
-            return
-        folderPath := GroupFolderPaths[groupId]
-        if DirExist(folderPath)
-            SetTimer(() => OpenFolderInFileManager(folderPath), -10)
+FolderGroupCollapseKey(workspaceId, sourceId, path) {
+    workspaceKey := StrLower(Trim(workspaceId))
+    sourceKey := StrLower(Trim(sourceId))
+    if sourceKey = "" && path != ""
+        sourceKey := PathKey(path)
+    return workspaceKey != "" && sourceKey != ""
+        ? workspaceKey "|" sourceKey : ""
+}
+
+IsFolderGroupCollapseRemembered(workspaceId, sourceId, path) {
+    global CollapsedFolderGroups
+    key := FolderGroupCollapseKey(workspaceId, sourceId, path)
+    return key != "" && CollapsedFolderGroups.Has(key)
+}
+
+RememberFolderGroupCollapse(descriptor, collapsed) {
+    global CollapsedFolderGroups
+    key := FolderGroupCollapseKey(
+        HasProp(descriptor, "WorkspaceId") ? descriptor.WorkspaceId : "",
+        HasProp(descriptor, "SourceId") ? descriptor.SourceId : "",
+        HasProp(descriptor, "Path") ? descriptor.Path : "")
+    if key = ""
+        return false
+    if collapsed
+        CollapsedFolderGroups[key] := true
+    else if CollapsedFolderGroups.Has(key)
+        CollapsedFolderGroups.Delete(key)
+    return true
+}
+
+FormatFolderGroupHeader(header, collapsed) {
+    return (collapsed ? "⋀ " : "⋁ ") header
+}
+
+IsListGroupCollapsed(hwnd, groupId) {
+    return (DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x105C, "ptr", groupId, "ptr", 0x1,
+        "uint") & 0x1) != 0 ; LVM_GETGROUPSTATE / LVGS_COLLAPSED
+}
+
+SetListGroupCollapsed(hwnd, groupId, collapsed) {
+    groupSize := A_PtrSize = 8 ? 152 : 96
+    stateMaskOffset := A_PtrSize = 8 ? 40 : 28
+    stateOffset := A_PtrSize = 8 ? 44 : 32
+    group := Buffer(groupSize, 0)
+    NumPut("uint", groupSize, group, 0)
+    NumPut("uint", 0x4, group, 4) ; LVGF_STATE
+    NumPut("uint", 0x1, group, stateMaskOffset) ; LVGS_COLLAPSED
+    NumPut("uint", collapsed ? 0x1 : 0, group, stateOffset)
+    return DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1093, "ptr", groupId, "ptr", group.Ptr,
+        "int") != -1 ; LVM_SETGROUPINFOW
+}
+
+ClearCollapsedGroupSelection(groupId) {
+    global FileView, ItemOpenContexts
+    changed := false
+    for row, context in ItemOpenContexts {
+        if !HasProp(context, "GroupId") || context.GroupId != groupId
+            continue
+        if IsListRowSelected(FileView.Hwnd, row) {
+            FileView.Modify(row, "-Select -Focus")
+            changed := true
+        }
     }
+    if changed
+        UpdateSelectionStatus()
+    return changed
+}
+
+ToggleFolderGroupCollapsed(groupId) {
+    global FileView, GroupDropTargets
+    if !IsObject(FileView) || !GroupDropTargets.Has(groupId)
+        return false
+    descriptor := GroupDropTargets[groupId]
+    if !IsSourceManagementDescriptor(descriptor)
+        return false
+    collapsed := !IsListGroupCollapsed(FileView.Hwnd, groupId)
+    if !SetListGroupCollapsed(FileView.Hwnd, groupId, collapsed)
+        return false
+    RememberFolderGroupCollapse(descriptor, collapsed)
+    CancelFilePointerGesture()
+    if collapsed {
+        ClearCollapsedGroupSelection(groupId)
+        PreviewHide("group-collapse", true)
+    }
+    header := HasProp(descriptor, "BaseHeader")
+        ? descriptor.BaseHeader : descriptor.Name
+    SetListGroupHeader(FileView.Hwnd, groupId,
+        FormatFolderGroupHeader(header, collapsed))
+    ; Files groups may currently include live transfer progress. Reapply it
+    ; after changing the prefix so neither state indicator nor progress is lost.
+    UpdateTransferGroupHeaders()
+    DllCall("user32\RedrawWindow", "ptr", FileView.Hwnd,
+        "ptr", 0, "ptr", 0, "uint", 0x0001 | 0x0080 | 0x0100, "int")
+    return true
 }
 
 DrawTextBlockCard(customDraw) {
@@ -334,27 +417,41 @@ FileViewContextMenu(list, row, isRightClick, x, y) {
     global ItemPaths
     CancelFilePointerGesture()
     PreviewSuppress("context-menu", false)
+    ; Resolve group headers before trusting the event's row. In icon view a
+    ; header point can also be reported as the nearby item, which must not turn
+    ; a title-bar right click into an item menu.
+    if isRightClick {
+        point := GuiClientPointToControlClient(
+            list.Gui.Hwnd, list.Hwnd, x, y)
+        if IsObject(point) {
+            descriptor := FindSourceGroupHeaderAtPoint(
+                list.Hwnd, point.X, point.Y)
+            if IsObject(descriptor) {
+                ContextMenuGestureIsAlternate(list.Hwnd, true)
+                ShowSourceGroupContextMenu(
+                    descriptor, list.Gui.Hwnd, x, y)
+                PreviewRecoverAfterInteraction()
+                return
+            }
+            descriptor := FindPinnedGroupHeaderAtPoint(
+                list.Hwnd, point.X, point.Y)
+            if IsObject(descriptor) {
+                ContextMenuGestureIsAlternate(list.Hwnd, true)
+                ShowPinnedGroupContextMenu(
+                    descriptor, list.Gui.Hwnd, x, y)
+                PreviewRecoverAfterInteraction()
+                return
+            }
+        }
+    }
     if !row && !isRightClick {
         row := list.GetNext(0, "F")
         if !row
             row := list.GetNext(0)
     }
     if !row || !ItemPaths.Has(row) {
-        if isRightClick {
-            ; Consume the captured Shift state, but do not apply the
-            ; PopDrop/System item-menu inversion to the independent source
-            ; management menu.
+        if isRightClick
             ContextMenuGestureIsAlternate(list.Hwnd, true)
-            point := GuiClientPointToControlClient(
-                list.Gui.Hwnd, list.Hwnd, x, y)
-            if IsObject(point) {
-                descriptor := FindSourceGroupHeaderAtPoint(
-                    list.Hwnd, point.X, point.Y)
-                if IsObject(descriptor)
-                    ShowSourceGroupContextMenu(
-                        descriptor, list.Gui.Hwnd, x, y)
-            }
-        }
         PreviewRecoverAfterInteraction()
         return
     }
@@ -397,6 +494,13 @@ IsSourceManagementDescriptor(descriptor) {
             || descriptor.Type = "TextSource")
 }
 
+IsPinnedGroupDescriptor(descriptor) {
+    return IsObject(descriptor)
+        && HasProp(descriptor, "Type")
+        && (descriptor.Type = "Pinned" || descriptor.Type = "TextPinned")
+        && HasProp(descriptor, "GroupId") && descriptor.GroupId > 0
+}
+
 CloneSourceManagementDescriptor(descriptor) {
     return {
         Type: descriptor.Type,
@@ -423,6 +527,17 @@ PointInListRect(x, y, rect) {
 FindSourceGroupHeaderInRects(x, y, descriptors, headerRects) {
     for groupId, descriptor in descriptors {
         if !IsSourceManagementDescriptor(descriptor)
+            continue
+        if headerRects.Has(groupId)
+            && PointInListRect(x, y, headerRects[groupId])
+            return CloneSourceManagementDescriptor(descriptor)
+    }
+    return 0
+}
+
+FindPinnedGroupHeaderInRects(x, y, descriptors, headerRects) {
+    for groupId, descriptor in descriptors {
+        if !IsPinnedGroupDescriptor(descriptor)
             continue
         if headerRects.Has(groupId)
             && PointInListRect(x, y, headerRects[groupId])
@@ -510,6 +625,28 @@ FindSourceGroupHeaderAtPoint(hwnd, x, y) {
             headerRects[candidateId] := rect
     }
     return FindSourceGroupHeaderInRects(
+        x, y, GroupDropTargets, headerRects)
+}
+
+FindPinnedGroupHeaderAtPoint(hwnd, x, y) {
+    global GroupDropTargets
+    groupId := HitTestListGroupHeader(hwnd, x, y)
+    if groupId {
+        if GroupDropTargets.Has(groupId)
+            && IsPinnedGroupDescriptor(GroupDropTargets[groupId])
+            return CloneSourceManagementDescriptor(
+                GroupDropTargets[groupId])
+        return 0
+    }
+    headerRects := Map()
+    for candidateId, descriptor in GroupDropTargets {
+        if !IsPinnedGroupDescriptor(descriptor)
+            continue
+        rect := GetListGroupHeaderRectRobust(hwnd, candidateId)
+        if IsObject(rect)
+            headerRects[candidateId] := rect
+    }
+    return FindPinnedGroupHeaderInRects(
         x, y, GroupDropTargets, headerRects)
 }
 
@@ -612,6 +749,30 @@ ShowSourceGroupContextMenu(
     try {
         CoordMode("Menu", "Screen")
         sourceMenu.Show(point.X, point.Y)
+    } finally {
+        EndAutoHidePause()
+        SourceMenuDispatchActive := false
+    }
+}
+
+ShowPinnedGroupContextMenu(pinnedDescriptor, ownerHwnd, x, y) {
+    global SourceMenuDispatchActive, PinnedPaths
+    if SourceMenuDispatchActive || !IsPinnedGroupDescriptor(pinnedDescriptor)
+        return
+    descriptor := CloneSourceManagementDescriptor(pinnedDescriptor)
+    pinnedMenu := Menu()
+    clearText := "清除全部失效项目"
+    pinnedMenu.Add(clearText,
+        ClearInvalidPinnedItems.Bind(descriptor))
+    if !PartitionPinnedPathsByAvailability(PinnedPaths).Invalid.Length
+        pinnedMenu.Disable(clearText)
+
+    point := MenuScreenPoint(ownerHwnd, x, y)
+    SourceMenuDispatchActive := true
+    BeginAutoHidePause()
+    try {
+        CoordMode("Menu", "Screen")
+        pinnedMenu.Show(point.X, point.Y)
     } finally {
         EndAutoHidePause()
         SourceMenuDispatchActive := false

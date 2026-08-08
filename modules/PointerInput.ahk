@@ -8,6 +8,7 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     global TextSourceReorderActive, TextSourceReorderPath
     global TextSourceReorderSourceId
     global FilePointerGesture, FilePointerGestureSerial
+    global FolderGroupHeaderGesture
     global OPEN_MODE_SINGLE
 
     isMainView := IsObject(FileView) && hwnd = FileView.Hwnd
@@ -19,6 +20,24 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
         return
     x := SignedMouseCoordinate(lParam & 0xFFFF)
     y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
+    ; ListView has no LVN_GROUPHEADERCLICK notification. Resolve the native
+    ; group-header hit before item hit-testing and consume the whole gesture,
+    ; otherwise icon view can treat the same point as an item/selection area.
+    CancelFolderGroupHeaderGesture()
+    if isMainView {
+        descriptor := FindSourceGroupHeaderAtPoint(hwnd, x, y)
+        if IsObject(descriptor) && HasProp(descriptor, "GroupId")
+            && descriptor.GroupId {
+            CancelFilePointerGesture()
+            FolderGroupHeaderGesture := {
+                Hwnd: hwnd,
+                GroupId: descriptor.GroupId
+            }
+            PreviewSuppress("group-header", false)
+            DllCall("user32\SetCapture", "ptr", hwnd, "ptr")
+            return 0
+        }
+    }
     row := HitTestListRow(hwnd, x, y)
     modifiers := GetPointerModifierMask()
     path := row && pathMap.Has(row) ? pathMap[row] : ""
@@ -220,6 +239,9 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
     global TextSourceReorderSourceId
     global DragPaths, DragItemContexts, DragStarted, StatusKind, ViewMode
 
+    if CompleteFolderGroupHeaderClick(hwnd, lParam)
+        return 0
+
     if !PinnedReorderActive && !TextSourceReorderActive {
         ProcessFilePointerUp(hwnd, lParam)
         DragPaths := []
@@ -289,6 +311,30 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
         SetBackgroundStatus(isSourceReorder
             ? "已保存文件夹内置顶顺序" : "已保存固定项顺序", 3000)
     }
+}
+
+CompleteFolderGroupHeaderClick(hwnd, lParam) {
+    global FolderGroupHeaderGesture
+    if !IsObject(FolderGroupHeaderGesture)
+        return false
+
+    gesture := FolderGroupHeaderGesture
+    FolderGroupHeaderGesture := 0
+    if DllCall("user32\GetCapture", "ptr") = gesture.Hwnd
+        DllCall("user32\ReleaseCapture")
+    ; End the temporary hover suppression before toggling. A collapse may then
+    ; intentionally hide the preview without this cleanup reopening it.
+    PreviewRecoverAfterInteraction()
+
+    if hwnd = gesture.Hwnd {
+        x := SignedMouseCoordinate(lParam & 0xFFFF)
+        y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
+        descriptor := FindSourceGroupHeaderAtPoint(hwnd, x, y)
+        if IsObject(descriptor) && HasProp(descriptor, "GroupId")
+            && descriptor.GroupId = gesture.GroupId
+            ToggleFolderGroupCollapsed(gesture.GroupId)
+    }
+    return true
 }
 
 ProcessFilePointerUp(hwnd, lParam) {
@@ -446,10 +492,27 @@ CancelFilePointerGesture(*) {
     DragPaths := []
     DragItemContexts := []
     DragStarted := false
+    CancelFolderGroupHeaderGesture()
+}
+
+CancelFolderGroupHeaderGesture(*) {
+    global FolderGroupHeaderGesture
+    if !IsObject(FolderGroupHeaderGesture)
+        return false
+    gesture := FolderGroupHeaderGesture
+    FolderGroupHeaderGesture := 0
+    if HasProp(gesture, "Hwnd")
+        && DllCall("user32\GetCapture", "ptr") = gesture.Hwnd
+        DllCall("user32\ReleaseCapture")
+    PreviewRecoverAfterInteraction()
+    return true
 }
 
 CancelFilePointerGestureForHwnd(hwnd) {
-    global FilePointerGesture
+    global FilePointerGesture, FolderGroupHeaderGesture
+    if IsObject(FolderGroupHeaderGesture)
+        && FolderGroupHeaderGesture.Hwnd = hwnd
+        CancelFolderGroupHeaderGesture()
     if IsObject(FilePointerGesture)
         && FilePointerGesture.Active
         && FilePointerGesture.Hwnd = hwnd
@@ -515,6 +578,7 @@ FileViewCaptureChanged(wParam, lParam, msg, hwnd) {
 }
 
 FileViewKillFocus(wParam, lParam, msg, hwnd) {
+    ResetTextBlockImeCompositionForFocusLoss(hwnd)
     if IsTrackedFileViewHwnd(hwnd) {
         CancelFilePointerGestureForHwnd(hwnd)
         PreviewHide("focus", true)

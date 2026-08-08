@@ -147,7 +147,11 @@ PopulatePanel() {
         else
             suffix := " (" files.Length ")"
         groupHeader := folder.Name suffix "  —  " folder.Path
-        InsertListGroup(groupId, groupHeader)
+        groupCollapsed := IsFolderGroupCollapseRemembered(
+            ActiveWorkspaceId, folder.SourceId, folder.Path)
+        InsertListGroup(groupId,
+            FormatFolderGroupHeader(groupHeader, groupCollapsed),
+            groupCollapsed)
         GroupFolderPaths[groupId] := folder.Path
         GroupDropTargets[groupId] := {
             Type: IsTextWorkspace() ? "TextSource" : folder.Mode,
@@ -293,14 +297,19 @@ RestoreStableScanViewState(restore) {
     }
 }
 
-InsertListGroup(groupId, header) {
+InsertListGroup(groupId, header, collapsed := false) {
     global FileView
     groupSize := A_PtrSize = 8 ? 152 : 96
     group := Buffer(groupSize, 0)
+    stateMaskOffset := A_PtrSize = 8 ? 40 : 28
+    stateOffset := A_PtrSize = 8 ? 44 : 32
     NumPut("uint", groupSize, group, 0)
-    NumPut("uint", 0x11, group, 4) ; LVGF_HEADER | LVGF_GROUPID
+    NumPut("uint", 0x15, group, 4)
+        ; LVGF_HEADER | LVGF_STATE | LVGF_GROUPID
     NumPut("ptr", StrPtr(header), group, 8)
     NumPut("int", groupId, group, A_PtrSize = 8 ? 36 : 24)
+    NumPut("uint", 0x1, group, stateMaskOffset) ; LVGS_COLLAPSED
+    NumPut("uint", collapsed ? 0x1 : 0, group, stateOffset)
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x1091,
         "ptr", -1, "ptr", group.Ptr, "ptr") ; LVM_INSERTGROUPW
 }

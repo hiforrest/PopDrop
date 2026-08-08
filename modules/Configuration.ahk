@@ -303,6 +303,7 @@ NormalizeConfigDocument(tempPath) {
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
     EnsureTextBlockConfigDefaults(doc)
+    EnsureCacheMaintenanceConfigDefaults(doc)
     EnsurePreviewConfigDefaults(doc)
     EnsureQuickPreviewConfigDefaults(doc)
     EnsureWorkspaceTypeDefaults(doc, originalVersion)
@@ -318,6 +319,7 @@ ConfigLayoutNeedsNormalization() {
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
     EnsureTextBlockConfigDefaults(doc)
+    EnsureCacheMaintenanceConfigDefaults(doc)
     EnsurePreviewConfigDefaults(doc)
     EnsureQuickPreviewConfigDefaults(doc)
     EnsureWorkspaceTypeDefaults(
@@ -491,6 +493,16 @@ EnsureTextBlockConfigDefaults(doc) {
     }
 }
 
+EnsureCacheMaintenanceConfigDefaults(doc) {
+    defaults := [
+        {Key: "CacheCleanupEnabled", Value: "1"},
+        {Key: "CacheRetentionDays", Value: "7"}
+    ]
+    for entry in defaults
+        if !IsObject(GetDocumentEntry(doc, "General", entry.Key))
+            doc.SetValue("General", entry.Key, entry.Value, 1)
+}
+
 EnsurePreviewConfigDefaults(doc) {
     doc.EnsureCommentBlock("Preview", "; <PopDrop:PreviewHelp>", [
         "; 文件内容预览。高级限制仅建议在排查兼容性问题时修改。",
@@ -591,6 +603,7 @@ LoadSettings(*) {
     global LastValidWorkspaceId
     global WindowWidth, WindowHeight, RecentFileCount
     global ThumbnailPolicy, CachePathSetting, CacheDir, CacheFilePath, CacheWritable
+    global CacheCleanupEnabled, CacheRetentionDays
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
     global CurrentScanComplete, CurrentScanRevision
     global CurrentHiddenBySource
@@ -743,6 +756,13 @@ LoadSettings(*) {
         ConfigPath, "General", "ThumbnailPolicy", "Full"))) = "full"
         ? "Full" : "Fast"
     CachePathSetting := Trim(IniRead(ConfigPath, "General", "CachePath", ""))
+    CacheCleanupEnabled := IniRead(
+        ConfigPath, "General", "CacheCleanupEnabled", "1") != "0"
+    try CacheRetentionDays := Integer(IniRead(
+        ConfigPath, "General", "CacheRetentionDays", "7"))
+    catch
+        CacheRetentionDays := 7
+    CacheRetentionDays := Max(1, Min(CacheRetentionDays, 90))
     rawConsistencyMinutes := IniRead(
         ConfigPath, "General", "ConsistencyCheckMinutes", "")
     if rawConsistencyMinutes = "" {
@@ -827,6 +847,8 @@ LoadSettings(*) {
     CacheDir := ResolveCacheDirectory(CachePathSetting)
     CacheWritable := EnsureCacheDirectory(CacheDir)
     InitializeRuntimeIndex()
+    RuntimeIndexPruneWorkspaceSnapshots(Workspaces)
+    InitializeCacheMaintenance()
     newFingerprint := ComputeConfigFingerprint(LastValidFolderSettings)
     CacheFilePath := CacheDir "\workspace-"
         . HashString(StrLower(ActiveWorkspaceId)) ".ini"

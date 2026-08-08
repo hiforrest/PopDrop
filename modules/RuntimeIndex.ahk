@@ -40,6 +40,8 @@ InitializeRuntimeIndex(allowRecovery := true) {
         opened := true
         RuntimeIndexExec("PRAGMA journal_mode=WAL;")
         RuntimeIndexExec("PRAGMA synchronous=NORMAL;")
+        RuntimeIndexExec("PRAGMA wal_autocheckpoint=256;")
+        RuntimeIndexExec("PRAGMA journal_size_limit=1048576;")
         RuntimeIndexExec("PRAGMA foreign_keys=ON;")
         RuntimeIndexExec("CREATE TABLE IF NOT EXISTS meta ("
             . "key TEXT PRIMARY KEY, value TEXT NOT NULL);")
@@ -298,6 +300,62 @@ RuntimeIndexLoadSnapshot(workspaceId, fingerprint) {
     }
 }
 
+RuntimeIndexPruneWorkspaceSnapshots(workspaces) {
+    global RuntimeIndexAvailable
+    if !RuntimeIndexAvailable
+        return false
+    valid := Map()
+    for workspace in workspaces
+        valid[StrLower(workspace.Id)] := true
+    statement := 0
+    stale := []
+    try {
+        statement := RuntimeIndexPrepare(
+            "SELECT workspace_id FROM workspace_snapshot;")
+        while DllCall("winsqlite3\sqlite3_step", "ptr", statement,
+            "cdecl int") = 100 {
+            workspaceId := RuntimeIndexColumnText(statement, 0)
+            if !valid.Has(StrLower(workspaceId))
+                stale.Push(workspaceId)
+        }
+    } catch {
+        return false
+    } finally {
+        if statement
+            DllCall("winsqlite3\sqlite3_finalize", "ptr", statement,
+                "cdecl int")
+    }
+    if !stale.Length
+        return true
+    statements := []
+    try {
+        RuntimeIndexExec("BEGIN IMMEDIATE;")
+        for workspaceId in stale {
+            for tableName in ["item_snapshot", "source_snapshot",
+                "recent_snapshot", "watch_state", "workspace_snapshot"] {
+                deletion := RuntimeIndexPrepare("DELETE FROM " tableName
+                    . " WHERE workspace_id=?;")
+                statements.Push(deletion)
+                RuntimeIndexBindText(deletion, 1, workspaceId)
+                RuntimeIndexStepDone(deletion)
+                DllCall("winsqlite3\sqlite3_finalize", "ptr", deletion,
+                    "cdecl int")
+                statements.Pop()
+            }
+        }
+        RuntimeIndexExec("COMMIT;")
+        return true
+    } catch {
+        try RuntimeIndexExec("ROLLBACK;")
+        return false
+    } finally {
+        for pending in statements
+            if pending
+                DllCall("winsqlite3\sqlite3_finalize", "ptr", pending,
+                    "cdecl int")
+    }
+}
+
 RecoverRuntimeIndex() {
     global RuntimeIndexPath
     path := RuntimeIndexPath
@@ -323,7 +381,7 @@ CloseRuntimeIndex() {
     RuntimeIndexAvailable := false
     if db {
         try DllCall("winsqlite3\sqlite3_exec", "ptr", db,
-            "astr", "PRAGMA wal_checkpoint(PASSIVE);", "ptr", 0,
+            "astr", "PRAGMA wal_checkpoint(TRUNCATE);", "ptr", 0,
             "ptr", 0, "ptr", 0, "cdecl int")
         try {
             rc := DllCall("winsqlite3\sqlite3_close_v2", "ptr", db,

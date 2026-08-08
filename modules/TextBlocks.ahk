@@ -1030,6 +1030,7 @@ TextBlockSearchChanged(control, *) {
 ClearTextBlockSearch(refresh := true, *) {
     global TextBlockSearchEdit, TextBlockSearchQuery
     global TextBlockSelectFirstPending
+    ResetTextBlockImeComposition()
     if TextBlockSearchQuery = ""
         return false
     TextBlockSearchQuery := ""
@@ -1084,10 +1085,17 @@ SelectDefaultTextBlockSearchResult(forceFirst := false, *) {
 
 IsTextBlockSearchResultReady(*) {
     global FileView, ItemPaths
-    if !IsTextBlockSearchActive()
-        return false
+    searchActive := IsTextBlockSearchActive()
     row := IsObject(FileView) ? FileView.GetNext(0) : 0
-    return row && ItemPaths.Has(row)
+    resultReady := row && ItemPaths.Has(row)
+    imeComposing := searchActive && IsTextBlockSearchImeComposing()
+    return ShouldActivateTextBlockSearchResult(
+        searchActive, resultReady, imeComposing)
+}
+
+ShouldActivateTextBlockSearchResult(searchActive, resultReady,
+    imeComposing) {
+    return searchActive && resultReady && !imeComposing
 }
 
 ActivateTextBlockSearchResult(*) {
@@ -1154,9 +1162,60 @@ TextBlockCharInput(wParam, lParam, msg, hwnd) {
 
 TextBlockImeStart(wParam, lParam, msg, hwnd) {
     global FileView, TextBlockSearchEdit, PanelVisible
+    global TextBlockImeComposing
     if PanelVisible && IsTextWorkspace() && IsObject(FileView)
-        && hwnd = FileView.Hwnd && IsObject(TextBlockSearchEdit)
-        TextBlockSearchEdit.Focus()
+        && IsObject(TextBlockSearchEdit)
+        && (hwnd = FileView.Hwnd || hwnd = TextBlockSearchEdit.Hwnd) {
+        TextBlockImeComposing := true
+        if hwnd = FileView.Hwnd
+            TextBlockSearchEdit.Focus()
+    }
+}
+
+TextBlockImeEnd(wParam, lParam, msg, hwnd) {
+    global FileView, TextBlockSearchEdit, TextBlockImeComposing
+    if (IsObject(TextBlockSearchEdit) && hwnd = TextBlockSearchEdit.Hwnd)
+        || (IsObject(FileView) && hwnd = FileView.Hwnd)
+        TextBlockImeComposing := false
+}
+
+ResetTextBlockImeComposition(*) {
+    global TextBlockImeComposing
+    TextBlockImeComposing := false
+}
+
+ResetTextBlockImeCompositionForFocusLoss(hwnd) {
+    global TextBlockSearchEdit
+    if IsObject(TextBlockSearchEdit) && hwnd = TextBlockSearchEdit.Hwnd
+        ResetTextBlockImeComposition()
+}
+
+IsTextBlockSearchImeComposing(*) {
+    global TextBlockSearchEdit, TextBlockImeComposing
+    if !IsTextBlockSearchActive() || !IsObject(TextBlockSearchEdit)
+        return false
+
+    ; Standard Win32 Edit controls expose the live composition through IMM32,
+    ; including modern IMEs using the Windows compatibility bridge.  Message
+    ; state remains a fallback for providers which do not expose composition
+    ; bytes through that bridge.
+    context := DllCall("imm32\ImmGetContext",
+        "ptr", TextBlockSearchEdit.Hwnd, "ptr")
+    if !context
+        return TextBlockImeComposing
+    try {
+        compositionBytes := DllCall("imm32\ImmGetCompositionStringW",
+            "ptr", context, "uint", 0x0008,
+            "ptr", 0, "uint", 0, "int") ; GCS_COMPSTR
+        readingBytes := DllCall("imm32\ImmGetCompositionStringW",
+            "ptr", context, "uint", 0x0001,
+            "ptr", 0, "uint", 0, "int") ; GCS_COMPREADSTR
+        return compositionBytes > 0 || readingBytes > 0
+            || TextBlockImeComposing
+    } finally {
+        DllCall("imm32\ImmReleaseContext",
+            "ptr", TextBlockSearchEdit.Hwnd, "ptr", context, "int")
+    }
 }
 
 JoinTextBlocks(paths) {

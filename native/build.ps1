@@ -6,8 +6,8 @@ $previewSource = Join-Path $PSScriptRoot "PopDropPreview\PopDropPreview.cpp"
 $outRoot = Join-Path $PSScriptRoot "bin"
 
 $transferText = Get-Content -LiteralPath $source -Raw
-if ($transferText -notmatch 'kHelperVersion\[\]\s*=\s*L"1\.1\.0"') {
-    throw "PopDropTransfer source version is not 1.1.0."
+if ($transferText -notmatch 'kHelperVersion\[\]\s*=\s*L"1\.1\.2"') {
+    throw "PopDropTransfer source version is not 1.1.2."
 }
 
 function Build-Architecture([string]$Architecture, [string]$HostArchitecture) {

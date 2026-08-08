@@ -151,8 +151,9 @@ CreatePanelFileView(visible := true) {
     view.OnEvent("DoubleClick", OpenFileViewItem)
     view.OnEvent("ContextMenu", FileViewContextMenu)
     view.OnEvent("ItemSelect", FileViewItemSelect)
-    ; LVS_EX_DOUBLEBUFFER | LVS_EX_GROUPHEADERCLICK reduces flicker and
-    ; enables clicking group headers to open folders.
+    ; Preserve the existing buffered/transparent ListView rendering. Group
+    ; header clicks are handled by PointerInput because common controls do not
+    ; expose the previously assumed LVN_GROUPHEADERCLICK notification.
     DllCall("user32\SendMessageW", "ptr", view.Hwnd, "uint", 0x1036,
         "ptr", 0x410000, "ptr", 0x410000, "ptr")
     ; The first view exists before InitDropTarget. Lazy hot views are children

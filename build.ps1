@@ -104,12 +104,12 @@ Write-OK "#Requires check passed: $firstLine"
 # 4. Check Ahk2Exe directives
 Write-Step "Checking Ahk2Exe directives"
 $ahkContent = Get-Content -LiteralPath $AhkScriptPath -Raw
-if ($ahkContent -notmatch ';@Ahk2Exe-SetVersion\s+1\.1\.0\.0'
-    -or $ahkContent -notmatch 'APP_VERSION\s*:=\s*"1\.1\.0"') {
-    Write-Err "Source version is not PopDrop v1.1.0"
+if ($ahkContent -notmatch ';@Ahk2Exe-SetVersion\s+1\.1\.2\.0'
+    -or $ahkContent -notmatch 'APP_VERSION\s*:=\s*"1\.1\.2"') {
+    Write-Err "Source version is not PopDrop v1.1.2"
     exit 15
 }
-Write-OK "Source version check passed: PopDrop v1.1.0"
+Write-OK "Source version check passed: PopDrop v1.1.2"
 if ($ahkContent -notmatch ';@Ahk2Exe-SetMainIcon') {
     Write-Warn "No ;@Ahk2Exe-SetMainIcon directive found"
 }

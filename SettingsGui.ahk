@@ -265,6 +265,7 @@ LoadSettingsIntoDraft() {
     global PreviewDocumentEnabled, PreviewPdfEnabled
     global PreviewShowFileInfo
     global ContentUpdateMode
+    global CacheCleanupEnabled, CacheRetentionDays
     global UiScaleMode, ThumbnailSize, ThumbnailHorizontalGap
     global ThumbnailVerticalGap, ThumbnailTextLines
     global WindowWidth, WindowHeight
@@ -338,6 +339,8 @@ LoadSettingsIntoDraft() {
             SeerIntegrationEnabled: SeerIntegrationEnabled,
             QuickLookPath: QuickLookPath,
             ContentUpdateMode: ContentUpdateMode,
+            CacheCleanupEnabled: CacheCleanupEnabled,
+            CacheRetentionDays: CacheRetentionDays,
             UiScaleMode: UiScaleMode,
             WindowWidth: WindowWidth,
             WindowHeight: WindowHeight,
@@ -906,12 +909,19 @@ OpenWorkspaceManager(c, *) {
     copy := AddUiButton(child, "x+7 yp w112", "复制当前工作区")
     rename := AddUiButton(child, "x+7 yp w72", "重命名")
     remove := AddUiButton(child, "x+7 yp w72", "删除")
+    up := AddUiButton(child, "x+7 yp w48", "上移")
+    down := AddUiButton(child, "x+7 yp w48", "下移")
     close := AddUiButton(child, "x500 yp w70 Default", "关闭")
-    refresh := (*) => RefreshWorkspaceManagerList(c, list)
-    add.OnEvent("Click", CreateWorkspaceFromManager.Bind(c, list))
-    copy.OnEvent("Click", CopyWorkspaceFromManager.Bind(c, list))
-    rename.OnEvent("Click", RenameWorkspaceFromManager.Bind(c, list))
-    remove.OnEvent("Click", DeleteWorkspaceFromManager.Bind(c, list))
+    manager := {List: list, Up: up, Down: down}
+    refresh := (*) => RefreshWorkspaceManagerList(c, manager)
+    add.OnEvent("Click", CreateWorkspaceFromManager.Bind(c, manager))
+    copy.OnEvent("Click", CopyWorkspaceFromManager.Bind(c, manager))
+    rename.OnEvent("Click", RenameWorkspaceFromManager.Bind(c, manager))
+    remove.OnEvent("Click", DeleteWorkspaceFromManager.Bind(c, manager))
+    up.OnEvent("Click", MoveWorkspaceFromManager.Bind(c, manager, -1))
+    down.OnEvent("Click", MoveWorkspaceFromManager.Bind(c, manager, 1))
+    list.OnEvent("ItemSelect",
+        UpdateWorkspaceManagerMoveButtons.Bind(c, manager))
     close.OnEvent("Click", CloseSettingsChild.Bind(c, child))
     child.OnEvent("Close", CloseSettingsChild.Bind(c, child))
     child.OnEvent("Escape", CloseSettingsChild.Bind(c, child))
@@ -920,8 +930,18 @@ OpenWorkspaceManager(c, *) {
     child.Show("w598 h346")
 }
 
-RefreshWorkspaceManagerList(c, list) {
+RefreshWorkspaceManagerList(c, manager, preferredWorkspaceId := "") {
     global WORKSPACE_TYPE_TEXT
+    list := manager.List
+    if preferredWorkspaceId = "" {
+        previousRow := list.GetNext(0, "F")
+        if !previousRow
+            previousRow := list.GetNext()
+        if previousRow && previousRow <= c.Draft.Workspaces.Length
+            preferredWorkspaceId := c.Draft.Workspaces[previousRow].Id
+    }
+    if preferredWorkspaceId = ""
+        preferredWorkspaceId := c.Draft.CurrentWorkspaceId
     list.Delete()
     selected := 0
     for index, workspace in c.Draft.Workspaces {
@@ -932,11 +952,56 @@ RefreshWorkspaceManagerList(c, list) {
                 ? "文本块" : "文件",
             workspace.Sources.Length,
             current ? "当前工作区" : "")
-        if current
+        if StrLower(workspace.Id) = StrLower(preferredWorkspaceId)
             selected := row
     }
     if selected
         list.Modify(selected, "Select Focus Vis")
+    UpdateWorkspaceManagerMoveButtons(c, manager)
+}
+
+SelectedWorkspaceManagerRow(c, manager) {
+    row := manager.List.GetNext(0, "F")
+    if !row
+        row := manager.List.GetNext()
+    return row && row <= c.Draft.Workspaces.Length ? row : 0
+}
+
+UpdateWorkspaceManagerMoveButtons(c, manager, *) {
+    row := SelectedWorkspaceManagerRow(c, manager)
+    manager.Up.Enabled := row > 1
+    manager.Down.Enabled := row > 0
+        && row < c.Draft.Workspaces.Length
+}
+
+MoveWorkspaceOrderItem(workspaces, index, offset) {
+    target := index + offset
+    if index < 1 || index > workspaces.Length
+        || target < 1 || target > workspaces.Length
+        return 0
+    workspace := workspaces.RemoveAt(index)
+    workspaces.InsertAt(target, workspace)
+    return target
+}
+
+MoveWorkspaceFromManager(c, manager, offset, *) {
+    row := SelectedWorkspaceManagerRow(c, manager)
+    if !row
+        return
+    selectedId := c.Draft.Workspaces[row].Id
+    originalOrder := c.Draft.Workspaces.Clone()
+    if !MoveWorkspaceOrderItem(c.Draft.Workspaces, row, offset) {
+        UpdateWorkspaceManagerMoveButtons(c, manager)
+        return
+    }
+    if SaveSettingsDraftCore(c, false) {
+        ReloadSettingsDraft(c)
+        RefreshWorkspaceManagerList(c, manager, selectedId)
+        SetUserStatus("工作区顺序已更新")
+    } else {
+        c.Draft.Workspaces := originalOrder
+        RefreshWorkspaceManagerList(c, manager, selectedId)
+    }
 }
 
 ValidateWorkspaceNameForDraft(c, name, ignoredId := "") {
@@ -969,7 +1034,7 @@ PromptWorkspaceName(c, title, initial := "", ignoredId := "") {
     return name
 }
 
-CreateWorkspaceFromManager(c, list, *) {
+CreateWorkspaceFromManager(c, manager, *) {
     global WORKSPACE_TYPE_FILES, WORKSPACE_TYPE_TEXT
     name := PromptWorkspaceName(c, "新建工作区")
     if name = ""
@@ -1009,11 +1074,11 @@ CreateWorkspaceFromManager(c, list, *) {
     c.Draft.Sources := workspace.Sources
     if SaveSettingsDraftCore(c, false) {
         ReloadSettingsDraft(c)
-        RefreshWorkspaceManagerList(c, list)
+        RefreshWorkspaceManagerList(c, manager, workspace.Id)
     }
 }
 
-CopyWorkspaceFromManager(c, list, *) {
+CopyWorkspaceFromManager(c, manager, *) {
     current := FindDraftWorkspace(c)
     if !IsObject(current)
         return
@@ -1038,15 +1103,13 @@ CopyWorkspaceFromManager(c, list, *) {
     c.Draft.Sources := workspace.Sources
     if SaveSettingsDraftCore(c, false) {
         ReloadSettingsDraft(c)
-        RefreshWorkspaceManagerList(c, list)
+        RefreshWorkspaceManagerList(c, manager, workspace.Id)
     }
 }
 
-RenameWorkspaceFromManager(c, list, *) {
-    row := list.GetNext(0, "F")
+RenameWorkspaceFromManager(c, manager, *) {
+    row := SelectedWorkspaceManagerRow(c, manager)
     if !row
-        row := list.GetNext()
-    if !row || row > c.Draft.Workspaces.Length
         return
     target := c.Draft.Workspaces[row]
     name := PromptWorkspaceName(c, "重命名工作区",
@@ -1056,20 +1119,18 @@ RenameWorkspaceFromManager(c, list, *) {
     target.Name := name
     if SaveSettingsDraftCore(c, false) {
         ReloadSettingsDraft(c)
-        RefreshWorkspaceManagerList(c, list)
+        RefreshWorkspaceManagerList(c, manager, target.Id)
     }
 }
 
-DeleteWorkspaceFromManager(c, list, *) {
+DeleteWorkspaceFromManager(c, manager, *) {
     if c.Draft.Workspaces.Length <= 1 {
         SettingsMessage(c, "至少需要保留一个工作区，不能删除最后一个工作区。",
             "无法删除", "Icon!")
         return
     }
-    row := list.GetNext(0, "F")
+    row := SelectedWorkspaceManagerRow(c, manager)
     if !row
-        row := list.GetNext()
-    if !row || row > c.Draft.Workspaces.Length
         return
     target := c.Draft.Workspaces[row]
     current := StrLower(target.Id)
@@ -1093,9 +1154,13 @@ DeleteWorkspaceFromManager(c, list, *) {
         c.Draft.CurrentWorkspaceId := nextWorkspace.Id
         c.Draft.Sources := nextWorkspace.Sources
     }
+    preferredId := current ? nextWorkspace.Id
+        : (row <= c.Draft.Workspaces.Length
+            ? c.Draft.Workspaces[row].Id
+            : c.Draft.Workspaces[c.Draft.Workspaces.Length].Id)
     if SaveSettingsDraftCore(c, false) {
         ReloadSettingsDraft(c)
-        RefreshWorkspaceManagerList(c, list)
+        RefreshWorkspaceManagerList(c, manager, preferredId)
     }
 }
 
@@ -1414,16 +1479,18 @@ BuildDisplaySettingsPage(c, tabs) {
     c.PreviewEnabled := g.AddCheckBox("x220 y470", "文件预览")
     c.PreviewDocumentEnabled := g.AddCheckBox("x320 yp", "文档预览")
     c.PreviewPdfEnabled := g.AddCheckBox("x420 yp", "PDF 预览")
-    c.PreviewShowFileInfo := g.AddCheckBox("x560 y493", "显示文件名、大小和修改时间")
+    c.PreviewShowFileInfo := g.AddCheckBox("x755 y493", "显示文件名、大小和修改时间")
     g.AddText("x535 y473 w76", "预览位置：")
     c.PreviewSide := AddUiDropDownList(g, "x615 y469 w120",
         ["自动", "右侧", "左侧"])
     c.PreviewCacheEnabled := g.AddCheckBox("x755 y470",
         "后台生成静态快照")
-    g.AddText("x220 y507 w100", "PDFium 组件：")
+    ; Keep the secondary preview integrations clear of the file-info option.
+    ; Both rows move together so their established spacing remains unchanged.
+    g.AddText("x220 y523 w100", "PDFium 组件：")
     c.PdfiumStatus := g.AddText("x320 yp w440 c666666", "")
     c.PdfiumInstall := AddUiButton(g, "x820 yp-5 w160", "下载组件")
-    g.AddText("x220 y547 w120", "空格键快速预览：")
+    g.AddText("x220 y563 w120", "空格键快速预览：")
     c.QuickPreviewProvider := AddUiDropDownList(g, "x345 yp-4 w130",
         ["不启用", "使用 Seer", "使用 QuickLook"])
     c.QuickLookPath := AddUiEdit(g, "x490 yp w390")
@@ -1552,10 +1619,29 @@ BuildContentUpdateSettingsPage(c, tabs) {
         "保障内容正确，仅限极速模式异常时使用")
     c.ContentUpdateHint := g.AddText("x224 y278 w744 h36 c666666",
         "当前设置会在保存后立即应用。")
+    g.AddGroupBox("x200 y350 w818 h205", "缓存管理 · 应用于所有工作区")
+    c.CacheCleanupEnabled := g.AddCheckBox("x224 y382",
+        "自动管理缓存（推荐；启动时及每小时整理）")
+    g.AddText("x590 yp+3 w86", "保留期限：")
+    c.CacheRetentionDays := AddUiEdit(g, "x675 yp-4 w58 Number")
+    g.AddText("x742 yp+4 w90 c666666", "天（1–90）")
+    c.CacheCleanNow := AddUiButton(g, "x224 y425 w106", "立即整理")
+    c.CacheOpenFolder := AddUiButton(g, "x+8 yp w120", "打开缓存目录")
+    c.CacheMaintenanceStatus := g.AddText(
+        "x470 yp+5 w515 h22 c555555", "")
+    c.CacheMaintenanceDetail := g.AddText(
+        "x224 y468 w760 h60 c666666", "")
     c.ContentUpdateFast.OnEvent(
         "Click", ContentUpdateControlChanged.Bind(c, "Fast"))
     c.ContentUpdateAccuracy.OnEvent(
         "Click", ContentUpdateControlChanged.Bind(c, "Accuracy"))
+    c.CacheCleanupEnabled.OnEvent(
+        "Click", ContentUpdateControlChanged.Bind(c, ""))
+    c.CacheRetentionDays.OnEvent(
+        "Change", ContentUpdateControlChanged.Bind(c, ""))
+    c.CacheCleanNow.OnEvent("Click", RunCacheMaintenanceFromSettings.Bind(c))
+    c.CacheOpenFolder.OnEvent(
+        "Click", OpenCacheDirectoryFromSettings.Bind(c))
 }
 
 ContentUpdateControlChanged(c, selectedMode := "", *) {
@@ -1570,10 +1656,14 @@ ContentUpdateControlChanged(c, selectedMode := "", *) {
         c.ContentUpdateFast.Value := false
         c.Draft.General.ContentUpdateMode := CONTENT_UPDATE_ACCURACY
     } else {
-        c.ContentUpdateFast.Value := true
-        c.ContentUpdateAccuracy.Value := false
-        c.Draft.General.ContentUpdateMode := CONTENT_UPDATE_FAST
+        if selectedMode = "Fast" {
+            c.ContentUpdateFast.Value := true
+            c.ContentUpdateAccuracy.Value := false
+            c.Draft.General.ContentUpdateMode := CONTENT_UPDATE_FAST
+        }
     }
+    c.Draft.General.CacheCleanupEnabled := c.CacheCleanupEnabled.Value != 0
+    c.Draft.General.CacheRetentionDays := Trim(c.CacheRetentionDays.Value)
 }
 
 LoadContentUpdateControls(c) {
@@ -1583,7 +1673,49 @@ LoadContentUpdateControls(c) {
         mode := c.Draft.General.ContentUpdateMode
         c.ContentUpdateFast.Value := mode != CONTENT_UPDATE_ACCURACY
         c.ContentUpdateAccuracy.Value := mode = CONTENT_UPDATE_ACCURACY
+        c.CacheCleanupEnabled.Value :=
+            c.Draft.General.CacheCleanupEnabled ? 1 : 0
+        c.CacheRetentionDays.Value := c.Draft.General.CacheRetentionDays
+        RefreshCacheMaintenanceStatus(c)
     } finally c.Loading := false
+}
+
+RefreshCacheMaintenanceStatus(c) {
+    global CacheDir, CacheMaintenanceLastResult
+    statistics := CacheDirectoryStatistics(CacheDir)
+    c.CacheMaintenanceStatus.Text := "当前占用 "
+        . FormatCacheByteCount(statistics.Bytes)
+        . "，共 " statistics.Items " 个文件"
+    result := CacheMaintenanceLastResult
+    if IsObject(result) {
+        detail := "最近整理：" FormatTime(result.RanAt, "yyyy-MM-dd HH:mm")
+            . "；已移除 " result.RemovedItems " 项（"
+            . FormatCacheByteCount(result.RemovedBytes) . "）"
+        if result.FailedItems
+            detail .= "；" result.FailedItems " 项暂时占用，稍后重试"
+    } else
+        detail := "自动管理当前未运行；保存设置后会按所选策略执行。"
+    c.CacheMaintenanceDetail.Text := detail "`n缓存目录：" CacheDir
+}
+
+RunCacheMaintenanceFromSettings(c, *) {
+    result := RunCacheMaintenance(true)
+    RefreshCacheMaintenanceStatus(c)
+    message := "缓存整理完成：移除 " result.RemovedItems " 项（"
+        . FormatCacheByteCount(result.RemovedBytes) . "）。"
+    if result.FailedItems
+        message .= "`n`n另有 " result.FailedItems
+            . " 项正在使用或暂时无法删除，程序会在下次周期继续处理。"
+    SettingsMessage(c, message, "缓存整理", "Iconi")
+}
+
+OpenCacheDirectoryFromSettings(c, *) {
+    global CacheDir
+    if CacheDir = "" || !EnsureCacheDirectory(CacheDir) {
+        SettingsMessage(c, "缓存目录当前不可用。", "缓存目录", "Icon!")
+        return
+    }
+    OpenFolderInFileManager(CacheDir)
 }
 
 LoadGeneralControls(c) {
@@ -3603,6 +3735,7 @@ SettingsDraftSignature(draft) {
         g.ThumbnailVerticalGap "", g.ThumbnailTextLines "",
         g.TextBlockCardWidth "", g.TextBlockCardHeight "",
         g.ContentUpdateMode,
+        g.CacheCleanupEnabled ? "1" : "0", g.CacheRetentionDays "",
         g.ShowRecentSidebar ? "1" : "0",
         g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode,
         ParseFileManagerProvider(g.FileManagerProvider),
@@ -3792,6 +3925,8 @@ ValidateSettingsDraft(c) {
         errors.Push("窗口高度必须是 380–2000 的整数。")
     if !ValueInArray(d.General.ThumbnailPolicy, ["Fast", "Full"])
         errors.Push("图标质量设置无效。")
+    if !IsIntegerText(d.General.CacheRetentionDays, 1, 90)
+        errors.Push("缓存保留期限必须是 1–90 天的整数。")
     if !IsIntegerText(d.General.ThumbnailSize, 48, 256)
         errors.Push("图标大小必须是 48–256 的整数。")
     if !IsIntegerText(d.General.ThumbnailHorizontalGap, 0, 128)
@@ -4225,6 +4360,10 @@ WriteSettingsDraft(draft, tempPath) {
         g.ShowRecentSidebar ? "1" : "0", 1)
     doc.SetValue("General", "ContentUpdateMode",
         g.ContentUpdateMode, 1)
+    doc.SetValue("General", "CacheCleanupEnabled",
+        g.CacheCleanupEnabled ? "1" : "0", 1)
+    doc.SetValue("General", "CacheRetentionDays",
+        g.CacheRetentionDays, 1)
     doc.SetValue("General", "UiScale", g.UiScaleMode, 1)
     doc.SetValue("General", "WindowWidth", g.WindowWidth, 1)
     doc.SetValue("General", "WindowHeight", g.WindowHeight, 1)

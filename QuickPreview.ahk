@@ -79,6 +79,12 @@ QuickPreviewValidateQuickLookPath(path) {
 IsPanelQuickPreviewAvailable(*) {
     if !IsPopDropPanelActive()
         return false
+    ; A focused text-block search box owns Space for text/IME input even when
+    ; the pointer is still resting on a file card.  This check must remain in
+    ; the HotIf criterion: rejecting Space after the hotkey has fired would
+    ; swallow the physical key instead of returning it to the Edit control.
+    if IsTextBlockSearchActive()
+        return false
     ; Space belongs to a focused toolbar control unless the pointer is
     ; explicitly over a file. This still supports hover-without-selection.
     if !IsPanelFileViewActive() && QuickPreviewHoveredPath() = ""

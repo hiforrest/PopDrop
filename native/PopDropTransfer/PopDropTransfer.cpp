@@ -46,7 +46,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr wchar_t kPartSuffix[] = L".popdrop-part";
-constexpr wchar_t kHelperVersion[] = L"1.1.0";
+constexpr wchar_t kHelperVersion[] = L"1.1.2";
 constexpr DWORD kChunkSize = 1024 * 1024;
 constexpr DWORD kStateThrottleMs = 125;
 constexpr DWORD kAdoptSourceTimeoutMs = 30 * 60 * 1000;
@@ -2279,7 +2279,7 @@ HRESULT ExtractUrl(const Request& request, IDataObject* data,
     }, true);
 
     HINTERNET session = WinHttpOpen(
-        L"PopDrop/1.1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        L"PopDrop/1.1.2", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) {
         DWORD error = GetLastError();
