@@ -34,6 +34,7 @@ global UI_SCALE_200 := "200"
 ; being compared and atomically replaced.
 global ConfigEditInProgress := false
 global ConfigEditSerial := 0
+global LoadedConfigStamp := ""
 
 ; ──── 工作区类型 ────
 global WORKSPACE_TYPE_FILES := "Files"
@@ -253,6 +254,7 @@ global UiDropDownParentSubclassCallback := 0
 global UiDropDownSubclassedParents := Map()
 global ConfiguredHotkey := "F2"
 global ActiveHotkey := ""
+global ActiveHotkeyRelease := ""
 global ActiveWorkspaceHotkeys := Map()
 global WorkspaceHotkeyPressed := Map()
 global WorkspaceHotkeyLastDispatch := Map()
@@ -277,11 +279,14 @@ global LastFileWorkspaceId := ""
 ; from being dropped while the first press is loading a workspace.
 global MainHotkeyFirstPressTick := 0
 global MainHotkeyGestureGeneration := 0
+global MainHotkeyGestureArmed := false
+global MainHotkeySecondPressPending := false
 global MainHotkeyRequestedAction := ""
 global MainHotkeyActionRunning := false
 global MainHotkeyAwaitRelease := false
 global MainHotkeyPhysicalKey := ""
 global MainHotkeyClosedTick := 0
+global PanelShowFinishGeneration := 0
 global CudaTextSystemCursorOverridden := false
 global PanelVisible := false
 global DragPaths := []

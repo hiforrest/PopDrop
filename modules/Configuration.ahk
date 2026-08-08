@@ -601,7 +601,7 @@ LoadSettings(*) {
     global UI_SCALE_100, UI_SCALE_125
     global UI_SCALE_150, UI_SCALE_175, UI_SCALE_200
     global ConfigErrors, LastValidFolderSettings
-    global ConfigErrorsShown
+    global ConfigErrorsShown, LoadedConfigStamp
     global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
     global SortMode, SORT_MODIFIED_DESC, SORT_NAME_ASC
     global MODE_FILES, MODE_LAUNCHER
@@ -886,6 +886,7 @@ LoadSettings(*) {
     }
     ConfigErrors := activeWorkspace.RuntimeErrors.Clone()
     SyncWorkspaceControls()
+    LoadedConfigStamp := GetConfigFileStamp()
 }
 
 LoadWorkspaceDefinitions() {

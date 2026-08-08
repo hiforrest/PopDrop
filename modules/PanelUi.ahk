@@ -313,6 +313,24 @@ UpdateWorkspaceTypeUi() {
     RedrawPanelToolbar()
 }
 
+EnforceWorkspaceSearchVisibility() {
+    global TextBlockSearchEdit, TextBlockSearchQuery
+    global TextBlockSelectFirstPending
+    if !IsObject(TextBlockSearchEdit)
+        return false
+    textMode := IsTextWorkspace()
+    changed := TextBlockSearchEdit.Visible != textMode
+    TextBlockSearchEdit.Visible := textMode
+    if !textMode {
+        if TextBlockSearchQuery != ""
+            TextBlockSearchQuery := ""
+        TextBlockSelectFirstPending := true
+        if TextBlockSearchEdit.Value != ""
+            TextBlockSearchEdit.Value := ""
+    }
+    return changed
+}
+
 RedrawPanelToolbar() {
     global Panel, PANEL_TOOLBAR_HEIGHT
     if !IsObject(Panel)
@@ -376,6 +394,7 @@ RequestActivateWorkspace(workspaceId, origin := "main") {
 ActivateWorkspace(workspaceId) {
     global ActiveWorkspaceId, PanelVisible, StatusKind, FileView
     global LastFileWorkspaceId
+    global ActiveWorkspaceType
     global SourceWatcherRecentDirty
     global ContentUpdateMode, CONTENT_UPDATE_ACCURACY
     global CurrentScanComplete
@@ -389,8 +408,11 @@ ActivateWorkspace(workspaceId) {
     PreviewSuppress("workspace", false)
     RememberActiveWorkspaceFileView()
     ClearTextBlockSearch(false)
+    previousType := ActiveWorkspaceType
     if !BindRuntimeWorkspace(found.Value)
         return false
+    typeChanged := ParseWorkspaceType(previousType)
+        != ParseWorkspaceType(ActiveWorkspaceType)
     CancelStaleWorkspaceWorker()
     if !ScanResultLoaded
         LoadDiskScanCache()
@@ -398,6 +420,9 @@ ActivateWorkspace(workspaceId) {
     hotViewReady := ActivateWorkspaceFileView()
     if !hotViewReady
         PopulatePanel()
+    searchVisibilityChanged := EnforceWorkspaceSearchVisibility()
+    if typeChanged || searchVisibilityChanged
+        RequestNativeLayout()
     if PanelVisible && IsObject(FileView) {
         if IsTextWorkspace()
             RestoreTextBlockSearchFocus()
@@ -411,16 +436,18 @@ ActivateWorkspace(workspaceId) {
     ; Recent/sidebar maintenance and source reconciliation are not required to
     ; expose an already-rendered hot view.  Queue them after returning to the
     ; message loop so a burst of clicks can commit the next target first.
-    QueueWorkspaceActivationMaintenance(ActiveWorkspaceId)
+    QueueWorkspaceActivationMaintenance(ActiveWorkspaceId,
+        PanelVisible ? 1 : MainHotkeyDoubleTolerance() + 40)
     return true
 }
 
-QueueWorkspaceActivationMaintenance(workspaceId) {
+QueueWorkspaceActivationMaintenance(workspaceId, delayMs := 1) {
     global WorkspaceActivationMaintenanceGeneration
     global WorkspaceActivationMaintenanceWorkspaceId
     generation := ++WorkspaceActivationMaintenanceGeneration
     WorkspaceActivationMaintenanceWorkspaceId := workspaceId
-    SetTimer(FinishWorkspaceActivation.Bind(workspaceId, generation), -1)
+    SetTimer(FinishWorkspaceActivation.Bind(workspaceId, generation),
+        -Max(1, delayMs))
     return true
 }
 
@@ -1219,29 +1246,49 @@ RequestExitPopDrop(*) {
 }
 
 InstallHotkey(newHotkey) {
-    global ActiveHotkey, ConfiguredHotkey, ConfigPath
+    global ActiveHotkey, ActiveHotkeyRelease, ConfiguredHotkey, ConfigPath
     if newHotkey = ActiveHotkey
         return
 
-    try Hotkey(newHotkey, HandleMainHotkey, "On")
+    ; T2 lets a second physical press enter the lightweight gesture collector
+    ; while the first thread is still presenting the native window.
+    try Hotkey(newHotkey, HandleMainHotkey, "On T2")
     catch as err {
         ShowPanelMsgBox("快捷键配置无效：" newHotkey "`n已改用 F2。`n`n" err.Message,
             "PopDrop", "Icon!")
         newHotkey := "F2"
         ConfiguredHotkey := newHotkey
         AtomicConfigSetValue("General", "Hotkey", newHotkey)
-        Hotkey(newHotkey, HandleMainHotkey, "On")
+        Hotkey(newHotkey, HandleMainHotkey, "On T2")
     }
 
     if ActiveHotkey != ""
         try Hotkey(ActiveHotkey, "Off")
+    if ActiveHotkeyRelease != ""
+        try Hotkey(ActiveHotkeyRelease, "Off")
     ActiveHotkey := newHotkey
+    ActiveHotkeyRelease := MainHotkeyReleaseName(newHotkey)
+    if ActiveHotkeyRelease != ""
+        Hotkey(ActiveHotkeyRelease, HandleMainHotkeyKeyUp, "On")
+}
+
+MainHotkeyReleaseName(hotkeyName) {
+    baseKey := MainHotkeyBaseKey(hotkeyName)
+    return baseKey = "" ? "" : "~*" baseKey " Up"
+}
+
+HandleMainHotkeyKeyUp(*) {
+    global MainHotkeyAwaitRelease
+    MainHotkeyAwaitRelease := false
+    SetTimer(MainHotkeyReleasePoll, 0)
 }
 
 HandleMainHotkey(*) {
     global MainHotkeyFirstPressTick, MainHotkeyGestureGeneration
+    global MainHotkeyGestureArmed, MainHotkeySecondPressPending
     global MainHotkeyAwaitRelease, MainHotkeyPhysicalKey, ConfiguredHotkey
     global MainHotkeyClosedTick, PanelVisible
+    global PanelShowFinishGeneration
     if MainHotkeyAwaitRelease
         return
 
@@ -1255,9 +1302,28 @@ HandleMainHotkey(*) {
     }
 
     now := A_TickCount
-    ; Gesture routing only exists while the panel is hidden. Once PopDrop is
-    ; visible, the main shortcut has one unambiguous job: close it. Suppress a
-    ; rapid second press so double-F2 on an open panel cannot reopen or switch.
+    tolerance := MainHotkeyDoubleTolerance()
+    ; T2 allows this collector to interrupt the first F2 thread. While that
+    ; thread is still showing the window FirstPressTick is intentionally zero;
+    ; an armed gesture with no tick is therefore an immediate valid second
+    ; edge, not a new single press.
+    if MainHotkeyGestureArmed {
+        elapsed := MainHotkeyFirstPressTick
+            ? ElapsedTickMilliseconds(MainHotkeyFirstPressTick, now) : 0
+        if !MainHotkeyFirstPressTick || elapsed <= tolerance {
+            MainHotkeyGestureArmed := false
+            MainHotkeySecondPressPending := true
+            MainHotkeyFirstPressTick := 0
+            MainHotkeyGestureGeneration += 1
+            PanelShowFinishGeneration += 1
+            RequestMainHotkeyAction("Text")
+            return
+        }
+        MainHotkeyGestureArmed := false
+        MainHotkeySecondPressPending := false
+        MainHotkeyFirstPressTick := 0
+    }
+
     if PanelVisible {
         ResetMainHotkeyGesture()
         MainHotkeyClosedTick := now
@@ -1270,32 +1336,33 @@ HandleMainHotkey(*) {
             return
         MainHotkeyClosedTick := 0
     }
-    tolerance := MainHotkeyDoubleTolerance()
-    elapsed := MainHotkeyFirstPressTick
-        ? ElapsedTickMilliseconds(MainHotkeyFirstPressTick, now)
-        : tolerance + 1
-    if MainHotkeyFirstPressTick && elapsed <= tolerance {
-        ; The pair has exactly one terminal meaning, independent of the
-        ; current workspace and whether the panel is visible or hidden.
-        MainHotkeyFirstPressTick := 0
-        MainHotkeyGestureGeneration += 1
-        RequestMainHotkeyAction("Text")
+    MainHotkeyGestureGeneration += 1
+    MainHotkeyGestureArmed := true
+    MainHotkeySecondPressPending := false
+    MainHotkeyFirstPressTick := 0
+    ; Show the single-press workspace immediately. The armed pair state only
+    ; decides whether a second press should redirect to Text; it never delays
+    ; the first visible frame.
+    PresentMainHotkeyWorkspace("Files")
+    ; Start the pair window only after the first action has returned. If a
+    ; cold activation briefly occupied the AHK thread, a physical second press
+    ; queued during that work must still be accepted as the pair's second edge.
+    if MainHotkeySecondPressPending {
+        MainHotkeySecondPressPending := false
         return
     }
-
-    MainHotkeyFirstPressTick := now
-    MainHotkeyGestureGeneration += 1
-    generation := MainHotkeyGestureGeneration
-    ; The single action waits only for the rapid-pair window. Once committed,
-    ; the gesture is closed before the panel is shown.
-    SetTimer(MainHotkeyCommitSingle.Bind(generation), -tolerance)
+    MainHotkeyFirstPressTick := A_TickCount
 }
 
 MainHotkeyDoubleTolerance() {
     ; Only a deliberate rapid pair is a double shortcut. Once the single
     ; action is committed and the panel appears, a later F2 starts a fresh
     ; single gesture instead of toggling back to Text.
-    return 240
+    ; Keyboard pairs need a little more tolerance than mouse double-clicks:
+    ; the first press also activates a top-level window and transfers focus.
+    ; Single-F2 no longer waits for this value, so 400 ms improves reliability
+    ; without making the window appear slower.
+    return 400
 }
 
 MainHotkeyBaseKey(hotkeyName) {
@@ -1332,8 +1399,11 @@ MainHotkeyCommitSingle(generation) {
 
 CancelUncommittedMainHotkeyGesture() {
     global MainHotkeyFirstPressTick, MainHotkeyGestureGeneration
-    if !MainHotkeyFirstPressTick
+    global MainHotkeyGestureArmed, MainHotkeySecondPressPending
+    if !MainHotkeyGestureArmed && !MainHotkeyFirstPressTick
         return
+    MainHotkeyGestureArmed := false
+    MainHotkeySecondPressPending := false
     MainHotkeyFirstPressTick := 0
     MainHotkeyGestureGeneration += 1
 }
@@ -1379,16 +1449,99 @@ PresentMainHotkeyWorkspace(action) {
     } else
         ActivateMainFileWorkspace()
     if !PanelVisible
-        ShowAndRefresh()
+        ShowPanelInstant()
     else {
         try WinRestore("ahk_id " Panel.Hwnd)
         WinActivate("ahk_id " Panel.Hwnd)
+        QueuePanelShowFinish()
     }
+}
+
+ShowPanelInstant(*) {
+    global Panel, PanelVisible, WindowWidth, WindowHeight
+    global WindowMode, WINDOW_MODE_TEMPORARY, AutoHidePauseDepth
+    global AutoHidePanelShownTick, AutoHideNativeShownTick
+    global PanelShowFinishGeneration
+    if !IsObject(Panel)
+        return false
+
+    ; Keep the last complete native frame visible. Configuration loading and
+    ; refresh checks are deliberately moved to FinishPanelShow().
+    PreviewBeginPanelSession()
+    ApplyWindowMode()
+    ; When the previous session ended in Text, the hidden FileView may still
+    ; carry Text's search-band offset. Apply the final geometry while the
+    ; window is hidden so the first visible frame is already stable.
+    ResizePanel(Panel, 0, PanelScale(WindowWidth), PanelScale(WindowHeight))
+    AutoHideNativeShownTick := A_TickCount
+    Panel.Show("w" PanelScale(WindowWidth) " h" PanelScale(WindowHeight))
+    PanelVisible := true
+    AutoHidePauseDepth := 0
+    AutoHidePanelShownTick := A_TickCount
+    if WindowMode = WINDOW_MODE_TEMPORARY
+        StartAutoHideWatchdog()
+    WinActivate("ahk_id " Panel.Hwnd)
+    QueuePanelShowFinish(MainHotkeyDoubleTolerance() + 40)
+    return true
+}
+
+QueuePanelShowFinish(delayMs := 1) {
+    global PanelShowFinishGeneration
+    generation := ++PanelShowFinishGeneration
+    SetTimer(FinishPanelShow.Bind(generation), -Max(1, delayMs))
+    return true
+}
+
+FinishPanelShow(generation) {
+    global Panel, PanelVisible, ConfiguredHotkey, ActiveHotkey
+    global ScanResultLoaded, StatusKind, CurrentScanComplete
+    global WorkerRunning, ShowRecentSidebar
+    global StatusText, PanelShowFinishGeneration
+    if generation != PanelShowFinishGeneration || !PanelVisible
+        return false
+
+    ; Reloading an unchanged config rebuilds Tab state and synchronously
+    ; redraws the toolbar, creating a deterministic flash after every summon.
+    ; Internal writers keep LoadedConfigStamp current, so only a genuine
+    ; external/config-file change needs the expensive reload path.
+    configChanged := ConfigFileChangedSinceLoad()
+    if configChanged {
+        LoadSettings()
+        InstallWorkspaceHotkeys()
+        ApplyWindowMode()
+        if ConfiguredHotkey != ActiveHotkey {
+            InstallHotkey(ConfiguredHotkey)
+            BuildTrayMenu()
+        }
+    }
+    if EnforceWorkspaceSearchVisibility()
+        RequestNativeLayout()
+    if !ScanResultLoaded
+        LoadDiskScanCache()
+    if !IsPanelRenderCurrent()
+        PopulatePanel()
+    if !IsRecentRenderCurrent()
+        PopulateRecentSidebar()
+    SetTimer(UpdateSelectionStatus, 0)
+    if ScanResultLoaded && !WorkerRunning {
+        StatusKind := "default"
+        StatusText.Text := "已是最新"
+    }
+    UpdateWindowModeButton()
+    CheckRefreshPolicyOnShow()
+    if !CurrentScanComplete && !WorkerRunning
+        StartBackgroundScan(0, "incomplete-show", ShowRecentSidebar)
+    RestoreTextBlockSearchFocus()
+    SetTimer(RequestNativeLayout, -30)
+    return true
 }
 
 ResetMainHotkeyGesture(clearRequestedAction := true) {
     global MainHotkeyFirstPressTick, MainHotkeyGestureGeneration
+    global MainHotkeyGestureArmed, MainHotkeySecondPressPending
     global MainHotkeyRequestedAction
+    MainHotkeyGestureArmed := false
+    MainHotkeySecondPressPending := false
     MainHotkeyFirstPressTick := 0
     MainHotkeyGestureGeneration += 1
     if clearRequestedAction

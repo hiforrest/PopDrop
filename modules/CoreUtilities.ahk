@@ -135,6 +135,7 @@ WriteInitialTransferFavoritesConfig(favorites, tempPath) {
 
 AtomicConfigEdit(editor) {
     global ConfigPath, ConfigEditInProgress, ConfigEditSerial
+    global LoadedConfigStamp
     previousCritical := A_IsCritical
     Critical("On")
     if ConfigEditInProgress {
@@ -183,6 +184,10 @@ AtomicConfigEdit(editor) {
                 "wstr", ConfigPath, "uint", 0x9, "int")
                 throw OSError(A_LastError, "无法原子替换配置文件")
         }
+        ; Runtime writers already applied the same change to memory. Record
+        ; the new disk identity so the next F2 show does not reload and repaint
+        ; an unchanged configuration.
+        LoadedConfigStamp := GetConfigFileStamp()
     } catch {
         try FileDelete(tempPath)
         throw
@@ -190,6 +195,21 @@ AtomicConfigEdit(editor) {
         ConfigEditInProgress := false
         Critical(previousCritical)
     }
+}
+
+GetConfigFileStamp() {
+    global ConfigPath
+    if !FileExist(ConfigPath)
+        return ""
+    try return FileGetSize(ConfigPath) "|" FileGetTime(ConfigPath, "M")
+    catch
+        return ""
+}
+
+ConfigFileChangedSinceLoad() {
+    global LoadedConfigStamp
+    current := GetConfigFileStamp()
+    return current = "" || current != LoadedConfigStamp
 }
 
 BuffersEqual(left, right) {
