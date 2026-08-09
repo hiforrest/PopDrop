@@ -80,6 +80,17 @@ RunSelfTests() {
             != FolderGroupCollapseKey(
                 "Workspace-B", "Source-A", "C:\One"),
             "来源折叠状态按工作区隔离")
+        sourceGroupIds := SourceFolderGroupIds(Map(
+            1, {Type: "Pinned", GroupId: 1},
+            2, {Type: "Files", SourceId: "source-a", GroupId: 2},
+            3, {Type: "Launcher", SourceId: "source-b", GroupId: 3},
+            4, {Type: "TextPinned", GroupId: 4},
+            5, {Type: "TextSource", SourceId: "source-c", GroupId: 5}))
+        AssertSelfTest(sourceGroupIds.Length = 3
+            && sourceGroupIds[1] = 2
+            && sourceGroupIds[2] = 3
+            && sourceGroupIds[3] = 5,
+            "全部展开收起只包含来源分栏并排除固定项")
         AssertSelfTest(NormalizeEditedTextBlock(
             "`r`n正文`r`n`r`n") = "`n正文`n`n",
             "编辑文本块保留首尾空行")

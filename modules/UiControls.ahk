@@ -8,18 +8,21 @@ AddUiButton(guiObj, options, text, scaleFactor := 1.0) {
 }
 
 AddPanelIconButton(guiObj, options, imagePath, tooltipText, action,
-    alternateImagePath := "") {
+    alternateImagePath := "", disabledImagePath := "") {
     global PanelIconButtons, PanelIconSubclassCallback
     EnsurePanelIconGraphics()
     fullPath := ResolvePanelAssetPath(imagePath)
     image := LoadPanelIconImage(fullPath)
     alternateImage := alternateImagePath != ""
         ? LoadPanelIconImage(ResolvePanelAssetPath(alternateImagePath)) : 0
+    disabledImage := disabledImagePath != ""
+        ? LoadPanelIconImage(ResolvePanelAssetPath(disabledImagePath)) : 0
     control := guiObj.AddText(options " +Tabstop +0x100", "") ; SS_NOTIFY
     state := {
         Control: control,
         Image: image,
         AlternateImage: alternateImage,
+        DisabledImage: disabledImage,
         UseAlternate: false,
         Tooltip: tooltipText,
         Action: action,
@@ -40,6 +43,7 @@ AddPanelIconButton(guiObj, options, imagePath, tooltipText, action,
         "int") {
         DisposePanelIconImage(image)
         DisposePanelIconImage(alternateImage)
+        DisposePanelIconImage(disabledImage)
         PanelIconButtons.Delete(control.Hwnd)
         throw OSError(A_LastError, "无法创建图标工具栏按钮")
     }
@@ -105,7 +109,7 @@ PanelIconButtonSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
         if PanelIconButtons.Has(hwnd) {
             state := PanelIconButtons[hwnd]
             if msg = 0x0200 { ; WM_MOUSEMOVE
-                if !state.Hovered {
+                if state.Enabled && !state.Hovered {
                     if PanelIconHoverHwnd && PanelIconHoverHwnd != hwnd
                         ClearPanelIconHover(PanelIconHoverHwnd)
                     state.Hovered := true
@@ -113,7 +117,8 @@ PanelIconButtonSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
                     TrackPanelIconMouseLeave(hwnd)
                     InvalidatePanelIconButton(hwnd)
                     SchedulePanelIconTooltip(hwnd)
-                }
+                } else if !state.Enabled && state.Hovered
+                    ClearPanelIconHover(hwnd)
             } else if msg = 0x02A3 { ; WM_MOUSELEAVE
                 ClearPanelIconHover(hwnd)
             } else if msg = 0x0201 { ; WM_LBUTTONDOWN
@@ -232,7 +237,7 @@ DrawPanelIconButton(hwnd) {
         DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect.Ptr)
         width := NumGet(rect, 8, "int")
         height := NumGet(rect, 12, "int")
-        active := state.Hovered || state.Selected
+        active := state.Enabled && (state.Hovered || state.Selected)
         if active {
             fillColor := state.Pressed ? 0xFFE8CC : 0xFFF3E5
             brush := DllCall("gdi32\CreateSolidBrush",
@@ -251,8 +256,10 @@ DrawPanelIconButton(hwnd) {
                 "ptr", DllCall("user32\GetSysColorBrush",
                     "int", 15, "ptr")) ; COLOR_BTNFACE
         }
-        image := state.UseAlternate && state.AlternateImage
-            ? state.AlternateImage : state.Image
+        image := !state.Enabled && state.DisabledImage
+            ? state.DisabledImage
+            : state.UseAlternate && state.AlternateImage
+                ? state.AlternateImage : state.Image
         if image {
             graphics := 0
             if DllCall("gdiplus\GdipCreateFromHDC",
@@ -272,7 +279,7 @@ DrawPanelIconButton(hwnd) {
                 }
             }
         }
-        if DllCall("user32\GetFocus", "ptr") = hwnd {
+        if state.Enabled && DllCall("user32\GetFocus", "ptr") = hwnd {
             focusRect := Buffer(16, 0)
             NumPut("int", 3, focusRect, 0)
             NumPut("int", 3, focusRect, 4)
@@ -322,10 +329,23 @@ SetPanelIconButtonTooltip(control, text) {
 }
 
 SetPanelIconButtonEnabled(control, enabled) {
-    global PanelIconButtons
+    global PanelIconButtons, PanelIconHoverHwnd, PanelIconTooltipGeneration
     if !IsObject(control) || !PanelIconButtons.Has(control.Hwnd)
         return
-    PanelIconButtons[control.Hwnd].Enabled := !!enabled
+    state := PanelIconButtons[control.Hwnd]
+    enabled := !!enabled
+    if state.Enabled = enabled
+        return
+    state.Enabled := enabled
+    state.Control.Enabled := enabled
+    if !enabled {
+        state.Hovered := false
+        state.Pressed := false
+        if PanelIconHoverHwnd = control.Hwnd
+            PanelIconHoverHwnd := 0
+        PanelIconTooltipGeneration += 1
+        ToolTip()
+    }
     InvalidatePanelIconButton(control.Hwnd)
 }
 
@@ -340,6 +360,7 @@ RemovePanelIconButton(hwnd, subclassId := 0x50444942) {
             "uptr", subclassId, "int")
     DisposePanelIconImage(state.Image)
     DisposePanelIconImage(state.AlternateImage)
+    DisposePanelIconImage(state.DisabledImage)
     PanelIconButtons.Delete(hwnd)
 }
 

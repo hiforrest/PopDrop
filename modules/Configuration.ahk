@@ -300,6 +300,7 @@ NormalizeConfigDocument(tempPath) {
     originalVersion := doc.GetValue("General", "ConfigVersion", "")
     EnsureKnownFolderDefaults(doc)
     EnsureRefreshConfigDefaults(doc)
+    EnsureInterfaceConfigDefaults(doc)
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
     EnsureTextBlockConfigDefaults(doc)
@@ -316,6 +317,7 @@ ConfigLayoutNeedsNormalization() {
     doc := OpenPopDropConfig(ConfigPath)
     EnsureKnownFolderDefaults(doc)
     EnsureRefreshConfigDefaults(doc)
+    EnsureInterfaceConfigDefaults(doc)
     EnsureNoiseFilterConfigComments(doc)
     EnsureFileManagerConfigDefaults(doc)
     EnsureTextBlockConfigDefaults(doc)
@@ -404,6 +406,17 @@ EnsureRefreshConfigDefaults(doc) {
     }
     if !ConfigDocumentContainsKey(doc, "General", "StartupEnabled")
         doc.SetValue("General", "StartupEnabled", "0", 1)
+}
+
+EnsureInterfaceConfigDefaults(doc) {
+    for item in [
+        {Key: "FileViewGroupTopSpacing", Default: "4"},
+        {Key: "FileViewGroupBottomSpacing", Default: "6"}
+    ] {
+        if !ConfigDocumentContainsKey(doc, "General", item.Key)
+            doc.SetValue("General", item.Key,
+                ConfigDefaultValue("General", item.Key, item.Default), 1)
+    }
 }
 
 EnsureKnownFolderDefaults(doc) {
@@ -597,6 +610,7 @@ LoadSettings(*) {
     global LastFileWorkspaceId
     global MaxFilesPerFolder
     global IncludeSubfolders, ThumbnailSize, ThumbnailHorizontalGap, ThumbnailVerticalGap
+    global FileViewGroupTopSpacing, FileViewGroupBottomSpacing
     global ThumbnailTextLines, TextBlockCardWidth, TextBlockCardHeight
     global FolderSettings, PinnedPaths, Workspaces, TextSourcePinnedPaths
     global ActiveWorkspaceId, ActiveWorkspaceName, ActiveWorkspaceType
@@ -698,6 +712,16 @@ LoadSettings(*) {
     catch
         ThumbnailVerticalGap := 4
     ThumbnailVerticalGap := Max(0, Min(ThumbnailVerticalGap, 128))
+    try FileViewGroupTopSpacing := Integer(IniRead(
+        ConfigPath, "General", "FileViewGroupTopSpacing", "4"))
+    catch
+        FileViewGroupTopSpacing := 4
+    FileViewGroupTopSpacing := Max(0, Min(FileViewGroupTopSpacing, 32))
+    try FileViewGroupBottomSpacing := Integer(IniRead(
+        ConfigPath, "General", "FileViewGroupBottomSpacing", "6"))
+    catch
+        FileViewGroupBottomSpacing := 6
+    FileViewGroupBottomSpacing := Max(0, Min(FileViewGroupBottomSpacing, 32))
     try ThumbnailTextLines := Integer(
         IniRead(ConfigPath, "General", "ThumbnailTextLines", "2"))
     catch

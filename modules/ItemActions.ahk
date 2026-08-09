@@ -117,6 +117,8 @@ InstallPanelHotkeys() {
     Hotkey("^c", PanelCopyFileObjects)
     Hotkey("^+c", PanelCopyPaths)
     Hotkey("F4", PanelEditTextBlock)
+    HotIf(IsTextBlockFileViewActive)
+    Hotkey("+Enter", PanelPrependSelection)
     HotIf(IsPopDropPanelActive)
     Hotkey("^f", FocusTextBlockSearch)
     Loop 9
@@ -132,6 +134,7 @@ InstallPanelHotkeys() {
     Hotkey("Tab", FocusTextBlockResults)
     HotIf(IsTextBlockSearchResultReady)
     Hotkey("Enter", ActivateTextBlockSearchResult)
+    Hotkey("+Enter", ActivateTextBlockSearchResultPrepend)
     ; Ctrl+V is intentionally registered only for the text-card surface and
     ; the panel container. Editable controls keep the native paste behavior.
     HotIf(CanPasteClipboardAsPinnedTextBlock)
@@ -268,6 +271,10 @@ IsPanelFileViewActive(*) {
         || (IsObject(RecentView) && focused = RecentView.Hwnd)
 }
 
+IsTextBlockFileViewActive(*) {
+    return IsTextWorkspace() && IsPanelFileViewActive()
+}
+
 GetActiveSelectionContext() {
     global FileView, RecentView, ItemPaths, RecentItemPaths
     focused := DllCall("user32\GetFocus", "ptr")
@@ -296,6 +303,13 @@ PanelOpenSelection(*) {
         else
             OpenSelectedItems(context.Paths)
     }
+}
+
+PanelPrependSelection(*) {
+    PreviewHide("open", true)
+    context := GetActiveSelectionContext()
+    if context.Paths.Length
+        PrependTextBlocks(context.Paths)
 }
 
 PanelDeleteSelection(*) {

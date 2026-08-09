@@ -268,6 +268,7 @@ LoadSettingsIntoDraft() {
     global CacheCleanupEnabled, CacheRetentionDays
     global UiScaleMode, ThumbnailSize, ThumbnailHorizontalGap
     global ThumbnailVerticalGap, ThumbnailTextLines
+    global FileViewGroupTopSpacing, FileViewGroupBottomSpacing
     global WindowWidth, WindowHeight
     global TextBlockCardWidth, TextBlockCardHeight
     global ThumbnailPolicy
@@ -348,6 +349,8 @@ LoadSettingsIntoDraft() {
             ThumbnailSize: ThumbnailSize,
             ThumbnailHorizontalGap: ThumbnailHorizontalGap,
             ThumbnailVerticalGap: ThumbnailVerticalGap,
+            FileViewGroupTopSpacing: FileViewGroupTopSpacing,
+            FileViewGroupBottomSpacing: FileViewGroupBottomSpacing,
             ThumbnailTextLines: ThumbnailTextLines,
             TextBlockCardWidth: TextBlockCardWidth,
             TextBlockCardHeight: TextBlockCardHeight,
@@ -1532,7 +1535,7 @@ BuildInterfaceSettingsPage(c, tabs) {
     g.AddText("x224 y111 w744 c666666",
         "当前应用于 PopDrop 主面板；保存后需重新启动才能生效。")
 
-    g.AddGroupBox("x200 y190 w818 h220", "文件图标 · 应用于所有工作区")
+    g.AddGroupBox("x200 y190 w818 h246", "文件图标与分栏 · 应用于所有工作区")
     g.AddText("x224 y228 w92", "图标质量：")
     c.ThumbnailPolicy := AddUiDropDownList(g, "x320 yp-4 w150",
         ["快速", "完整"])
@@ -1543,28 +1546,34 @@ BuildInterfaceSettingsPage(c, tabs) {
     c.ThumbnailHorizontalGap := AddUiEdit(g, "x320 yp-4 w72 Number")
     g.AddText("x460 yp+4 w92", "纵向间距：")
     c.ThumbnailVerticalGap := AddUiEdit(g, "x556 yp-4 w72 Number")
-    g.AddText("x224 y360 w92", "文件名行数：")
+    g.AddText("x224 y360 w92", "分栏上间距：")
+    c.FileViewGroupTopSpacing := AddUiEdit(g, "x320 yp-4 w72 Number")
+    g.AddText("x404 yp+4 w72 c666666", "0–32")
+    g.AddText("x500 yp w92", "分栏下间距：")
+    c.FileViewGroupBottomSpacing := AddUiEdit(g, "x596 yp-4 w72 Number")
+    g.AddText("x680 yp+4 w72 c666666", "0–32")
+    g.AddText("x224 y404 w92", "文件名行数：")
     c.ThumbnailTextLines := AddUiDropDownList(g, "x320 yp-4 w150",
         ["1 行", "2 行"])
 
-    g.AddGroupBox("x200 y426 w818 h142", "文本块 · 应用于所有工作区")
-    g.AddText("x224 y465 w92", "卡片宽度：")
+    g.AddGroupBox("x200 y452 w818 h128", "文本块 · 应用于所有工作区")
+    g.AddText("x224 y487 w92", "卡片宽度：")
     c.TextBlockCardWidth := AddUiEdit(g, "x320 yp-4 w72 Number")
     g.AddText("x404 yp+4 w110 c666666", "140–640")
     g.AddText("x540 yp w92", "卡片高度：")
     c.TextBlockCardHeight := AddUiEdit(g, "x636 yp-4 w72 Number")
     g.AddText("x720 yp+4 w110 c666666", "48–320")
-    g.AddText("x224 y515 w744 c666666",
+    g.AddText("x224 y535 w744 c666666",
         "宽度和高度用于调整文本块工作区中的卡片尺寸。")
 
-    g.AddGroupBox("x200 y584 w818 h132", "窗口尺寸 · 主面板")
-    g.AddText("x224 y622 w92", "窗口宽度：")
+    g.AddGroupBox("x200 y596 w818 h120", "窗口尺寸 · 主面板")
+    g.AddText("x224 y630 w92", "窗口宽度：")
     c.WindowWidth := AddUiEdit(g, "x320 yp-4 w82 Number")
     g.AddText("x414 yp+4 w100 c666666", "660–980")
     g.AddText("x540 yp w92", "窗口高度：")
     c.WindowHeight := AddUiEdit(g, "x636 yp-4 w82 Number")
     g.AddText("x730 yp+4 w120 c666666", "380–2000")
-    g.AddText("x224 y666 w744 c666666",
+    g.AddText("x224 y674 w744 c666666",
         "保存后用于主面板下次显示；窗口仍可手动拖动调整。")
 
     c.UiScale.OnEvent("Change", InterfaceControlChanged.Bind(c))
@@ -1572,6 +1581,10 @@ BuildInterfaceSettingsPage(c, tabs) {
     c.ThumbnailSize.OnEvent("Change", InterfaceControlChanged.Bind(c))
     c.ThumbnailHorizontalGap.OnEvent("Change", InterfaceControlChanged.Bind(c))
     c.ThumbnailVerticalGap.OnEvent("Change", InterfaceControlChanged.Bind(c))
+    c.FileViewGroupTopSpacing.OnEvent(
+        "Change", InterfaceControlChanged.Bind(c))
+    c.FileViewGroupBottomSpacing.OnEvent(
+        "Change", InterfaceControlChanged.Bind(c))
     c.ThumbnailTextLines.OnEvent("Change", InterfaceControlChanged.Bind(c))
     c.TextBlockCardWidth.OnEvent("Change", InterfaceControlChanged.Bind(c))
     c.TextBlockCardHeight.OnEvent("Change", InterfaceControlChanged.Bind(c))
@@ -1759,6 +1772,8 @@ LoadInterfaceControls(c) {
         c.ThumbnailSize.Value := d.ThumbnailSize
         c.ThumbnailHorizontalGap.Value := d.ThumbnailHorizontalGap
         c.ThumbnailVerticalGap.Value := d.ThumbnailVerticalGap
+        c.FileViewGroupTopSpacing.Value := d.FileViewGroupTopSpacing
+        c.FileViewGroupBottomSpacing.Value := d.FileViewGroupBottomSpacing
         c.ThumbnailTextLines.Choose(d.ThumbnailTextLines = 1 ? 1 : 2)
         c.TextBlockCardWidth.Value := d.TextBlockCardWidth
         c.TextBlockCardHeight.Value := d.TextBlockCardHeight
@@ -1782,6 +1797,10 @@ InterfaceControlChanged(c, *) {
         c.ThumbnailHorizontalGap.Value)
     c.Draft.General.ThumbnailVerticalGap := Trim(
         c.ThumbnailVerticalGap.Value)
+    c.Draft.General.FileViewGroupTopSpacing := Trim(
+        c.FileViewGroupTopSpacing.Value)
+    c.Draft.General.FileViewGroupBottomSpacing := Trim(
+        c.FileViewGroupBottomSpacing.Value)
     c.Draft.General.ThumbnailTextLines := c.ThumbnailTextLines.Value = 1 ? 1 : 2
     c.Draft.General.TextBlockCardWidth := Trim(c.TextBlockCardWidth.Value)
     c.Draft.General.TextBlockCardHeight := Trim(c.TextBlockCardHeight.Value)
@@ -3732,7 +3751,8 @@ SettingsDraftSignature(draft) {
         g.WindowWidth "", g.WindowHeight "",
         g.ThumbnailPolicy,
         g.ThumbnailSize "", g.ThumbnailHorizontalGap "",
-        g.ThumbnailVerticalGap "", g.ThumbnailTextLines "",
+        g.ThumbnailVerticalGap "", g.FileViewGroupTopSpacing "",
+        g.FileViewGroupBottomSpacing "", g.ThumbnailTextLines "",
         g.TextBlockCardWidth "", g.TextBlockCardHeight "",
         g.ContentUpdateMode,
         g.CacheCleanupEnabled ? "1" : "0", g.CacheRetentionDays "",
@@ -3933,6 +3953,10 @@ ValidateSettingsDraft(c) {
         errors.Push("图标横向间距必须是 0–128 的整数。")
     if !IsIntegerText(d.General.ThumbnailVerticalGap, 0, 128)
         errors.Push("图标纵向间距必须是 0–128 的整数。")
+    if !IsIntegerText(d.General.FileViewGroupTopSpacing, 0, 32)
+        errors.Push("分栏上间距必须是 0–32 的整数。")
+    if !IsIntegerText(d.General.FileViewGroupBottomSpacing, 0, 32)
+        errors.Push("分栏下间距必须是 0–32 的整数。")
     if !IsIntegerText(d.General.ThumbnailTextLines, 1, 2)
         errors.Push("文件名行数必须是 1 或 2。")
     if !IsIntegerText(d.General.TextBlockCardWidth, 140, 640)
@@ -4373,6 +4397,10 @@ WriteSettingsDraft(draft, tempPath) {
         g.ThumbnailHorizontalGap, 1)
     doc.SetValue("General", "ThumbnailVerticalGap",
         g.ThumbnailVerticalGap, 1)
+    doc.SetValue("General", "FileViewGroupTopSpacing",
+        g.FileViewGroupTopSpacing, 1)
+    doc.SetValue("General", "FileViewGroupBottomSpacing",
+        g.FileViewGroupBottomSpacing, 1)
     doc.SetValue("General", "ThumbnailTextLines",
         g.ThumbnailTextLines, 1)
     doc.SetValue("General", "TextBlockCardWidth",

@@ -5,6 +5,7 @@ BuildPanel() {
     global DisplayButton, WindowModeButton, PinnedDropButton, StatusText
     global ItemCountText
     global ClipboardPinnedButton, RefreshButton, RemovePinnedButton
+    global ExpandAllFoldersButton, CollapseAllFoldersButton
     global SettingsButton, TextBlockSearchEdit
     global TransferStatusText
     global APP_VERSION, WorkspaceTabs, WorkspaceMoreButton
@@ -46,11 +47,21 @@ BuildPanel() {
     RefreshButton := AddPanelIconButton(Panel,
         "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
         "assets\toolbar\btn-refresh.png", "刷新当前工作区内容", RefreshPanel)
+    ExpandAllFoldersButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "assets\toolbar\btn-expansion.png",
+        "展开当前工作区的全部文件夹", ExpandAllFolderGroups)
+    CollapseAllFoldersButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "assets\toolbar\btn-collapse.png",
+        "收起当前工作区的全部文件夹（固定项除外）",
+        CollapseAllFolderGroups)
     ClipboardPinnedButton := AddPanelIconButton(Panel,
         "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
         "assets\toolbar\btn-paste.png",
         "将剪贴板文本添加到固定项（文本块工作区）",
-        AddClipboardTextToPinned)
+        AddClipboardTextToPinned, "",
+        "assets\toolbar\btn-paste-gray.png")
     PinnedDropButton := AddPanelIconButton(Panel,
         "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
         "assets\toolbar\btn-add.png", "添加固定项", AddPinnedFiles)
@@ -71,11 +82,12 @@ BuildPanel() {
         "assets\toolbar\btn-pin-off.png", "窗口置顶：关",
         ToggleWindowMode, "assets\toolbar\btn-pin-on.png")
     ToolbarSeparators := []
-    Loop 5
+    Loop 6
         ToolbarSeparators.Push(AddPanelDashedSeparator(Panel,
             "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h1"))
     ToolbarControls := [WorkspaceTabs, WorkspaceMoreButton, RefreshButton,
-        ClipboardPinnedButton, PinnedDropButton, RemovePinnedButton,
+        ClipboardPinnedButton, ExpandAllFoldersButton,
+        CollapseAllFoldersButton, PinnedDropButton, RemovePinnedButton,
         DisplayButton, SettingsButton, WindowModeButton]
     for separator in ToolbarSeparators
         ToolbarControls.Push(separator)
@@ -163,6 +175,44 @@ CreatePanelFileView(visible := true) {
         break
     }
     return view
+}
+
+ApplyFileViewGroupSpacing(hwnd) {
+    global FileViewGroupTopSpacing, FileViewGroupBottomSpacing
+    global FileViewGroupMetricBases
+    if !hwnd
+        return false
+
+    ; LVGROUPMETRICS uses native pixels. Capture the control's themed defaults
+    ; once per HWND, then add the configured DIP values without compounding on
+    ; refresh or settings reload.
+    if !FileViewGroupMetricBases.Has(hwnd) {
+        current := Buffer(48, 0)
+        NumPut("uint", 48, current, 0)
+        NumPut("uint", 0x1, current, 4) ; LVGMF_BORDERSIZE
+        DllCall("user32\SendMessageW", "ptr", hwnd, "uint", 0x109C,
+            "ptr", 0, "ptr", current.Ptr, "ptr") ; LVM_GETGROUPMETRICS
+        FileViewGroupMetricBases[hwnd] := {
+            Left: NumGet(current, 8, "uint"),
+            Top: NumGet(current, 12, "uint"),
+            Right: NumGet(current, 16, "uint"),
+            Bottom: NumGet(current, 20, "uint")
+        }
+    }
+
+    base := FileViewGroupMetricBases[hwnd]
+    metrics := Buffer(48, 0)
+    NumPut("uint", 48, metrics, 0)
+    NumPut("uint", 0x1, metrics, 4) ; LVGMF_BORDERSIZE
+    NumPut("uint", base.Left, metrics, 8)
+    NumPut("uint", base.Top
+        + PanelPhysicalScale(FileViewGroupTopSpacing, hwnd), metrics, 12)
+    NumPut("uint", base.Right, metrics, 16)
+    NumPut("uint", base.Bottom
+        + PanelPhysicalScale(FileViewGroupBottomSpacing, hwnd), metrics, 20)
+    DllCall("user32\SendMessageW", "ptr", hwnd, "uint", 0x109B,
+        "ptr", 0, "ptr", metrics.Ptr, "ptr") ; LVM_SETGROUPMETRICS
+    return true
 }
 
 SyncWorkspaceControls(forceTabRebuild := true, updateTypeUi := true) {
@@ -599,6 +649,7 @@ ActivateWorkspaceFileView() {
         TextBlockSelectFirstPending := true
     }
 
+    ApplyFileViewGroupSpacing(FileView.Hwnd)
     ; Every cached view follows the active view's current geometry. This keeps
     ; hidden views correct after the panel was resized while another tab was
     ; active, without running the full layout pipeline on the switch path.
@@ -2230,7 +2281,8 @@ GetWorkspaceContentTop() {
 
 LayoutSideToolbar(width, contentTop, contentHeight) {
     global Panel
-    global RefreshButton, ClipboardPinnedButton, PinnedDropButton
+    global RefreshButton, ExpandAllFoldersButton, CollapseAllFoldersButton
+    global ClipboardPinnedButton, PinnedDropButton
     global RemovePinnedButton, DisplayButton, SettingsButton
     global WindowModeButton, ToolbarSeparators
     global PANEL_SIDE_BUTTON_SIZE, PANEL_SIDE_TOOLBAR_EDGE_GAP
@@ -2240,26 +2292,40 @@ LayoutSideToolbar(width, contentTop, contentHeight) {
         return
     ; Gui.Move is DPI-aware. Convert requested visible pixels to Gui units
     ; first; otherwise Windows scales 64/2/5 a second time.
-    buttonSize := PanelPixelsToGui(PANEL_SIDE_BUTTON_SIZE, Panel.Hwnd)
+    railWidth := PanelPixelsToGui(PANEL_SIDE_BUTTON_SIZE, Panel.Hwnd)
     edgeGap := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_EDGE_GAP, Panel.Hwnd)
     buttonGap := PanelPixelsToGui(PANEL_SIDE_BUTTON_GAP, Panel.Hwnd)
     separatorGap := PanelPixelsToGui(PANEL_SIDE_SEPARATOR_GAP, Panel.Hwnd)
     separatorHeight := Max(1, PanelPixelsToGui(
         PANEL_SIDE_SEPARATOR_HEIGHT, Panel.Hwnd))
     topGap := PanelPixelsToGui(2, Panel.Hwnd)
-    x := width - edgeGap - buttonSize
-    y := contentTop + topGap
-    buttons := [RefreshButton, ClipboardPinnedButton, PinnedDropButton,
+    buttons := [RefreshButton, ClipboardPinnedButton,
+        ExpandAllFoldersButton, CollapseAllFoldersButton, PinnedDropButton,
         RemovePinnedButton, DisplayButton, SettingsButton,
         WindowModeButton]
-    separatorAfter := Map(1, 1, 2, 2, 4, 3, 5, 4, 6, 5)
+    ; Reference order and groups:
+    ; refresh | paste | expand + collapse | add + remove | display | settings | pin
+    separatorAfter := Map(1, 1, 2, 2, 4, 3, 6, 4, 7, 5, 8, 6)
+    separatorCount := separatorAfter.Count
+    plainGapCount := buttons.Length - 1 - separatorCount
+    fixedHeight := topGap
+        + separatorCount * (separatorGap * 2 + separatorHeight)
+        + plainGapCount * buttonGap
+    minimumButtonSize := PanelPixelsToGui(24, Panel.Hwnd)
+    availableButtonSize := Floor((contentHeight - fixedHeight)
+        / buttons.Length)
+    buttonSize := Min(railWidth,
+        Max(minimumButtonSize, availableButtonSize))
+    railX := width - edgeGap - railWidth
+    x := railX + Floor((railWidth - buttonSize) / 2)
+    y := contentTop + topGap
     for index, control in buttons {
         control.Move(x, y, buttonSize, buttonSize)
         y += buttonSize
         if separatorAfter.Has(index) {
             separator := ToolbarSeparators[separatorAfter[index]]
             y += separatorGap
-            separator.Move(x, y, buttonSize, separatorHeight)
+            separator.Move(railX, y, railWidth, separatorHeight)
             DllCall("user32\InvalidateRect", "ptr", separator.Hwnd,
                 "ptr", 0, "int", 1)
             DllCall("user32\UpdateWindow", "ptr", separator.Hwnd)

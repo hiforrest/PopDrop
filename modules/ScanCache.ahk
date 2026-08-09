@@ -33,6 +33,7 @@ PopulatePanel() {
         "ptr", 0, "ptr", 0, "ptr") ; LVM_REMOVEALLGROUPS
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x109D,
         "ptr", 1, "ptr", 0, "ptr") ; LVM_ENABLEGROUPVIEW
+    ApplyFileViewGroupSpacing(FileView.Hwnd)
 
     ; Tile view reserves the image-list dimensions even when an item has no
     ; icon. Text cards use a deliberately small 8-DIP spacer: enough left

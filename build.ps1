@@ -204,7 +204,8 @@ Write-OK "Unknown-file icon found: $UnknownFileIcoPath"
 
 Write-Step "Checking toolbar PNG icons: $ToolbarIconDir"
 $toolbarIconNames = @(
-    "btn-refresh.png", "btn-paste.png", "btn-add.png", "btn-remove.png",
+    "btn-refresh.png", "btn-expansion.png", "btn-collapse.png",
+    "btn-paste.png", "btn-paste-gray.png", "btn-add.png", "btn-remove.png",
     "btn-eye.png", "btn-setting.png", "btn-pin-off.png", "btn-pin-on.png"
 )
 foreach ($iconName in $toolbarIconNames) {

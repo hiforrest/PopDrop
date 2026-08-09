@@ -1105,6 +1105,13 @@ ActivateTextBlockSearchResult(*) {
         QuickSendTextBlocks([ItemPaths[row]])
 }
 
+ActivateTextBlockSearchResultPrepend(*) {
+    global FileView, ItemPaths
+    row := IsObject(FileView) ? FileView.GetNext(0) : 0
+    if row && ItemPaths.Has(row)
+        PrependTextBlocks([ItemPaths[row]])
+}
+
 IsTextBlockSearchActive(*) {
     global TextBlockSearchEdit, PanelVisible
     return PanelVisible && IsTextWorkspace()
@@ -1256,12 +1263,36 @@ CaptureTextBlockReturnTarget() {
 }
 
 QuickSendTextBlocks(paths, *) {
+    return SendTextBlocksToReturnTarget(paths, false)
+}
+
+PrependTextBlocks(paths, *) {
+    return SendTextBlocksToReturnTarget(paths, true)
+}
+
+SendTextBlocksToReturnTarget(paths, prepend := false) {
     global TextBlockReturnWindow, TextBlockReturnFocus, Panel
     if !CopyTextBlocks(paths)
         return false
     target := TextBlockReturnWindow
-    if !target || (IsObject(Panel) && target = Panel.Hwnd)
-        return true
+    if !target || (IsObject(Panel) && target = Panel.Hwnd) {
+        if prepend
+            TrayTip("无法确定原输入窗口；正文已保留在剪贴板。",
+                "PopDrop", 0x2)
+        return !prepend
+    }
+    if !DllCall("user32\IsWindow", "ptr", target, "int") {
+        TrayTip("原输入窗口已关闭；正文已保留在剪贴板。",
+            "PopDrop", 0x2)
+        return false
+    }
+    if prepend && (!TextBlockReturnFocus
+        || !DllCall("user32\IsWindow",
+            "ptr", TextBlockReturnFocus, "int")) {
+        TrayTip("无法可靠定位原输入位置；正文已保留在剪贴板。",
+            "PopDrop", 0x2)
+        return false
+    }
     if IsPasswordEditControl(TextBlockReturnFocus) {
         TrayTip("安全输入框不执行自动粘贴；正文已保留在剪贴板。",
             "PopDrop", 0x2)
@@ -1272,14 +1303,53 @@ QuickSendTextBlocks(paths, *) {
         WinActivate("ahk_id " target)
         if !WinWaitActive("ahk_id " target, , 0.8)
             throw Error("无法恢复原窗口。")
-        RestoreTextBlockReturnFocus(target, TextBlockReturnFocus)
-        Send("^v")
+        focusRestored := RestoreTextBlockReturnFocus(
+            target, TextBlockReturnFocus)
+        if prepend && !focusRestored
+            throw Error("无法可靠恢复原输入位置。")
+        activeFocus := GetGuiThreadFocus(target)
+        if prepend && activeFocus != TextBlockReturnFocus
+            throw Error("原输入位置已改变。")
+        if IsPasswordEditControl(activeFocus)
+            throw Error("安全输入框不执行自动粘贴。")
+        if prepend {
+            MoveTextBlockCaretToStart(activeFocus)
+            Send("^v")
+        } else
+            Send("^v")
         return true
     } catch as err {
         TrayTip("正文已保留在剪贴板，请手动粘贴。`n" err.Message,
             "PopDrop", 0x2)
         return false
     }
+}
+
+MoveTextBlockCaretToStart(focusHwnd) {
+    try className := WinGetClass("ahk_id " focusHwnd)
+    catch
+        className := ""
+    if RegExMatch(className, "i)(?:^Edit$|RichEdit)") {
+        ; Native Edit/RichEdit controls support an exact, verifiable caret
+        ; move without changing their text. This avoids depending on an
+        ; application's keyboard accelerator handling.
+        DllCall("user32\SendMessageW", "ptr", focusHwnd,
+            "uint", 0x00B1, "ptr", 0, "ptr", 0, "ptr") ; EM_SETSEL
+        selectionStart := 0
+        selectionEnd := 0
+        DllCall("user32\SendMessageW", "ptr", focusHwnd,
+            "uint", 0x00B0, "uint*", &selectionStart,
+            "uint*", &selectionEnd, "ptr") ; EM_GETSEL
+        if selectionStart != 0 || selectionEnd != 0
+            throw Error("目标输入框未接受前置定位。")
+        DllCall("user32\SendMessageW", "ptr", focusHwnd,
+            "uint", 0x00B7, "ptr", 0, "ptr", 0, "ptr") ; EM_SCROLLCARET
+        return true
+    }
+    ; Browser, Electron and other custom editors generally expose only a
+    ; focused rendering HWND. Ctrl+Home is their shared keyboard contract.
+    Send("^{Home}")
+    return true
 }
 
 GetGuiThreadFocus(windowHwnd) {
@@ -1321,7 +1391,10 @@ RestoreTextBlockReturnFocus(windowHwnd, focusHwnd) {
     attached := targetThread != currentThread
         && DllCall("user32\AttachThreadInput", "uint", currentThread,
             "uint", targetThread, "int", 1, "int")
-    try return DllCall("user32\SetFocus", "ptr", focusHwnd, "ptr") != 0
+    try {
+        DllCall("user32\SetFocus", "ptr", focusHwnd, "ptr")
+        return DllCall("user32\GetFocus", "ptr") = focusHwnd
+    }
     finally {
         if attached
             DllCall("user32\AttachThreadInput", "uint", currentThread,
@@ -1514,6 +1587,8 @@ ShowTextBlockContextMenu(paths, clickedPath, ownerHwnd, x, y) {
     global PinnedPaths
     contextMenu := Menu()
     contextMenu.Add("快速发送`tEnter", QuickSendTextBlocks.Bind(paths.Clone()))
+    contextMenu.Add("前置发送`tShift+Enter",
+        PrependTextBlocks.Bind(paths.Clone()))
     contextMenu.Add("复制正文`tCtrl+C", CopyTextBlocks.Bind(paths.Clone()))
     if paths.Length = 1 {
         contextMenu.Add("编辑文本块`tF4", OpenTextBlockEditor.Bind(paths[1]))

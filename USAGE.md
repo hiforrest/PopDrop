@@ -53,10 +53,13 @@
 - 窗口默认选中第一个文本块，搜索后默认选中第一个结果。搜索框保持焦点时可直接按
   `Enter` 复制正文并粘贴到呼出 PopDrop 前的窗口；存在尚未上屏的 IME 组合输入时，
   Enter 优先交给输入法，组合结束后再次按 Enter 才会发送。无法粘贴时正文仍留在剪贴板。
+- `Shift+Enter`：前置发送。将当前选择按普通发送相同的顺序与双换行规则拼接，再投送到
+  原输入内容最前方；不会记忆本次动作，也不会自动添加空格、换行或其他分隔符。无法可靠
+  恢复原窗口及输入焦点、安全输入框或目标位置已变化时停止自动粘贴，正文保留在剪贴板。
 - `Ctrl+C`：复制正文；多选时以两个换行连接。
 - 默认拖出：提供 `CF_UNICODETEXT` 正文；按住 `Alt` 拖出：提供真实文件。
 - `F4`：使用内置编辑器编辑；支持 `Ctrl+S`、未保存关闭确认和“另存为副本”，右键菜单也可交给系统默认编辑器。
-- 读取、复制、快速发送以及内置编辑器保存/另存为都会保留现有文件首尾的空行，便于把
+- 读取、复制、快速发送、前置发送以及内置编辑器保存/另存为都会保留现有文件首尾的空行，便于把
   自带换行边界的文本插入光标位置。
 - `Ctrl+1`～`Ctrl+9`、`Ctrl+Tab`：切换工作区；快速连续输入会合并到最后一个目标并按顺序提交。设置中还可给每个工作区指定独立快捷键；面板隐藏时，主快捷键单击进入最近文件区、快速双击进入“默认文本区”；面板显示时按主快捷键只关闭面板。
 
@@ -89,7 +92,7 @@ Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之�
 
 ```ini
 [General]
-ConfigVersion=27
+ConfigVersion=28
 Hotkey=F2
 DoubleHotkeyWorkspaceId=workspace-text-default
 LastFileWorkspaceId=workspace-default
@@ -102,6 +105,8 @@ IncludeSubfolders=0
 ThumbnailSize=96
 ThumbnailHorizontalGap=24
 ThumbnailVerticalGap=4
+FileViewGroupTopSpacing=4
+FileViewGroupBottomSpacing=6
 ThumbnailTextLines=2
 WindowWidth=766
 WindowHeight=576
@@ -190,6 +195,8 @@ Path=%USERPROFILE%\Downloads
 | `ThumbnailSize` | 缩略图原生像素边长，48～256。建议 72、96、128 或 160；不会再次乘以 Windows 显示缩放，PopDrop 主面板缩放不为 100% 时才按该比例调整。 |
 | `ThumbnailHorizontalGap` | 相邻图标之间的水平留白，0～128 像素，默认 24。 |
 | `ThumbnailVerticalGap` | 相邻图标行之间的垂直留白，0～128 像素，默认 4。文件名高度由 `ThumbnailTextLines` 另行预留，设为 0 也不会压扁缩略图。 |
+| `FileViewGroupTopSpacing` | 每个分栏在 Windows 原生顶部边界基础上增加的留白，单位 DIP，范围 0～32，默认 4。 |
+| `FileViewGroupBottomSpacing` | 每个分栏在 Windows 原生底部边界基础上增加的留白，单位 DIP，范围 0～32，默认 6。 |
 | `ThumbnailTextLines` | 缩略图文件名显示并预留的行数。`1`=单行紧凑，过长名称按图标宽度显示省略号，完整路径仍可在状态栏查看；`2`=双行，默认 2；其他值会自动限制到 1～2。 |
 | `WindowWidth` / `WindowHeight` | 面板打开时的尺寸。 |
 | `TextBlockCardWidth` / `TextBlockCardHeight` | 文本块卡片宽高，单位 DIP；范围分别为 140–640 和 48–320。增大宽度可显示更长的横向文字，增大高度会自动容纳更多行。 |
@@ -555,6 +562,8 @@ FolderTimeMode=DirectoryModified
 ThumbnailSize=96
 ThumbnailHorizontalGap=24
 ThumbnailVerticalGap=4
+FileViewGroupTopSpacing=4
+FileViewGroupBottomSpacing=6
 ThumbnailTextLines=2
 ; 窗口模式：temporary（默认）| always_on_top（始终置顶）| normal（普通窗口）
 WindowMode=temporary

@@ -115,6 +115,59 @@ ToggleFolderGroupCollapsed(groupId) {
     return true
 }
 
+SetAllFolderGroupsCollapsed(collapsed) {
+    global FileView, GroupDropTargets
+    if !IsObject(FileView)
+        return 0
+    sourceGroups := SourceFolderGroupIds(GroupDropTargets)
+    if !sourceGroups.Length
+        return 0
+    CancelFilePointerGesture()
+    changed := 0
+    for groupId in sourceGroups {
+        descriptor := GroupDropTargets[groupId]
+        if IsListGroupCollapsed(FileView.Hwnd, groupId) != collapsed {
+            if !SetListGroupCollapsed(FileView.Hwnd, groupId, collapsed)
+                continue
+            changed += 1
+        }
+        RememberFolderGroupCollapse(descriptor, collapsed)
+        if collapsed
+            ClearCollapsedGroupSelection(groupId)
+        header := HasProp(descriptor, "BaseHeader")
+            ? descriptor.BaseHeader : descriptor.Name
+        SetListGroupHeader(FileView.Hwnd, groupId,
+            FormatFolderGroupHeader(header, collapsed))
+    }
+    if collapsed {
+        PreviewHide("group-collapse-all", true)
+        UpdateSelectionStatus()
+    }
+    UpdateTransferGroupHeaders()
+    DllCall("user32\RedrawWindow", "ptr", FileView.Hwnd,
+        "ptr", 0, "ptr", 0, "uint", 0x0001 | 0x0080 | 0x0100, "int")
+    SetUserStatus(collapsed
+        ? "已收起当前工作区的全部文件夹"
+        : "已展开当前工作区的全部文件夹")
+    return changed
+}
+
+SourceFolderGroupIds(descriptors) {
+    result := []
+    for groupId, descriptor in descriptors
+        if IsSourceManagementDescriptor(descriptor)
+            result.Push(groupId)
+    return result
+}
+
+ExpandAllFolderGroups(*) {
+    return SetAllFolderGroupsCollapsed(false)
+}
+
+CollapseAllFolderGroups(*) {
+    return SetAllFolderGroupsCollapsed(true)
+}
+
 DrawTextBlockCard(customDraw) {
     global FileView, ItemLabels
     ; Native tile text consumes the full right edge and offers no independent

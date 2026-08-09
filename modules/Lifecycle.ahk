@@ -67,6 +67,7 @@ Cleanup(*) {
 
 CleanupWorkspaceFileViews() {
     global WorkspaceFileViewStates, ThumbnailImageList
+    global FileViewGroupMetricBases
     imageLists := Map()
     if ThumbnailImageList
         imageLists[ThumbnailImageList] := true
@@ -77,5 +78,6 @@ CleanupWorkspaceFileViews() {
     for imageList, _ in imageLists
         DllCall("comctl32\ImageList_Destroy", "ptr", imageList)
     WorkspaceFileViewStates.Clear()
+    FileViewGroupMetricBases.Clear()
     ThumbnailImageList := 0
 }
