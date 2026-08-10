@@ -147,8 +147,15 @@ OpenSettingsGui() {
             return SettingsController
         }
     }
+    ; A destroyed Gui object remains an object, but reading Hwnd throws. Clear
+    ; any stale publication before constructing the replacement controller.
+    if IsObject(SettingsController) && HasProp(SettingsController, "Ready")
+        SettingsController.Ready := false
+    SettingsDialog := 0
+    SettingsController := 0
 
     BeginAutoHidePause()
+    try {
     draft := LoadSettingsIntoDraft()
     guiObj := Gui("+Owner" Panel.Hwnd " -MaximizeBox -MinimizeBox",
         "PopDrop 设置")
@@ -159,6 +166,7 @@ OpenSettingsGui() {
         Gui: guiObj,
         Draft: draft,
         OriginalSignature: SettingsDraftSignature(draft),
+        Ready: false,
         Loading: false,
         SelectedSourceId: "",
         SourceRows: Map(),
@@ -169,9 +177,6 @@ OpenSettingsGui() {
         Child: 0,
         ClosingAfterSave: false
     }
-    SettingsController := controller
-    SettingsDialog := guiObj
-
     navigation := guiObj.AddTreeView("xm ym w156 h752 +0x20")
     sharedRoot := navigation.Add("共享设置", 0, "Expand")
     navGeneral := navigation.Add("通用", sharedRoot)
@@ -239,7 +244,33 @@ OpenSettingsGui() {
     LoadContentUpdateControls(controller)
     navigation.Modify(navGeneral, "Select Vis")
     guiObj.Show("w1050 h820")
+    ; Do not publish a partially constructed controller. Panel timers and
+    ; toolbar state synchronization can interrupt GUI construction on Windows;
+    ; exposing the controller earlier lets them call handlers whose controls
+    ; do not exist yet.
+    controller.Ready := true
+    SettingsController := controller
+    SettingsDialog := guiObj
     return controller
+    } catch as err {
+        SettingsDialog := 0
+        SettingsController := 0
+        if IsSet(controller) && IsObject(controller)
+            controller.Ready := false
+        if IsSet(guiObj)
+            try guiObj.Destroy()
+        try EndAutoHidePause()
+        try PreviewRecoverAfterInteraction()
+        throw err
+    }
+}
+
+SettingsControllerIsReady(c) {
+    if !IsObject(c) || !HasProp(c, "Ready") || !c.Ready
+        return false
+    try return c.Gui.Hwnd != 0
+    catch
+        return false
 }
 
 SettingsNavigationSelected(c, tree, item) {
@@ -1606,9 +1637,9 @@ BuildAboutSettingsPage(c, tabs) {
     project := AddUiButton(g, "x235 y237 w130", "项目主页")
     releases := AddUiButton(g, "x375 y237 w130", "检查更新")
     project.OnEvent("Click", OpenAboutUrl.Bind(
-        "https://github.com/hiforrest/PopDrop"))
+        "https://u.nu/popdrop-github-from-app"))
     releases.OnEvent("Click", OpenAboutUrl.Bind(
-        "https://github.com/hiforrest/PopDrop/releases"))
+        "https://u.nu/popdrop-github-release-from-app"))
 
     g.AddText("x235 y292 w180 h24", "作者")
     author := AddUiButton(g, "x235 y324 w130", "作者主页")
@@ -1629,8 +1660,6 @@ BuildContentUpdateSettingsPage(c, tabs) {
         "保障内容正确，仅限极速模式异常时使用")
     c.ContentUpdateHint := g.AddText("x224 y278 w744 h36 c666666",
         "当前设置会在保存后立即应用。")
-    g.AddText("x224 y350 w744 h44 c666666",
-        "PopDrop 会在空闲时自动维护运行缓存；缓存不包含用户文件内容，不需要手动清理。")
     c.ContentUpdateFast.OnEvent(
         "Click", ContentUpdateControlChanged.Bind(c, "Fast"))
     c.ContentUpdateAccuracy.OnEvent(
@@ -1854,7 +1883,7 @@ LoadDisplayControls(c) {
 
 SyncSettingsDisplayStateFromRuntime() {
     global SettingsController, ShowRecentSidebar, PreviewEnabled
-    if !IsObject(SettingsController)
+    if !SettingsControllerIsReady(SettingsController)
         return
     c := SettingsController
     if !HasProp(c, "ShowRecent") || !HasProp(c, "PreviewEnabled")
@@ -1878,7 +1907,7 @@ SyncSettingsDisplayStateFromRuntime() {
 
 DisplayControlChanged(c, *) {
     global SORT_MODIFIED_DESC, SORT_NAME_ASC
-    if c.Loading
+    if c.Loading || !HasProp(c, "GlobalMax")
         return
     d := c.Draft.General
     d.MaxFilesPerFolder := Trim(c.GlobalMax.Value)
@@ -3765,6 +3794,8 @@ JoinNormalizedPaths(paths) {
 
 SettingsDraftHasChanges(c) {
     global CONTENT_UPDATE_ACCURACY
+    if !SettingsControllerIsReady(c)
+        return false
     CommitCurrentSourceControlsToDraft(c)
     GeneralControlChanged(c)
     DisplayControlChanged(c)
@@ -3792,11 +3823,15 @@ RequestCloseSettings(c, *) {
 DestroySettingsGui(c) {
     global SettingsDialog, SettingsController
     CancelFilePointerGesture()
+    if IsObject(c) && HasProp(c, "Ready")
+        c.Ready := false
     SettingsDialog := 0
     SettingsController := 0
+    if IsObject(c) && HasProp(c, "PdfiumInstallPoll")
+        try SetTimer(c.PdfiumInstallPoll, 0)
     try c.Gui.Destroy()
-    EndAutoHidePause()
-    PreviewRecoverAfterInteraction()
+    try EndAutoHidePause()
+    try PreviewRecoverAfterInteraction()
 }
 
 ValidateSettingsDraft(c) {
@@ -4233,6 +4268,14 @@ SaveSettingsDraftCore(c, closeAfter) {
                 BuildTrayMenu()
             }
         }
+        ; Applying settings repopulates the native view before all subsequent
+        ; operations have completed. If a later operation fails, rebuild from
+        ; the restored runtime state so the user is not left with an empty
+        ; panel after the rollback.
+        try SyncWorkspaceControls()
+        try PopulatePanel()
+        try PopulateRecentSidebar()
+        try StartBackgroundScan(0, "settings-rollback", true)
         SettingsMessage(c, "无法保存设置：`n" err.Message,
             "保存设置失败", "Iconx")
         return false
@@ -4528,7 +4571,17 @@ AdvancedSettingsClicked(c, *) {
 }
 
 SettingsMessage(c, text, title := "PopDrop 设置", options := "") {
-    ownerHwnd := IsObject(c.Child) ? c.Child.Hwnd : c.Gui.Hwnd
-    opts := Trim(options " Owner" ownerHwnd)
+    ownerHwnd := 0
+    try {
+        if IsObject(c) && HasProp(c, "Child") && IsObject(c.Child)
+            ownerHwnd := c.Child.Hwnd
+    }
+    if !ownerHwnd {
+        try {
+            if IsObject(c) && HasProp(c, "Gui")
+                ownerHwnd := c.Gui.Hwnd
+        }
+    }
+    opts := Trim(options (ownerHwnd ? " Owner" ownerHwnd : ""))
     return MsgBox(text, title, opts)
 }
