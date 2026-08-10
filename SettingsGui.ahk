@@ -265,7 +265,6 @@ LoadSettingsIntoDraft() {
     global PreviewDocumentEnabled, PreviewPdfEnabled
     global PreviewShowFileInfo
     global ContentUpdateMode
-    global CacheCleanupEnabled, CacheRetentionDays
     global UiScaleMode, ThumbnailSize, ThumbnailHorizontalGap
     global ThumbnailVerticalGap, ThumbnailTextLines
     global FileViewGroupTopSpacing, FileViewGroupBottomSpacing
@@ -340,8 +339,6 @@ LoadSettingsIntoDraft() {
             SeerIntegrationEnabled: SeerIntegrationEnabled,
             QuickLookPath: QuickLookPath,
             ContentUpdateMode: ContentUpdateMode,
-            CacheCleanupEnabled: CacheCleanupEnabled,
-            CacheRetentionDays: CacheRetentionDays,
             UiScaleMode: UiScaleMode,
             WindowWidth: WindowWidth,
             WindowHeight: WindowHeight,
@@ -1632,29 +1629,12 @@ BuildContentUpdateSettingsPage(c, tabs) {
         "保障内容正确，仅限极速模式异常时使用")
     c.ContentUpdateHint := g.AddText("x224 y278 w744 h36 c666666",
         "当前设置会在保存后立即应用。")
-    g.AddGroupBox("x200 y350 w818 h205", "缓存管理 · 应用于所有工作区")
-    c.CacheCleanupEnabled := g.AddCheckBox("x224 y382",
-        "自动管理缓存（推荐；启动时及每小时整理）")
-    g.AddText("x590 yp+3 w86", "保留期限：")
-    c.CacheRetentionDays := AddUiEdit(g, "x675 yp-4 w58 Number")
-    g.AddText("x742 yp+4 w90 c666666", "天（1–90）")
-    c.CacheCleanNow := AddUiButton(g, "x224 y425 w106", "立即整理")
-    c.CacheOpenFolder := AddUiButton(g, "x+8 yp w120", "打开缓存目录")
-    c.CacheMaintenanceStatus := g.AddText(
-        "x470 yp+5 w515 h22 c555555", "")
-    c.CacheMaintenanceDetail := g.AddText(
-        "x224 y468 w760 h60 c666666", "")
+    g.AddText("x224 y350 w744 h44 c666666",
+        "PopDrop 会在空闲时自动维护运行缓存；缓存不包含用户文件内容，不需要手动清理。")
     c.ContentUpdateFast.OnEvent(
         "Click", ContentUpdateControlChanged.Bind(c, "Fast"))
     c.ContentUpdateAccuracy.OnEvent(
         "Click", ContentUpdateControlChanged.Bind(c, "Accuracy"))
-    c.CacheCleanupEnabled.OnEvent(
-        "Click", ContentUpdateControlChanged.Bind(c, ""))
-    c.CacheRetentionDays.OnEvent(
-        "Change", ContentUpdateControlChanged.Bind(c, ""))
-    c.CacheCleanNow.OnEvent("Click", RunCacheMaintenanceFromSettings.Bind(c))
-    c.CacheOpenFolder.OnEvent(
-        "Click", OpenCacheDirectoryFromSettings.Bind(c))
 }
 
 ContentUpdateControlChanged(c, selectedMode := "", *) {
@@ -1675,8 +1655,6 @@ ContentUpdateControlChanged(c, selectedMode := "", *) {
             c.Draft.General.ContentUpdateMode := CONTENT_UPDATE_FAST
         }
     }
-    c.Draft.General.CacheCleanupEnabled := c.CacheCleanupEnabled.Value != 0
-    c.Draft.General.CacheRetentionDays := Trim(c.CacheRetentionDays.Value)
 }
 
 LoadContentUpdateControls(c) {
@@ -1686,49 +1664,7 @@ LoadContentUpdateControls(c) {
         mode := c.Draft.General.ContentUpdateMode
         c.ContentUpdateFast.Value := mode != CONTENT_UPDATE_ACCURACY
         c.ContentUpdateAccuracy.Value := mode = CONTENT_UPDATE_ACCURACY
-        c.CacheCleanupEnabled.Value :=
-            c.Draft.General.CacheCleanupEnabled ? 1 : 0
-        c.CacheRetentionDays.Value := c.Draft.General.CacheRetentionDays
-        RefreshCacheMaintenanceStatus(c)
     } finally c.Loading := false
-}
-
-RefreshCacheMaintenanceStatus(c) {
-    global CacheDir, CacheMaintenanceLastResult
-    statistics := CacheDirectoryStatistics(CacheDir)
-    c.CacheMaintenanceStatus.Text := "当前占用 "
-        . FormatCacheByteCount(statistics.Bytes)
-        . "，共 " statistics.Items " 个文件"
-    result := CacheMaintenanceLastResult
-    if IsObject(result) {
-        detail := "最近整理：" FormatTime(result.RanAt, "yyyy-MM-dd HH:mm")
-            . "；已移除 " result.RemovedItems " 项（"
-            . FormatCacheByteCount(result.RemovedBytes) . "）"
-        if result.FailedItems
-            detail .= "；" result.FailedItems " 项暂时占用，稍后重试"
-    } else
-        detail := "自动管理当前未运行；保存设置后会按所选策略执行。"
-    c.CacheMaintenanceDetail.Text := detail "`n缓存目录：" CacheDir
-}
-
-RunCacheMaintenanceFromSettings(c, *) {
-    result := RunCacheMaintenance(true)
-    RefreshCacheMaintenanceStatus(c)
-    message := "缓存整理完成：移除 " result.RemovedItems " 项（"
-        . FormatCacheByteCount(result.RemovedBytes) . "）。"
-    if result.FailedItems
-        message .= "`n`n另有 " result.FailedItems
-            . " 项正在使用或暂时无法删除，程序会在下次周期继续处理。"
-    SettingsMessage(c, message, "缓存整理", "Iconi")
-}
-
-OpenCacheDirectoryFromSettings(c, *) {
-    global CacheDir
-    if CacheDir = "" || !EnsureCacheDirectory(CacheDir) {
-        SettingsMessage(c, "缓存目录当前不可用。", "缓存目录", "Icon!")
-        return
-    }
-    OpenFolderInFileManager(CacheDir)
 }
 
 LoadGeneralControls(c) {
@@ -3755,7 +3691,6 @@ SettingsDraftSignature(draft) {
         g.FileViewGroupBottomSpacing "", g.ThumbnailTextLines "",
         g.TextBlockCardWidth "", g.TextBlockCardHeight "",
         g.ContentUpdateMode,
-        g.CacheCleanupEnabled ? "1" : "0", g.CacheRetentionDays "",
         g.ShowRecentSidebar ? "1" : "0",
         g.RecentFileCount "", g.MaxFilesPerFolder "", g.SortMode,
         ParseFileManagerProvider(g.FileManagerProvider),
@@ -3945,8 +3880,6 @@ ValidateSettingsDraft(c) {
         errors.Push("窗口高度必须是 380–2000 的整数。")
     if !ValueInArray(d.General.ThumbnailPolicy, ["Fast", "Full"])
         errors.Push("图标质量设置无效。")
-    if !IsIntegerText(d.General.CacheRetentionDays, 1, 90)
-        errors.Push("缓存保留期限必须是 1–90 天的整数。")
     if !IsIntegerText(d.General.ThumbnailSize, 48, 256)
         errors.Push("图标大小必须是 48–256 的整数。")
     if !IsIntegerText(d.General.ThumbnailHorizontalGap, 0, 128)
@@ -4384,10 +4317,6 @@ WriteSettingsDraft(draft, tempPath) {
         g.ShowRecentSidebar ? "1" : "0", 1)
     doc.SetValue("General", "ContentUpdateMode",
         g.ContentUpdateMode, 1)
-    doc.SetValue("General", "CacheCleanupEnabled",
-        g.CacheCleanupEnabled ? "1" : "0", 1)
-    doc.SetValue("General", "CacheRetentionDays",
-        g.CacheRetentionDays, 1)
     doc.SetValue("General", "UiScale", g.UiScaleMode, 1)
     doc.SetValue("General", "WindowWidth", g.WindowWidth, 1)
     doc.SetValue("General", "WindowHeight", g.WindowHeight, 1)

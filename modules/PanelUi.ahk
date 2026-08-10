@@ -13,7 +13,7 @@ BuildPanel() {
     global UiScaleFactor, PanelUiScaleFactor
     global PANEL_TAB_HEIGHT_PX, PANEL_TAB_FONT_PX
     global PANEL_TAB_PADDING_X_PX, PANEL_TAB_PADDING_Y_PX
-    global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
+    global FolderDropAddSourceButton, FolderDropPinnedZone
     global ToolbarSeparators
 
     PanelUiScaleFactor := UiScaleFactor
@@ -85,31 +85,23 @@ BuildPanel() {
     Loop 6
         ToolbarSeparators.Push(AddPanelDashedSeparator(Panel,
             "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h1"))
-    ToolbarControls := [WorkspaceTabs, WorkspaceMoreButton, RefreshButton,
-        ClipboardPinnedButton, ExpandAllFoldersButton,
-        CollapseAllFoldersButton, PinnedDropButton, RemovePinnedButton,
-        DisplayButton, SettingsButton, WindowModeButton]
-    for separator in ToolbarSeparators
-        ToolbarControls.Push(separator)
-
     TextBlockSearchEdit := AddUiEdit(Panel,
         ScalePanelGuiOptions("x430 y8 w196 h26 Hidden"), "")
     TextBlockSearchEdit.OnEvent("Change", TextBlockSearchChanged)
     DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
         "uint", 0x1501, "ptr", 1,
         "wstr", "空格分隔多个关键字（AND）", "ptr")
-    ToolbarControls.Push(TextBlockSearchEdit)
 
-    ; Pre-create the compact folder-only drop surface. It occupies the same
-    ; toolbar band and never changes the ListView geometry.
+    ; Pre-create the smart drop surfaces. They cover only the top navigation
+    ; band; the independent right action rail remains visible.
     FolderDropAddSourceButton := Panel.AddButton(
-        ScalePanelGuiOptions("x12 y4 w510 h36 Hidden -Tabstop +0x2000"),
-        "＋ 添加为来源`n当前工作区")
-    FolderDropPinnedButton := Panel.AddButton(
-        ScalePanelGuiOptions("x530 y4 w224 h36 Hidden -Tabstop +0x2000"),
-        "☆ 加入固定项`n不会移动文件夹")
+        ScalePanelGuiOptions("x12 y0 w742 h30 Hidden -Tabstop +0x2000"),
+        "+ 松开，将文件添加为来源")
     FolderDropAddSourceButton.Visible := false
-    FolderDropPinnedButton.Visible := false
+    FolderDropPinnedZone := Panel.AddButton(
+        ScalePanelGuiOptions("x532 y0 w222 h30 Hidden -Tabstop +0x2000"),
+        "⭐ 松开，将文件加入固定项")
+    FolderDropPinnedZone.Visible := false
 
     FileView := CreatePanelFileView()
     
@@ -130,15 +122,14 @@ BuildPanel() {
     WorkspaceBottomRule := AddPanelSolidRule(Panel,
         "x0 y0 w10 h1",
         0x00B9B9B9)
-    ToolbarControls.Push(WorkspaceBottomRule)
-
     StatusText := Panel.AddText(ScalePanelGuiOptions(
-        "xm y+0 w372 h42 +0xD +0x100"), "已是最新")
+        "xm y+0 w604 h42 +0xD +0x100"), "已是最新")
     StatusText.OnEvent("Click", HandleStatusAction)
-    ItemCountText := Panel.AddText(ScalePanelGuiOptions(
-        "x+8 yp w112 h42 +0xD +0x100"), "共0项")
+    ; Keep the count as workspace state only. It is intentionally not a
+    ; footer control: long paths and status details own all remaining width.
+    ItemCountText := {Text: "共0项"}
     TransferStatusText := Panel.AddText(
-        ScalePanelGuiOptions("x+8 yp w208 h42 +0xD +0x100"), "↓ 下载")
+        ScalePanelGuiOptions("x+8 yp w84 h42 +0xD +0x100"), "↓下载")
     TransferStatusText.OnEvent("Click", OpenTransferCenter)
     Panel.OnEvent("Close", HandlePanelClose)
     Panel.OnEvent("Escape", HandlePanelEscape)
@@ -967,6 +958,12 @@ AutoHideNativeHidden(wParam, lParam, msg, hwnd) {
     global Panel, PanelVisible
     if !IsObject(Panel)
         return
+    ; The native timer hides first and posts cleanup second. A hotkey may show
+    ; the same HWND again before this queued message is dispatched; never let
+    ; that stale cleanup tear down the new visible session.
+    if Panel.Hwnd && DllCall("user32\IsWindowVisible",
+        "ptr", Panel.Hwnd, "int")
+        return
     ; Synchronize AHK-owned preview, drag and selection state after the native
     ; guard has already made the panel invisible.
     if PanelVisible
@@ -1503,10 +1500,31 @@ PresentMainHotkeyWorkspace(action) {
     if !PanelVisible
         ShowPanelInstant()
     else {
-        try WinRestore("ahk_id " Panel.Hwnd)
-        WinActivate("ahk_id " Panel.Hwnd)
         QueuePanelShowFinish()
+        ActivatePanelWindowSafely(true)
     }
+}
+
+ActivatePanelWindowSafely(restore := false) {
+    global Panel
+    CancelCacheMaintenanceOpportunity()
+    if !IsObject(Panel) || !Panel.Hwnd
+        return false
+    hwnd := Panel.Hwnd
+    if !DllCall("user32\IsWindow", "ptr", hwnd, "int")
+        return false
+
+    ; Use the HWND directly. AHK's WinActivate performs a fresh window-title
+    ; lookup and throws if native auto-hide changes visibility in that small
+    ; interval. These HWND operations do not throw, so display completion can
+    ; continue even when Windows declines foreground activation.
+    if restore && DllCall("user32\IsIconic", "ptr", hwnd, "int")
+        DllCall("user32\ShowWindow", "ptr", hwnd, "int", 9) ; SW_RESTORE
+    else if !DllCall("user32\IsWindowVisible", "ptr", hwnd, "int")
+        DllCall("user32\ShowWindow", "ptr", hwnd, "int", 5) ; SW_SHOW
+    DllCall("user32\BringWindowToTop", "ptr", hwnd, "int")
+    DllCall("user32\SetForegroundWindow", "ptr", hwnd, "int")
+    return true
 }
 
 ShowPanelInstant(*) {
@@ -1532,8 +1550,8 @@ ShowPanelInstant(*) {
     AutoHidePanelShownTick := A_TickCount
     if WindowMode = WINDOW_MODE_TEMPORARY
         StartAutoHideWatchdog()
-    WinActivate("ahk_id " Panel.Hwnd)
     QueuePanelShowFinish(MainHotkeyDoubleTolerance() + 40)
+    ActivatePanelWindowSafely()
     return true
 }
 
@@ -1579,6 +1597,7 @@ FinishPanelShow(generation) {
         StatusKind := "default"
         StatusText.Text := "已是最新"
     }
+    RedrawFooterTextControls()
     UpdateWindowModeButton()
     CheckRefreshPolicyOnShow()
     if !CurrentScanComplete && !WorkerRunning
@@ -1692,7 +1711,7 @@ ShowWorkspaceByHotkey(workspaceId, *) {
     if !PanelVisible
         ShowAndRefresh()
     else {
-        WinActivate("ahk_id " Panel.Hwnd)
+        ActivatePanelWindowSafely(true)
         if IsTextWorkspace()
             RestoreTextBlockSearchFocus()
     }
@@ -1710,8 +1729,7 @@ TogglePanel(*) {
     ; 普通窗口模式：面板被覆盖或最小化时，第一次按快捷键应恢复并带到前台
     if WindowMode = WINDOW_MODE_NORMAL
         && !WinActive("ahk_id " Panel.Hwnd) {
-        try WinRestore("ahk_id " Panel.Hwnd)
-        WinActivate("ahk_id " Panel.Hwnd)
+        ActivatePanelWindowSafely(true)
         return
     }
 
@@ -1741,7 +1759,7 @@ ShowAndRefresh(*) {
     AutoHidePanelShownTick := A_TickCount
     if WindowMode = WINDOW_MODE_TEMPORARY
         StartAutoHideWatchdog()
-    WinActivate("ahk_id " Panel.Hwnd)
+    ActivatePanelWindowSafely()
 
     if !ScanResultLoaded
         LoadDiskScanCache()
@@ -1755,6 +1773,7 @@ ShowAndRefresh(*) {
         StatusKind := "default"
         StatusText.Text := "已是最新"
     }
+    RedrawFooterTextControls()
     UpdateWindowModeButton()
     CheckRefreshPolicyOnShow()
     ; A worker may have been canceled after publishing only part of a cold
@@ -1817,6 +1836,7 @@ HidePanel(*) {
     AutoHidePauseDepth := 0
     ClearTextBlockSearch(false)
     RunPendingConsistencyCheckAfterHide()
+    ScheduleCacheMaintenanceAfterHide()
 }
 
 HandlePanelClose(*) {
@@ -1919,18 +1939,13 @@ ResizePanel(guiObj, minMax, width, height) {
 
     ; Keep the transfer affordance inside the file region. Its right edge is
     ; exactly the same as FileView's right edge, never under the icon rail.
-    transferWidth := Min(PanelScale(220),
-        Max(PanelScale(140), Floor(width * 0.22)))
+    transferWidth := PanelScale(84)
     footerTop := height - footerHeight
     footerGap := PanelScale(8)
-    countWidth := PanelScale(112)
     transferX := fileRight - transferWidth
-    countX := transferX - footerGap - countWidth
     stateWidth := Max(PanelScale(100),
-        countX - footerGap - outerMargin)
+        transferX - footerGap - outerMargin)
     StatusText.Move(outerMargin, footerTop, stateWidth, footerHeight)
-    ItemCountText.Move(outerMargin + stateWidth + footerGap,
-        footerTop, countWidth, footerHeight)
     TransferStatusText.Move(transferX,
         footerTop, transferWidth, footerHeight)
 }
@@ -2337,57 +2352,97 @@ LayoutSideToolbar(width, contentTop, contentHeight) {
 }
 
 ResizeFolderDropControls(width) {
-    global FolderDropAddSourceButton, FolderDropPinnedButton
+    global FolderDropAddSourceButton, FolderDropPinnedZone
+    global FolderDropUiMode
+    global PANEL_SIDE_TOOLBAR_WIDTH, PANEL_SIDE_TOOLBAR_GAP
+    global PANEL_SIDE_TOOLBAR_EDGE_GAP
     if !IsObject(FolderDropAddSourceButton)
         return
-    if IsTextWorkspace() {
-        FolderDropAddSourceButton.Move(PanelScale(12), PanelScale(4),
-            Max(PanelScale(160), width - PanelScale(24)), PanelScale(36))
-        return
+    panelHwnd := DllCall("user32\GetParent",
+        "ptr", FolderDropAddSourceButton.Hwnd, "ptr")
+    sideWidth := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_WIDTH, panelHwnd)
+    sideGap := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_GAP, panelHwnd)
+    edgeGap := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_EDGE_GAP, panelHwnd)
+    contentWidth := width - PanelScale(12) - sideWidth - sideGap - edgeGap
+    contentWidth := Max(PanelScale(160), contentWidth)
+    if FolderDropUiMode = "FoldersSplit" && IsObject(FolderDropPinnedZone) {
+        splitGap := PanelPixelsToGui(4, panelHwnd)
+        leftWidth := Floor((contentWidth - splitGap) * 0.7)
+        rightWidth := contentWidth - splitGap - leftWidth
+        FolderDropAddSourceButton.Move(PanelScale(12), 0,
+            leftWidth, PanelScale(30))
+        FolderDropPinnedZone.Move(PanelScale(12) + leftWidth + splitGap,
+            0, rightWidth, PanelScale(30))
+    } else {
+        FolderDropAddSourceButton.Move(PanelScale(12), 0,
+            contentWidth, PanelScale(30))
     }
-    gap := PanelScale(8)
-    available := Max(PanelScale(300), width - PanelScale(24) - gap)
-    primaryWidth := Floor(available * 0.7)
-    secondaryWidth := available - primaryWidth
-    FolderDropAddSourceButton.Move(PanelScale(12), PanelScale(4),
-        primaryWidth, PanelScale(36))
-    FolderDropPinnedButton.Move(
-        PanelScale(12) + primaryWidth + gap, PanelScale(4),
-        secondaryWidth, PanelScale(36))
 }
 
-ShowFolderDropMode() {
-    global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
-    global FolderDropUiVisible, ActiveWorkspaceName, PanelLayoutWidth
+ShowFolderDropMode(mode := "Folders", itemCount := 1,
+    workspaceName := "") {
+    global FolderDropAddSourceButton, FolderDropPinnedZone
+    global FolderDropUiVisible, FolderDropUiMode
+    global ActiveWorkspaceName, PanelLayoutWidth
     if !IsObject(FolderDropAddSourceButton)
         return
-    FolderDropAddSourceButton.Text := "＋ 添加为来源`n当前工作区："
-        . ActiveWorkspaceName
-    FolderDropPinnedButton.Text := "☆ 加入固定项`n不会移动文件夹"
-    ResizeFolderDropControls(PanelLayoutWidth)
-    if FolderDropUiVisible
+    if workspaceName = ""
+        workspaceName := ActiveWorkspaceName
+    if mode = "Files"
+        sourceText := "⭐ 松开，将文件加入固定项"
+    else
+        sourceText := "+ 松开，将文件添加为来源"
+    pinnedText := mode = "FoldersSplit"
+        ? "⭐ 松开，将文件加入固定项"
+        : ""
+    ; DragOver can arrive hundreds of times per second. Text assignment on a
+    ; native Button invalidates its parent, so do nothing when the complete
+    ; overlay state is already current.
+    if FolderDropUiVisible && FolderDropUiMode = mode
+        && FolderDropAddSourceButton.Text = sourceText
+        && (!IsObject(FolderDropPinnedZone)
+            || FolderDropPinnedZone.Text = pinnedText)
         return
+    FolderDropAddSourceButton.Text := sourceText
+    if IsObject(FolderDropPinnedZone)
+        FolderDropPinnedZone.Text := pinnedText
+    FolderDropUiMode := mode
+    ResizeFolderDropControls(PanelLayoutWidth)
     ResetPanelIconHover()
-    for control in ToolbarControls
-        control.Visible := false
     FolderDropAddSourceButton.Visible := true
-    FolderDropPinnedButton.Visible := !IsTextWorkspace()
+    if IsObject(FolderDropPinnedZone)
+        FolderDropPinnedZone.Visible := mode = "FoldersSplit"
+    ; Never hide the native Tab3: the ListView pages and their registered OLE
+    ; targets depend on it remaining visible. Overlay this sibling above the
+    ; navigation controls instead, leaving every content drop target alive.
+    DllCall("user32\SetWindowPos", "ptr",
+        FolderDropAddSourceButton.Hwnd, "ptr", 0,
+        "int", 0, "int", 0, "int", 0, "int", 0,
+        "uint", 0x0053, "int") ; NOMOVE|NOSIZE|NOACTIVATE|SHOWWINDOW
+    if mode = "FoldersSplit" && IsObject(FolderDropPinnedZone)
+        DllCall("user32\SetWindowPos", "ptr",
+            FolderDropPinnedZone.Hwnd, "ptr", 0,
+            "int", 0, "int", 0, "int", 0, "int", 0,
+            "uint", 0x0053, "int")
     FolderDropUiVisible := true
 }
 
 HideFolderDropMode() {
-    global ToolbarControls, FolderDropAddSourceButton, FolderDropPinnedButton
-    global FolderDropUiVisible
+    global FolderDropAddSourceButton, FolderDropPinnedZone
+    global FolderDropUiVisible, FolderDropUiMode
+    ; The normal state is already hidden. Avoid rebuilding Tab/status UI on
+    ; every DragOver when a visible pinned group is the active drop target.
+    if !FolderDropUiVisible
+        return
     SetAddSourceDropHover(false)
     SetPinnedDropHover(false)
     if IsObject(FolderDropAddSourceButton)
         FolderDropAddSourceButton.Visible := false
-    if IsObject(FolderDropPinnedButton)
-        FolderDropPinnedButton.Visible := false
-    for control in ToolbarControls
-        control.Visible := true
+    if IsObject(FolderDropPinnedZone)
+        FolderDropPinnedZone.Visible := false
     UpdateWorkspaceTypeUi()
     FolderDropUiVisible := false
+    FolderDropUiMode := ""
 }
 
 RequestNativeLayout() {

@@ -94,6 +94,34 @@ RunSelfTests() {
         AssertSelfTest(NormalizeEditedTextBlock(
             "`r`n正文`r`n`r`n") = "`n正文`n`n",
             "编辑文本块保留首尾空行")
+        AssertSelfTest(NormalizeTerminalSendText(
+            "`r`n`n  正文`r内部`n正文  `r`n")
+            = "  正文`r内部`n正文  ",
+            "终端正文只清理绝对首尾的混合换行")
+        AssertSelfTest(NormalizeTerminalSendText(
+            "  `r`n正文`r`n  ") = "  `r`n正文`r`n  ",
+            "终端正文不跨越普通空格清理换行")
+        AssertSelfTest(!TerminalTextHasMeaningfulContent(" `t　`r`n"),
+            "终端空白正文停止发送")
+        AssertSelfTest(TerminalTextHasLineBreak("第一行`r第二行"),
+            "CR 也属于终端真实换行")
+        safeChinese := "请分析以下内容，并给出清晰的修改建议：`r`n`r`n"
+            . "## Windows Terminal compatibility`n"
+            . "- 请保留 README.md、AutoHotkey v2 和 C++ 术语。`n"
+            . "> 说明应使用 **中文自然语言**，不要改变原文。"
+        AssertSelfTest(IsHighConfidenceChineseNaturalLanguage(safeChinese),
+            "高置信度中文 Markdown 多行正文可以免二次确认")
+        AssertSelfTest(!IsHighConfidenceChineseNaturalLanguage(
+            "请执行以下命令：`n`ngit status`ngit push origin main"),
+            "独立英文命令行使中文正文退出规则白名单")
+        codeFence := Chr(96) Chr(96) Chr(96)
+        AssertSelfTest(!IsHighConfidenceChineseNaturalLanguage(
+            "请检查下面的脚本：`n" codeFence "powershell`nGet-Process`n"
+            . codeFence),
+            "代码围栏使中文正文退出规则白名单")
+        AssertSelfTest(!IsHighConfidenceChineseNaturalLanguage(
+            "请检查仓库状态：`ngit status | findstr modified"),
+            "管道结构使中文正文退出规则白名单")
         AssertSelfTest(ParseGlobalOpenFileMode("") = OPEN_MODE_DOUBLE,
             "缺失全局打开方式回退为双击")
         AssertSelfTest(ParseGlobalOpenFileMode("broken") = OPEN_MODE_DOUBLE,
@@ -420,6 +448,35 @@ RunSelfTests() {
             "C:\Work\Old\child.txt", renameMappings)
             = "C:\Work\New\child.txt",
             "重命名或移动文件夹时同步固定的后代路径")
+        crossVolumeSnapshot := {Folders: [
+            {Files: [
+                {Path: "W:\Dump\2026\moved.webp"},
+                {Path: "W:\Dump\2026\keep.webp"}]},
+            {Files: [
+                {Path: "D:\Download\moved.webp"}]}
+        ]}
+        removedCrossVolumeItems := RemoveMovedPathsFromScanResult(
+            crossVolumeSnapshot, ["W:\Dump\2026\moved.webp"])
+        AssertSelfTest(removedCrossVolumeItems = 1
+            && crossVolumeSnapshot.Folders[1].Files.Length = 1
+            && PathsEqual(
+                crossVolumeSnapshot.Folders[1].Files[1].Path,
+                "W:\Dump\2026\keep.webp")
+            && crossVolumeSnapshot.Folders[2].Files.Length = 1,
+            "跨磁盘移动后立即移除源卡片并保留目标卡片")
+        movedFolderSnapshot := {Folders: [{Files: [
+            {Path: "W:\Root\MovedFolder"},
+            {Path: "W:\Root\MovedFolder\child.txt"},
+            {Path: "W:\Root\keep.txt"}
+        ]}]}
+        removedMovedFolderItems := RemoveMovedPathsFromScanResult(
+            movedFolderSnapshot, ["W:\Root\MovedFolder"])
+        AssertSelfTest(removedMovedFolderItems = 2
+            && movedFolderSnapshot.Folders[1].Files.Length = 1
+            && PathsEqual(
+                movedFolderSnapshot.Folders[1].Files[1].Path,
+                "W:\Root\keep.txt"),
+            "跨磁盘移动文件夹后同时移除缓存中的后代卡片")
         session := CreateDropSessionState()
         session.Paused := true
         MarkDropSessionFinished(session, "success")
@@ -514,22 +571,20 @@ RunCacheMaintenanceSelfTests() {
         "AHK 维护器不越权删除原生预览缓存目录")
     valid := Map("workspace-1234abcd.ini", true)
     AssertSelfTest(!CacheMaintenanceShouldDelete(
-        "Transient", "request-x.ini", 899, 7, false, false, valid)
+        "Transient", "request-x.ini", 899, false, valid)
         && CacheMaintenanceShouldDelete(
-            "Transient", "request-x.ini", 900, 7, false, false, valid),
+        "Transient", "request-x.ini", 900, false, valid),
         "扫描临时缓存保留十五分钟安全窗口")
     AssertSelfTest(!CacheMaintenanceShouldDelete(
-        "Transient", "request-x.ini", 999999, 7, true, true, valid),
+        "Transient", "request-x.ini", 999999, true, valid),
         "正在使用的扫描缓存永不清理")
     AssertSelfTest(!CacheMaintenanceShouldDelete(
-        "Workspace", "workspace-1234abcd.ini", 999999, 7,
-        true, false, valid)
+        "Workspace", "workspace-1234abcd.ini", 999999, false, valid)
         && CacheMaintenanceShouldDelete(
-            "Workspace", "workspace-deadbeef.ini", 999999, 7,
-            true, false, valid),
+            "Workspace", "workspace-deadbeef.ini", 999999, false, valid),
         "只清理已删除工作区的孤立快照")
-    AssertSelfTest(FormatCacheByteCount(1536) = "1.5 KB",
-        "缓存容量使用易读单位")
+    AssertSelfTest(RegExMatch(CacheMaintenanceToday(), "^\d{8}$"),
+        "每日维护日期使用本地自然日")
 }
 
 RunFolderDropSelfTests() {
@@ -558,11 +613,27 @@ RunFolderDropSelfTests() {
         AssertSelfTest(ClassifyDropPaths([missingPath]) = "Unknown"
             && !IsPersistableFileSystemFolder(missingPath),
             "不存在路径不能添加为来源")
-        AssertSelfTest(ShouldShowFolderDropMode("FoldersOnly")
-            && !ShouldShowFolderDropMode("FilesOnly")
-            && !ShouldShowFolderDropMode("Mixed")
-            && !ShouldShowFolderDropMode("Unknown"),
-            "只有 FoldersOnly 显示顶部拖放模式")
+        smartSession := CreateDropSessionState()
+        smartSession.PathsCached := true
+        smartSession.Paths := [firstFolder]
+        smartSession.PayloadKind := "FoldersOnly"
+        AssertSelfTest(ResolveSmartDropMode(smartSession) = "Folders",
+            "外部纯文件夹显示顶部来源入口")
+        smartSession.IsInternal := true
+        AssertSelfTest(ResolveSmartDropMode(smartSession) = "",
+            "内部文件夹不显示顶部来源入口")
+        smartSession.Paths := [filePath]
+        smartSession.PayloadKind := "FilesOnly"
+        AssertSelfTest(ResolveSmartDropMode(smartSession, false) = "Files"
+            && ResolveSmartDropMode(smartSession, true) = "",
+            "内部纯文件仅在没有可命中固定项分组时显示顶部入口")
+        smartSession.IsInternal := false
+        AssertSelfTest(ResolveSmartDropMode(smartSession, false) = "Files"
+            && ResolveSmartDropMode(smartSession, true) = "",
+            "外部纯文件仅在没有可命中固定项分组时显示顶部入口")
+        smartSession.PayloadKind := "Mixed"
+        AssertSelfTest(ResolveSmartDropMode(smartSession) = "",
+            "混合选择不显示顶部入口")
 
         stableDecision := {
             Adapter: DROP_ADAPTER_HDROP,

@@ -255,6 +255,7 @@ PopulatePanel() {
         StatusKind := "default"
         StatusText.Text := "已是最新"
     }
+    RedrawFooterTextControls()
     PanelRenderSignature := ComputePanelRenderSignature()
     PanelRenderedWorkspaceId := ActiveWorkspaceId
     if ThumbnailEnhanceQueue.Length
@@ -1602,6 +1603,7 @@ StartBackgroundScan(sourceKeys := 0, reason := "auto", includeRecent := -1) {
     }
     if WorkerRunning {
         if !IsObject(sourceKeys) && WorkerFullScan
+            && reason != "file-operation"
             return
         PendingRefresh := true
         if !IsObject(sourceKeys)

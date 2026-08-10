@@ -11,12 +11,23 @@ OpenFileViewItem(list, row) {
         return
     PreviewHide("open", true)
     path := ItemPaths[row]
-    if GetPointerModifierMask() != 0
-        return
+    modifiers := GetPointerModifierMask()
     if IsTextWorkspace() && IsTextBlockPath(path) {
-        QuickSendTextBlocks([path])
+        ; Double-click sends the clicked block. Holding Shift alone selects
+        ; the existing prepend path; other modifier combinations remain inert
+        ; so Ctrl/Alt/Win selection and shell gestures cannot send by accident.
+        if modifiers = 0x02 {
+            ; Native ListView applies Shift range selection before NM_DBLCLK.
+            ; The send owns only this row, so commit the same single-row state
+            ; before HidePanel preserves the hot view for the next summon.
+            CollapseListSelectionToRow(list, row, true)
+            PrependTextBlocks([path])
+        } else if modifiers = 0
+            QuickSendTextBlocks([path])
         return
     }
+    if modifiers != 0
+        return
     ; 文件夹始终保持双击激活，不受单击模式影响。
     if IsListItemFolder(list, row, path) {
         OpenFolderInFileManager(path)
@@ -432,6 +443,7 @@ SetUserStatus(text) {
         LastOpenAppUndoState := 0
         StatusKind := "user"
         StatusText.Text := text
+        RedrawFooterTextControls()
     }
 }
 
@@ -441,6 +453,7 @@ SetActionStatus(text, action) {
     if IsObject(StatusText) {
         StatusKind := "user"
         StatusText.Text := text
+        RedrawFooterTextControls()
     }
 }
 
@@ -449,6 +462,7 @@ RecentItemSelect(list, row, selected) {
     if selected && RecentItemPaths.Has(row) {
         StatusKind := "user"
         StatusText.Text := RecentItemPaths[row]
+        RedrawFooterTextControls()
         QuickPreviewScheduleUpdate()
     }
 }
@@ -515,7 +529,9 @@ UpdateSelectionStatus() {
         StatusText.Text := "已选择 " selectedRows.Length " 个项目；可继续 Ctrl/Shift 选择。"
     } else if StatusKind = "user" {
         StatusKind := "default"
+        StatusText.Text := "已是最新"
     }
+    RedrawFooterTextControls()
 }
 
 GetSelectedFileRows() {

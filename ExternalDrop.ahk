@@ -852,13 +852,13 @@ UpdateTransferUi() {
             if !TransferUiActiveDetectedTick
                 TransferUiActiveDetectedTick := now
             count := aggregate.Active + aggregate.Queued
-            text := "↓ 正在下载 " count " 项"
+            text := "↓" count
             if aggregate.KnownTotal && aggregate.Total > 0
-                text .= " · " Round(aggregate.Done * 100 / aggregate.Total) "%"
+                text .= " " Round(aggregate.Done * 100 / aggregate.Total) "%"
             if ElapsedTickMilliseconds(
                 TransferUiActiveDetectedTick, now) < 300
                 && !TransferUiActiveShownTick {
-                TransferStatusText.Text := "↓ 下载"
+                TransferStatusText.Text := "↓下载"
                 remaining := 300 - ElapsedTickMilliseconds(
                     TransferUiActiveDetectedTick, now)
                 SetTimer(UpdateTransferUi, -Max(1, remaining))
@@ -883,23 +883,22 @@ UpdateTransferUi() {
                 if aggregate.UnseenFailed {
                     TransferUiCompletionPending := false
                     TransferUiCompletionShownTick := 0
-                    TransferStatusText.Text := "! " aggregate.UnseenFailed
-                        . " 项下载失败 · 查看"
+                    TransferStatusText.Text := "!失败" aggregate.UnseenFailed
                 } else if TransferUiCompletionPending {
                     TransferUiCompletionPending := false
                     TransferUiCompletionShownTick := now
-                    TransferStatusText.Text := "✓ 下载完成 · 查看"
+                    TransferStatusText.Text := "✓完成"
                     SetTimer(UpdateTransferUi, -3000)
                 } else if TransferUiCompletionShownTick
                     && ElapsedTickMilliseconds(
                         TransferUiCompletionShownTick, now) < 3000 {
-                    TransferStatusText.Text := "✓ 下载完成 · 查看"
+                    TransferStatusText.Text := "✓完成"
                     remaining := 3000 - ElapsedTickMilliseconds(
                         TransferUiCompletionShownTick, now)
                     SetTimer(UpdateTransferUi, -Max(1, remaining))
                 } else {
                     TransferUiCompletionShownTick := 0
-                    TransferStatusText.Text := "↓ 下载"
+                    TransferStatusText.Text := "↓下载"
                 }
             }
         }

@@ -932,6 +932,17 @@ DrawFooterTextItem(drawItemPtr) {
     return 1
 }
 
+RedrawFooterTextControls(*) {
+    global StatusText, TransferStatusText
+    for control in [StatusText, TransferStatusText] {
+        if !IsObject(control)
+            continue
+        DllCall("user32\InvalidateRect", "ptr", control.Hwnd,
+            "ptr", 0, "int", 1)
+        DllCall("user32\UpdateWindow", "ptr", control.Hwnd)
+    }
+}
+
 MeasureUiDropDownItem(wParam, lParam, msg, ownerHwnd) {
     global UI_DROPDOWN_FIELD_HEIGHT, UiDropDownScaleFactors
     if !lParam || NumGet(lParam, 0, "uint") != 3 ; ODT_COMBOBOX

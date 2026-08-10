@@ -183,6 +183,29 @@ class PopDropConfigDocument {
             this.SetValue(section, entry.Key, entry.Value, area)
     }
 
+    RemoveValue(section, key) {
+        this.AssertName(section, "节名")
+        this.AssertName(key, "键名")
+        info := this.RequireUniqueSection(section, false)
+        if !IsObject(info)
+            return false
+        found := 0
+        Loop info.End - info.Header {
+            index := info.Header + A_Index
+            parsed := this.ParseKeyLine(this.Lines[index])
+            if IsObject(parsed) && StrLower(parsed.Key) = StrLower(key) {
+                if found
+                    throw Error("重复配置键：[" section "] " key)
+                found := index
+            }
+        }
+        if !found
+            return false
+        this.Lines.RemoveAt(found)
+        this.Dirty := true
+        return true
+    }
+
     ReplaceSection(section, entries, area) {
         this.AssertEntries(entries)
         this.EnsureSection(section, area)

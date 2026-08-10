@@ -751,6 +751,11 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
                 "`n`n请检查并修正固定项配置。",
                 "固定项路径需要检查", "Icon!")
         }
+        if operation = "move" {
+            confirmedMovedPaths := CollectConfirmedMovedSourcePaths(
+                validPaths, state.Mappings)
+            ApplyConfirmedMovedPathsToCurrentView(confirmedMovedPaths)
+        }
         try RememberSuccessfulTarget(targetPath)
         catch as err
             ShowPanelMsgBox("文件操作已完成，但无法保存最近目标：`n"
@@ -1044,7 +1049,81 @@ QueueSingleRefreshAfterFileOperation(viewState, mappings) {
         TopRow: viewState.TopRow
     }
     PendingFileOperationRefresh := true
-    StartBackgroundScan()
+    ; A file operation must be observed after it completes. If an older full
+    ; scan is already running, StartBackgroundScan queues a second full pass
+    ; for this reason instead of incorrectly treating the old pass as enough.
+    StartBackgroundScan(0, "file-operation", false)
+}
+
+CollectConfirmedMovedSourcePaths(requestedPaths, mappings) {
+    result := []
+    for key, mapping in mappings {
+        if IsObject(mapping) && HasProp(mapping, "OldPath")
+            && mapping.OldPath != ""
+            && !ArrayContainsPath(result, mapping.OldPath)
+            result.Push(mapping.OldPath)
+    }
+    ; Cross-volume moves are implemented as copy + delete. Some Shell builds
+    ; omit the created-item path from PostMoveItem even though the source was
+    ; removed successfully. Absence after PerformOperations is authoritative
+    ; enough to remove only that stale source card; the worker still verifies
+    ; the complete destination/source state afterward.
+    for path in requestedPaths {
+        if !FileExist(path) && !ArrayContainsPath(result, path)
+            result.Push(path)
+    }
+    return result
+}
+
+RemoveMovedPathsFromScanResult(scanResult, movedPaths) {
+    if !IsObject(scanResult) || !HasProp(scanResult, "Folders")
+        || !IsObject(scanResult.Folders) || !movedPaths.Length
+        return 0
+    removed := 0
+    for folder in scanResult.Folders {
+        if !IsObject(folder) || !HasProp(folder, "Files")
+            || !IsObject(folder.Files)
+            continue
+        remaining := []
+        for file in folder.Files {
+            filePath := IsObject(file) && HasProp(file, "Path")
+                ? file.Path : ""
+            remove := false
+            if filePath != "" {
+                for movedPath in movedPaths {
+                    if PathsEqual(filePath, movedPath)
+                        || IsSameOrDescendantPath(filePath, movedPath) {
+                        remove := true
+                        break
+                    }
+                }
+            }
+            if remove
+                removed += 1
+            else
+                remaining.Push(file)
+        }
+        if remaining.Length != folder.Files.Length
+            folder.Files := remaining
+    }
+    return removed
+}
+
+ApplyConfirmedMovedPathsToCurrentView(movedPaths) {
+    global CurrentScanResult, ScanResultLoaded
+    global Panel, PanelVisible, PanelRenderSignature
+    if !movedPaths.Length
+        return false
+    removed := RemoveMovedPathsFromScanResult(
+        CurrentScanResult, movedPaths)
+    if !removed
+        return false
+    PanelRenderSignature := ""
+    if ScanResultLoaded
+        RememberCurrentWorkspaceSnapshot()
+    if IsObject(Panel) && PanelVisible
+        PopulatePanel()
+    return true
 }
 
 ApplyPendingViewRestore() {

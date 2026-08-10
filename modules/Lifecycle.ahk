@@ -14,7 +14,7 @@ Cleanup(*) {
     CleanupAutoHideForegroundHook()
     SetTimer(PollWorkerResult, 0)
     SetTimer(EnhanceNextThumbnail, 0)
-    SetTimer(RunScheduledCacheMaintenance, 0)
+    CancelCacheMaintenanceOpportunity()
     FlushPendingActiveWorkspacePersistence()
     FlushPendingScanCacheWrite()
     CleanupSourceWatchers()

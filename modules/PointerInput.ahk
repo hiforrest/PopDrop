@@ -424,10 +424,13 @@ RestorePointerSelection(serial) {
         FileView.Modify(FilePointerGesture.Row, "Focus Vis")
 }
 
-CollapseListSelectionToRow(list, row) {
+CollapseListSelectionToRow(list, row, updateImmediately := false) {
     list.Modify(0, "-Select -Focus")
     list.Modify(row, "Select Focus Vis")
-    SetTimer(UpdateSelectionStatus, -1)
+    if updateImmediately
+        UpdateSelectionStatus()
+    else
+        SetTimer(UpdateSelectionStatus, -1)
 }
 
 GetPointerModifierMask() {

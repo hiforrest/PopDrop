@@ -83,11 +83,32 @@ RegisterDropTargetChildren(parentHwnd, targetPtr) {
     child := DllCall("user32\GetWindow", "ptr", parentHwnd,
         "uint", GW_CHILD, "ptr")
     while child {
-        RegisterDropTargetWindow(child, targetPtr)
+        ; Smart overlays are display-only siblings. Registering them as OLE
+        ; targets makes showing one under a stationary drag replace the native
+        ; target HWND, producing a DragLeave/DragEnter visibility loop.
+        if !IsSmartDropOverlayWindow(child)
+            RegisterDropTargetWindow(child, targetPtr)
         RegisterDropTargetChildren(child, targetPtr)
         child := DllCall("user32\GetWindow", "ptr", child,
             "uint", GW_HWNDNEXT, "ptr")
     }
+}
+
+IsSmartDropOverlayWindow(hwnd) {
+    global FolderDropAddSourceButton, FolderDropPinnedZone
+    return (IsObject(FolderDropAddSourceButton)
+            && hwnd = FolderDropAddSourceButton.Hwnd)
+        || (IsObject(FolderDropPinnedZone)
+            && hwnd = FolderDropPinnedZone.Hwnd)
+}
+
+SmartDropOverlayHitTest(wParam, lParam, msg, hwnd) {
+    ; HTTRANSPARENT keeps OLE routing on the already registered native control
+    ; below the overlay. ResolveDropTarget still uses the overlay rectangles,
+    ; so the visible 70/30 zones retain their distinct drop semantics without
+    ; becoming a new drag window mid-session.
+    if IsSmartDropOverlayWindow(hwnd)
+        return -1 ; HTTRANSPARENT
 }
 
 RegisterDropTargetWindow(hwnd, targetPtr) {
@@ -199,6 +220,8 @@ SignedInt32(value) {
 DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
     global ActiveDropSession, ActiveInternalDragContext
     global DropFolderValidationCache
+    global ActiveWorkspaceId, ActiveWorkspaceName, ActiveWorkspaceType
+    global FolderSettings
     global DROP_ADAPTER_UNSUPPORTED
     try {
         PreviewSuppress("external-drag", false)
@@ -225,10 +248,13 @@ DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
         session.AllowedEffects := allowedEffects
         session.PreviousStatus := CaptureDropStatus()
         session.Paused := true
+        session.LockedWorkspaceId := ActiveWorkspaceId
+        session.LockedWorkspaceName := ActiveWorkspaceName
+        session.LockedWorkspaceType := ActiveWorkspaceType
+        session.LockedSources := FolderSettings.Clone()
+        session.LockedSourceDefaults := GetCurrentSourceDefaults()
         BeginAutoHidePause()
         ActiveDropSession := session
-        SetPinnedDropDiscovery(true)
-
         session.Decision := ClassifyDataObject(dataObject)
         session.AsyncInfo := DataObjectAsyncMode(dataObject)
         if session.Decision.Adapter = DROP_ADAPTER_UNSUPPORTED {
@@ -238,7 +264,10 @@ DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
                 session.Decision.Reason), 0, 0)
             return 0
         }
-        session.SourceKind := IsObject(ActiveInternalDragContext)
+        session.IsInternal := DataObjectSupportsFormat(dataObject,
+            GetPopDropInternalDragFormat(), 1, -1)
+        session.SourceKind := session.IsInternal
+            && IsObject(ActiveInternalDragContext)
             ? ClassifyDropSource(ActiveInternalDragContext.Items, true)
             : "External"
         ; Internal drags already own a trusted path array. External HDROP is
@@ -247,7 +276,7 @@ DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
         ; be safely recognized by CFSTR_SHELLIDLIST even when they advertise
         ; async capability or auxiliary formats. Unknown async, URL, virtual
         ; and image objects remain zero-extraction until Drop.
-        if IsObject(ActiveInternalDragContext) {
+        if session.IsInternal && IsObject(ActiveInternalDragContext) {
             CacheDropSessionPaths(
                 session, ActiveInternalDragContext.Paths, false)
         } else if CanPreloadHDropForFolderFeedback(
@@ -434,6 +463,12 @@ CreateDropSessionState() {
         Paths: [],
         InternalItems: [],
         SourceKind: "External",
+        IsInternal: false,
+        LockedWorkspaceId: "",
+        LockedWorkspaceName: "",
+        LockedWorkspaceType: "Files",
+        LockedSources: [],
+        LockedSourceDefaults: 0,
         Target: 0,
         Effect: 0,
         SkipCount: 0,
@@ -448,6 +483,7 @@ CreateDropSessionState() {
         Unsupported: false,
         Paused: false,
         PreviousStatus: 0,
+        LastFeedbackSignature: "",
         Completed: false
     }
 }
@@ -511,8 +547,15 @@ PreloadDropSessionHDropPaths(session, dataObject, reader := unset) {
 }
 
 SyncFolderDropModeForSession(session) {
-    if IsObject(session) && ShouldShowFolderDropMode(session.PayloadKind) {
-        ShowFolderDropMode()
+    global WORKSPACE_TYPE_TEXT
+    mode := IsObject(session) ? ResolveSmartDropMode(session) : ""
+    if mode = "Folders"
+        && ParseWorkspaceType(session.LockedWorkspaceType) != WORKSPACE_TYPE_TEXT
+        && !HasVisibleHittablePinnedDropTarget(session.LockedWorkspaceId)
+        mode := "FoldersSplit"
+    if mode != "" {
+        ShowFolderDropMode(mode, session.Paths.Length,
+            session.LockedWorkspaceName)
         session.FolderDropUiShown := true
     } else {
         HideFolderDropMode()
@@ -521,8 +564,53 @@ SyncFolderDropModeForSession(session) {
     }
 }
 
-ShouldShowFolderDropMode(payloadKind) {
-    return payloadKind = "FoldersOnly"
+ResolveSmartDropMode(session, pinnedDropAvailable := unset) {
+    global WORKSPACE_TYPE_TEXT
+    if !IsObject(session) || !session.PathsCached
+        return ""
+    if session.PayloadKind = "FoldersOnly"
+        return session.IsInternal ? "" : "Folders"
+    if session.PayloadKind != "FilesOnly"
+        return ""
+    if ParseWorkspaceType(session.LockedWorkspaceType) = WORKSPACE_TYPE_TEXT {
+        for path in session.Paths {
+            if !IsTextBlockPath(path)
+                return ""
+        }
+    }
+    if !IsSet(pinnedDropAvailable)
+        pinnedDropAvailable := HasVisibleHittablePinnedDropTarget(
+            session.LockedWorkspaceId)
+    return pinnedDropAvailable ? "" : "Files"
+}
+
+HasVisibleHittablePinnedDropTarget(workspaceId) {
+    global FileView, GroupDropTargets
+    if !IsObject(FileView) || !FileView.Hwnd
+        return false
+    if !DllCall("user32\IsWindowVisible", "ptr", FileView.Hwnd, "int")
+        || !DllCall("user32\IsWindowEnabled", "ptr", FileView.Hwnd, "int")
+        return false
+    client := Buffer(16, 0)
+    if !DllCall("user32\GetClientRect", "ptr", FileView.Hwnd,
+        "ptr", client.Ptr)
+        return false
+    clientRight := NumGet(client, 8, "int")
+    clientBottom := NumGet(client, 12, "int")
+    for groupId, descriptor in GroupDropTargets {
+        if !HasProp(descriptor, "Type")
+            || (descriptor.Type != "Pinned"
+                && descriptor.Type != "TextPinned")
+            continue
+        if HasProp(descriptor, "WorkspaceId")
+            && StrLower(descriptor.WorkspaceId) != StrLower(workspaceId)
+            continue
+        rect := GetListGroupRect(FileView.Hwnd, groupId)
+        if IsObject(rect) && rect.Right > 0 && rect.Bottom > 0
+            && rect.Left < clientRight && rect.Top < clientBottom
+            return true
+    }
+    return false
 }
 
 MarkDropSessionFinished(session, outcome) {
@@ -864,8 +952,7 @@ TextPinnedDropRestrictionReason(target, keyState, sourceKind, paths) {
 }
 
 ShouldContinuePinnedReorder(target) {
-    ; GroupId=0 表示工具栏上的“＋ 固定项”投放按钮；它接收加入固定项，
-    ; 但不是已有固定项的排序区域。
+    ; GroupId=0 is the top smart entry, not an existing pinned reorder area.
     return IsObject(target)
         && HasProp(target, "Type")
         && (target.Type = "Pinned" || target.Type = "TextPinned")
@@ -874,42 +961,50 @@ ShouldContinuePinnedReorder(target) {
 }
 
 ResolveDropTarget(screenX, screenY) {
-    global Panel, FileView, RecentView, PinnedDropButton
-    global FolderDropAddSourceButton, FolderDropPinnedButton
+    global Panel, FileView, RecentView
+    global FolderDropAddSourceButton, FolderDropPinnedZone, FolderDropUiMode
     global ActiveDropSession, ActiveWorkspaceName, FolderSettings
     global SettingsController
+    global WORKSPACE_TYPE_TEXT
     global ItemOpenContexts, GroupDropTargets
     if !IsObject(Panel)
         return InvalidDropTarget("PopDrop 面板不可用。")
 
+    if FolderDropUiMode = "FoldersSplit"
+        && IsObject(FolderDropPinnedZone)
+        && ScreenPointInWindow(
+            FolderDropPinnedZone.Hwnd, screenX, screenY) {
+        if !IsObject(ActiveDropSession)
+            return InvalidDropTarget("拖拽会话已经结束。")
+        return ResolveDropTargetDescriptor({
+            Type: "Pinned", SourceId: "", Name: "固定项", Path: "",
+            GroupId: 0,
+            WorkspaceId: ActiveDropSession.LockedWorkspaceId
+        })
+    }
+
     if IsObject(FolderDropAddSourceButton)
         && ScreenPointInWindow(
             FolderDropAddSourceButton.Hwnd, screenX, screenY) {
-        payloadKind := IsObject(ActiveDropSession)
-            ? ActiveDropSession.PayloadKind : "Unknown"
-        paths := IsObject(ActiveDropSession)
-            ? ActiveDropSession.Paths : []
-        return ResolveAddSourceDropTarget(payloadKind,
-            ActiveWorkspaceName, paths, FolderSettings,
-            IsObject(SettingsController))
+        if !IsObject(ActiveDropSession)
+            return InvalidDropTarget("拖拽会话已经结束。")
+        if ResolveSmartDropMode(ActiveDropSession) = "Files"
+            return ResolveDropTargetDescriptor({
+                Type: ParseWorkspaceType(
+                    ActiveDropSession.LockedWorkspaceType) = WORKSPACE_TYPE_TEXT
+                    ? "TextPinned" : "Pinned",
+                SourceId: "", Name: "固定项", Path: "", GroupId: 0,
+                WorkspaceId: ActiveDropSession.LockedWorkspaceId
+            })
+        return ResolveAddSourceDropTarget(
+            ActiveDropSession.PayloadKind,
+            ActiveDropSession.LockedWorkspaceName,
+            ActiveDropSession.Paths,
+            ActiveDropSession.LockedSources,
+            IsObject(SettingsController),
+            ActiveDropSession.LockedWorkspaceId,
+            ActiveDropSession.LockedSourceDefaults)
     }
-
-    if IsObject(FolderDropPinnedButton)
-        && ScreenPointInWindow(
-            FolderDropPinnedButton.Hwnd, screenX, screenY)
-        return ResolveDropTargetDescriptor({
-            Type: IsTextWorkspace() ? "TextPinned" : "Pinned",
-            SourceId: "", Name: "固定项",
-            Path: "", GroupId: 0
-        })
-
-    if IsObject(PinnedDropButton)
-        && ScreenPointInWindow(PinnedDropButton.Hwnd, screenX, screenY)
-        return ResolveDropTargetDescriptor({
-            Type: IsTextWorkspace() ? "TextPinned" : "Pinned",
-            SourceId: "", Name: "固定项",
-            Path: "", GroupId: 0
-        })
 
     if IsObject(RecentView)
         && ScreenPointInWindow(RecentView.Hwnd, screenX, screenY)
@@ -942,7 +1037,8 @@ ResolveDropTarget(screenX, screenY) {
 }
 
 ResolveAddSourceDropTarget(payloadKind, workspaceName, paths,
-    currentSources, settingsOpen := false) {
+    currentSources, settingsOpen := false, workspaceId := "",
+    sourceDefaults := 0) {
     target := {
         Type: "AddSource",
         SourceId: "",
@@ -950,7 +1046,9 @@ ResolveAddSourceDropTarget(payloadKind, workspaceName, paths,
         Path: "",
         Available: false,
         Reason: "",
-        GroupId: 0
+        GroupId: 0,
+        WorkspaceId: workspaceId,
+        SourceDefaults: sourceDefaults
     }
     if payloadKind != "FoldersOnly" {
         target.Reason := "只有全部为真实文件夹的选择才能添加为来源。"
@@ -990,10 +1088,13 @@ ResolveDropTargetDescriptor(descriptor, folderAvailable := unset,
     name := HasProp(descriptor, "Name") ? descriptor.Name : ""
     sourceId := HasProp(descriptor, "SourceId") ? descriptor.SourceId : ""
     groupId := HasProp(descriptor, "GroupId") ? descriptor.GroupId : 0
+    workspaceId := HasProp(descriptor, "WorkspaceId")
+        ? descriptor.WorkspaceId : ""
     if type = "Pinned" || type = "TextPinned" {
         return {
             Type: type, SourceId: "", Name: name != "" ? name : "固定项",
-            Path: "", Available: true, Reason: "", GroupId: groupId
+            Path: "", Available: true, Reason: "", GroupId: groupId,
+            WorkspaceId: workspaceId
         }
     }
     if type != "Files" && type != "Launcher" && type != "TextSource"
@@ -1134,6 +1235,15 @@ ShowDropFeedback(target, effect, itemCount, skipCount := 0) {
         return
     payloadKind := IsObject(ActiveDropSession)
         ? ActiveDropSession.PayloadKind : "Unknown"
+    signature := target.Type "|" target.Available "|" effect "|"
+        . itemCount "|" skipCount "|" payloadKind "|"
+        . (HasProp(target, "Name") ? target.Name : "") "|"
+        . (HasProp(target, "Reason") ? target.Reason : "")
+    if IsObject(ActiveDropSession)
+        && ActiveDropSession.LastFeedbackSignature = signature
+        return
+    if IsObject(ActiveDropSession)
+        ActiveDropSession.LastFeedbackSignature := signature
     if !target.Available {
         if target.Type = "AddSource" && target.Reason != ""
             StatusText.Text := target.Reason
@@ -1141,8 +1251,8 @@ ShowDropFeedback(target, effect, itemCount, skipCount := 0) {
             StatusText.Text := "此处不能接收文件夹；拖到上方添加为来源，"
                 . "或拖到下方来源分组移动或复制文件夹"
         else if payloadKind = "Mixed"
-            StatusText.Text := "混合选择不能添加为来源；"
-                . "可拖到分栏进行移动或复制。"
+            StatusText.Text := "文件和文件夹请分别拖入；"
+                . "下方已有区域仍按原规则接收。"
         else if target.Reason != ""
             StatusText.Text := "不能投放：" target.Reason
         else
@@ -1177,7 +1287,8 @@ ShowDropFeedback(target, effect, itemCount, skipCount := 0) {
         StatusText.Text := "复制 " countText " 到「" target.Name "」"
     if skipCount
         StatusText.Text .= "；其中 " skipCount " 个项目将跳过"
-    DllCall("user32\UpdateWindow", "ptr", StatusText.Hwnd)
+    ; Let the normal paint cycle coalesce rapid DragOver events. Forcing a
+    ; synchronous repaint here makes the footer and native Tab text flicker.
 }
 
 SetAddSourceDropHover(active) {
@@ -1188,23 +1299,14 @@ SetAddSourceDropHover(active) {
             "uint", 0x00F3, "ptr", active ? 1 : 0, "ptr", 0, "ptr")
 }
 
-SetPinnedDropDiscovery(active) {
-    global PinnedDropButton, PinnedDropDiscoveryActive
-    if !IsObject(PinnedDropButton)
-        return
-    active := !!active
-    if active = PinnedDropDiscoveryActive
-        return
-    PinnedDropDiscoveryActive := active
-    SetPanelIconButtonSelected(PinnedDropButton, active)
-}
-
 SetPinnedDropHover(active) {
-    global PinnedDropButton, FolderDropPinnedButton
-    if IsObject(PinnedDropButton)
-        SetPanelIconButtonHovered(PinnedDropButton, active)
-    if IsObject(FolderDropPinnedButton)
-        DllCall("user32\SendMessageW", "ptr", FolderDropPinnedButton.Hwnd,
+    global FolderDropAddSourceButton, FolderDropPinnedZone, FolderDropUiMode
+    control := FolderDropUiMode = "FoldersSplit"
+        ? FolderDropPinnedZone : FolderDropAddSourceButton
+    if (FolderDropUiMode = "Files" || FolderDropUiMode = "FoldersSplit")
+        && IsObject(control)
+        DllCall("user32\SendMessageW", "ptr",
+            control.Hwnd,
             "uint", 0x00F3, "ptr", active ? 1 : 0, "ptr", 0, "ptr")
 }
 
@@ -1247,14 +1349,17 @@ ClearDropVisuals() {
     SetDropGroupHighlight(0)
     SetAddSourceDropHover(false)
     SetPinnedDropHover(false)
-    SetPinnedDropDiscovery(false)
     HideFolderDropMode()
 }
 
 ExecuteLocalDrop(paths, target, effect, internalItems, sourceKind) {
     global ActiveWorkspaceId
+    targetWorkspaceId := HasProp(target, "WorkspaceId")
+        && target.WorkspaceId != "" ? target.WorkspaceId : ActiveWorkspaceId
     if target.Type = "AddSource"
-        return AddFolderSourcesToCurrentWorkspace(paths)
+        return AddFolderSourcesToWorkspace(paths, targetWorkspaceId,
+            target.Name, HasProp(target, "SourceDefaults")
+                ? target.SourceDefaults : 0)
     validation := target.Type = "Pinned" || target.Type = "TextPinned"
         ? {Available: true, Writable: true, Reason: ""}
         : ValidateDropFolder(target.Path, true)
@@ -1264,12 +1369,13 @@ ExecuteLocalDrop(paths, target, effect, internalItems, sourceKind) {
         return {Success: 0, Failed: paths.Length, Changed: false}
     }
     if target.Type = "Pinned"
-        return PinDroppedItems(paths)
+        return PinDroppedItemsToWorkspace(paths, targetWorkspaceId, "Files")
     if target.Type = "TextPinned" {
         textPaths := FilterTextBlockPaths(paths)
         if !textPaths.Length
             throw Error("固定项只接收 .md 或 .txt 文本块文件。")
-        return PinDroppedItems(textPaths)
+        return PinDroppedItemsToWorkspace(
+            textPaths, targetWorkspaceId, "TextBlocks")
     }
     if target.Type = "Launcher"
         return PerformLauncherDrop(paths, target)
@@ -1459,26 +1565,43 @@ FormatAddSourceResult(result) {
 }
 
 AddFolderSourcesToCurrentWorkspace(paths) {
-    global ActiveWorkspaceId, ActiveWorkspaceName, SettingsController
+    global ActiveWorkspaceId, ActiveWorkspaceName
+    return AddFolderSourcesToWorkspace(
+        paths, ActiveWorkspaceId, ActiveWorkspaceName)
+}
+
+AddFolderSourcesToWorkspace(paths, workspaceId, workspaceName := "",
+    defaults := 0) {
+    global ActiveWorkspaceId, SettingsController
     if IsObject(SettingsController)
         throw Error("请先保存或关闭设置窗口，再添加来源。")
-    workspaceId := ActiveWorkspaceId
     result := {
-        WorkspaceName: ActiveWorkspaceName,
+        WorkspaceName: workspaceName,
         Added: 0, Existing: 0, Failed: 0,
         FailedDetails: [], Sources: []
     }
-    defaults := GetCurrentSourceDefaults()
+    if !IsObject(defaults)
+        defaults := GetCurrentSourceDefaults()
     CreateConfigBackup()
-    AtomicConfigEdit(WriteDroppedFolderSources.Bind(
+    try AtomicConfigEdit(WriteDroppedFolderSources.Bind(
         workspaceId, paths.Clone(), defaults, result))
+    catch as err {
+        SetBackgroundStatus(
+            "添加失败：无法保存配置，原配置未改变", 6000)
+        throw err
+    }
 
     if result.Added {
         LoadSettings()
-        PopulatePanel()
-        PopulateRecentSidebar()
+        if StrLower(ActiveWorkspaceId) = StrLower(workspaceId) {
+            PopulatePanel()
+            PopulateRecentSidebar()
+        }
         ; Directory enumeration remains in the existing scan worker.
-        StartBackgroundScan()
+        if StrLower(ActiveWorkspaceId) = StrLower(workspaceId)
+            StartBackgroundScan(0, "drop-source")
+        else
+            QueueInactiveWorkspaceScans()
     }
     message := FormatAddSourceResult(result)
     SetBackgroundStatus(message, 6000)
@@ -1496,6 +1619,98 @@ AddFolderSourcesToCurrentWorkspace(paths) {
         Changed: result.Added > 0,
         Details: result.FailedDetails
     }
+}
+
+WriteDroppedPinnedPaths(workspaceId, workspaceType, paths, result,
+    tempPath) {
+    global CONFIG_VERSION, WORKSPACE_TYPE_TEXT
+    doc := OpenPopDropConfig(tempPath)
+    workspaceSection := "Workspace:" workspaceId
+    workspaceName := Trim(doc.GetValue(workspaceSection, "Name", ""))
+    if workspaceName = ""
+        throw Error("目标工作区已不存在。")
+    pinnedSection := "WorkspacePinned:" workspaceId
+    existing := ReadPinnedPathsFromDocument(doc, pinnedSection)
+    additions := []
+    for rawPath in paths {
+        path := NormalizePath(rawPath)
+        if path = "" || !FileExist(path) {
+            result.Unavailable += 1
+            continue
+        }
+        if ParseWorkspaceType(workspaceType) = WORKSPACE_TYPE_TEXT
+            && !IsTextBlockPath(path) {
+            result.Unsupported += 1
+            continue
+        }
+        if ArrayContainsPath(existing, path)
+            || ArrayContainsPath(additions, path) {
+            result.Existing += 1
+            continue
+        }
+        additions.Push(path)
+    }
+    merged := additions.Clone()
+    for path in existing
+        merged.Push(path)
+    WritePinnedPathsToDocument(doc, pinnedSection, merged, 3)
+    doc.SetValue("Workspaces", "PinnedScopeVersion", "1", 3)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
+    result.WorkspaceName := workspaceName
+    result.Added := additions.Length
+    result.Paths := additions
+    result.AllPaths := merged
+}
+
+FormatDroppedPinnedResult(result) {
+    if result.Added
+        message := "已加入 " result.Added " 个固定项"
+    else if result.Unavailable
+        message := "添加失败：文件已经不存在"
+    else
+        message := "没有变化"
+    if result.Existing
+        message .= (result.Added ? "；" : "：")
+            . result.Existing " 个已存在"
+    if result.Unsupported
+        message .= (result.Added || result.Existing ? "；" : "：")
+            . result.Unsupported " 个文件类型不受支持"
+    if result.Unavailable && result.Added
+        message .= "；" result.Unavailable " 个文件已经不存在"
+    return message
+}
+
+PinDroppedItemsToWorkspace(paths, workspaceId, workspaceType := "Files") {
+    global ActiveWorkspaceId, PinnedPaths, Workspaces
+    result := {WorkspaceName: "", Added: 0, Existing: 0,
+        Unavailable: 0, Unsupported: 0, Paths: [], AllPaths: []}
+    try AtomicConfigEdit(WriteDroppedPinnedPaths.Bind(
+        workspaceId, workspaceType, paths.Clone(), result))
+    catch as err {
+        SetBackgroundStatus(
+            "添加失败：无法保存配置，原配置未改变", 6000)
+        throw err
+    }
+    if result.Added {
+        found := FindWorkspace(workspaceId, Workspaces)
+        if IsObject(found)
+            found.Value.PinnedPaths := result.AllPaths.Clone()
+        if StrLower(ActiveWorkspaceId) = StrLower(workspaceId) {
+            PinnedPaths := result.AllPaths.Clone()
+            if IsObject(found)
+                found.Value.PinnedPaths := PinnedPaths
+            ; Keep the current source snapshot/view alive. Reloading all
+            ; settings here can invalidate its scan fingerprint and briefly
+            ; replace otherwise healthy source groups with loading rows.
+            RefreshScanAfterPinnedChange()
+            PopulatePanel()
+        }
+    }
+    SetBackgroundStatus(FormatDroppedPinnedResult(result), 6000)
+    return {Success: result.Added, Failed: result.Unavailable
+        + result.Unsupported, Skipped: result.Existing,
+        Changed: result.Added > 0}
 }
 
 DropItemMatchesTargetSource(item, targetPath, targetSourceId := "") {

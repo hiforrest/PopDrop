@@ -21,7 +21,7 @@ global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global SORT_SMART := "Smart"
 global APP_VERSION := "1.1.2"
-global CONFIG_VERSION := "28"
+global CONFIG_VERSION := "29"
 global CONTENT_UPDATE_FAST := "Fast"
 global CONTENT_UPDATE_ACCURACY := "Accuracy"
 global UI_SCALE_100 := "100"
@@ -149,11 +149,11 @@ global ExpandAllFoldersButton := 0
 global CollapseAllFoldersButton := 0
 global RemovePinnedButton := 0
 global SettingsButton := 0
-global ToolbarControls := []
 global ToolbarSeparators := []
 global FolderDropAddSourceButton := 0
-global FolderDropPinnedButton := 0
+global FolderDropPinnedZone := 0
 global FolderDropUiVisible := false
+global FolderDropUiMode := ""
 global PanelLayoutWidth := 766
 global StatusText := 0
 global ItemCountText := 0
@@ -329,7 +329,6 @@ global IncomingDropLastEventTick := 0
 global GroupDropTargets := Map()
 global DropFolderValidationCache := Map()
 global ActiveDropHighlightedGroup := 0
-global PinnedDropDiscoveryActive := false
 global ConfigErrors := []
 global LastValidFolderSettings := []
 global LastValidWorkspaceId := ""
@@ -341,11 +340,14 @@ global CacheFilePath := ""
 global CacheWritable := false
 global CacheWriteWarningShown := false
 global ScanCacheWritePending := false
-global CacheCleanupEnabled := true
-global CacheRetentionDays := 7
 global CacheMaintenanceDirectory := ""
-global CacheMaintenanceLastTick := 0
-global CacheMaintenanceLastResult := 0
+global CacheMaintenanceStateLoaded := false
+global CacheMaintenanceCompletedDate := ""
+global CacheMaintenanceOpportunityDate := ""
+global CacheMaintenanceTimer := 0
+global CacheMaintenanceGeneration := 0
+global CacheMaintenanceRunning := false
+global CacheMaintenanceYieldRequested := false
 global RuntimeIndexModule := 0
 global RuntimeIndexDb := 0
 global RuntimeIndexPath := ""
@@ -461,6 +463,7 @@ global TextBlockSearchRefreshPending := false
 global TextBlockUsage := Map()
 global TextBlockReturnWindow := 0
 global TextBlockReturnFocus := 0
+global TextBlockSendInProgress := false
 global CudaTextDragCapture := 0
 
 #Include ConfigDocument.ahk
@@ -515,6 +518,7 @@ InitTextBlocks()
 OnMessage(0x002B, DrawUiDropDownItem) ; WM_DRAWITEM
 OnMessage(0x002C, MeasureUiDropDownItem) ; WM_MEASUREITEM
 BuildPanel()
+OnMessage(0x0084, SmartDropOverlayHitTest) ; WM_NCHITTEST
 OnClipboardChange(UpdateClipboardPinnedButton)
 UpdateClipboardPinnedButton()
 ApplyWindowIcon()
@@ -562,6 +566,7 @@ OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 #Include modules\OpenApps.ahk
 #Include modules\CoreUtilities.ahk
 #Include modules\UiControls.ahk
+#Include modules\TerminalTextSend.ahk
 #Include modules\TextBlocks.ahk
 #Include modules\CudaTextIntegration.ahk
 #Include modules\PanelUi.ahk

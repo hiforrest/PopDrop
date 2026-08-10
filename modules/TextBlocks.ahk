@@ -1242,12 +1242,16 @@ CopyTextBlocks(paths, *) {
     }
     if text = ""
         return false
+    return PutTextBlocksOnClipboard(paths, text, "已复制")
+}
+
+PutTextBlocksOnClipboard(paths, text, statusPrefix := "已复制") {
     A_Clipboard := text
     if !ClipWait(1)
         return false
     for path in paths
         RecordTextBlockUse(path)
-    SetUserStatus("已复制 " paths.Length " 个文本块")
+    SetUserStatus(statusPrefix " " paths.Length " 个文本块")
     return true
 }
 
@@ -1271,10 +1275,47 @@ PrependTextBlocks(paths, *) {
 }
 
 SendTextBlocksToReturnTarget(paths, prepend := false) {
+    global TextBlockSendInProgress
+    if TextBlockSendInProgress {
+        TrayTip("上一笔文本块发送尚未结束，请稍后重试。",
+            "PopDrop", 0x2)
+        return false
+    }
+    TextBlockSendInProgress := true
+    try {
+        return SendTextBlocksToReturnTargetUnlocked(paths, prepend)
+    } finally {
+        TextBlockSendInProgress := false
+    }
+}
+
+SendTextBlocksToReturnTargetUnlocked(paths, prepend := false) {
     global TextBlockReturnWindow, TextBlockReturnFocus, Panel
-    if !CopyTextBlocks(paths)
+    try originalText := JoinTextBlocks(paths)
+    catch as err {
+        ShowPanelMsgBox(err.Message, "发送文本块失败", "Iconx")
+        return false
+    }
+    if originalText = ""
         return false
     target := TextBlockReturnWindow
+    terminalHost := false
+    if target && (!IsObject(Panel) || target != Panel.Hwnd)
+        terminalHost := DetectSupportedTerminalHost(target)
+    sendText := IsObject(terminalHost)
+        ? NormalizeTerminalSendText(originalText) : originalText
+
+    if IsObject(terminalHost) && !TerminalTextHasMeaningfulContent(sendText) {
+        ; The cleaned terminal value is the only fallback value. Empty text
+        ; cannot satisfy ClipWait, so assign it directly and stop.
+        A_Clipboard := sendText
+        SetUserStatus("终端正文清理后为空，已停止发送")
+        return false
+    }
+    if !PutTextBlocksOnClipboard(paths, sendText,
+        IsObject(terminalHost) ? "已准备终端发送" : "已复制")
+        return false
+
     if !target || (IsObject(Panel) && target = Panel.Hwnd) {
         if prepend
             TrayTip("无法确定原输入窗口；正文已保留在剪贴板。",
@@ -1286,17 +1327,40 @@ SendTextBlocksToReturnTarget(paths, prepend := false) {
             "PopDrop", 0x2)
         return false
     }
-    if prepend && (!TextBlockReturnFocus
+    if prepend && !IsObject(terminalHost) && (!TextBlockReturnFocus
         || !DllCall("user32\IsWindow",
             "ptr", TextBlockReturnFocus, "int")) {
         TrayTip("无法可靠定位原输入位置；正文已保留在剪贴板。",
             "PopDrop", 0x2)
         return false
     }
+    if IsObject(terminalHost) && TerminalTextHasLineBreak(sendText)
+        && !IsHighConfidenceChineseNaturalLanguage(sendText) {
+        answer := ShowPanelMsgBox(
+            "正文包含内部换行。粘贴到终端可能立即提交或执行一条或多条命令。"
+            . "`n`nPopDrop 的判断不是命令安全审查。确认仍要粘贴吗？"
+            . "`n`n选择“否”后，已清理的正文仍保留在剪贴板。",
+            "确认向终端粘贴多行文本", "YesNo Default2 Icon!")
+        if answer != "Yes" {
+            SetUserStatus("已取消终端多行发送；正文保留在剪贴板")
+            return false
+        }
+    }
     if IsPasswordEditControl(TextBlockReturnFocus) {
         TrayTip("安全输入框不执行自动粘贴；正文已保留在剪贴板。",
             "PopDrop", 0x2)
         return false
+    }
+    if IsObject(terminalHost) && A_Clipboard != sendText {
+        ; A modal confirmation can keep this transaction alive longer than a
+        ; normal send. Re-assert exactly this transaction's cleaned body before
+        ; activating the terminal; never paste unrelated clipboard contents.
+        A_Clipboard := sendText
+        if !ClipWait(1) {
+            TrayTip("无法恢复待发送正文；已停止终端投送。",
+                "PopDrop", 0x2)
+            return false
+        }
     }
     HidePanel()
     try {
@@ -1305,14 +1369,20 @@ SendTextBlocksToReturnTarget(paths, prepend := false) {
             throw Error("无法恢复原窗口。")
         focusRestored := RestoreTextBlockReturnFocus(
             target, TextBlockReturnFocus)
-        if prepend && !focusRestored
+        if prepend && !IsObject(terminalHost) && !focusRestored
             throw Error("无法可靠恢复原输入位置。")
         activeFocus := GetGuiThreadFocus(target)
-        if prepend && activeFocus != TextBlockReturnFocus
+        if prepend && !IsObject(terminalHost)
+            && activeFocus != TextBlockReturnFocus
             throw Error("原输入位置已改变。")
         if IsPasswordEditControl(activeFocus)
             throw Error("安全输入框不执行自动粘贴。")
-        if prepend {
+        if IsObject(terminalHost) {
+            ; A terminal has no host-independent editable "start" position.
+            ; Shift+Enter therefore uses the same safe current-pane paste and
+            ; never emits Ctrl+Home, which could scroll or alter an app.
+            PasteTextToSupportedTerminal(terminalHost)
+        } else if prepend {
             MoveTextBlockCaretToStart(activeFocus)
             Send("^v")
         } else

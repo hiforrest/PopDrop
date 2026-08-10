@@ -1,44 +1,125 @@
 ; Bounded lifecycle management for PopDrop-owned runtime cache artifacts.
 ; Only exact, known names directly below CacheDir are eligible for deletion.
-; The preview-cache-v1 subtree remains owned by PopDropPreview.exe, which
-; validates its SHA-256 names and applies its own size/item/retention limits.
+; preview-cache-v1 remains exclusively owned and bounded by PopDropPreview.exe.
 
 InitializeCacheMaintenance() {
-    global CacheCleanupEnabled, CacheDir
-    global CacheMaintenanceDirectory, CacheMaintenanceLastTick
-    SetTimer(RunScheduledCacheMaintenance, 0)
-    if !CacheCleanupEnabled || CacheDir = ""
-        return
-    directoryChanged := CacheMaintenanceDirectory = ""
-        || CacheMaintenancePathKey(CacheMaintenanceDirectory)
-            != CacheMaintenancePathKey(CacheDir)
-    if directoryChanged || !CacheMaintenanceLastTick
-        || A_TickCount - CacheMaintenanceLastTick >= 3600000
-        RunCacheMaintenance(false)
-    SetTimer(RunScheduledCacheMaintenance, 3600000)
+    global CacheDir, CacheMaintenanceDirectory
+    global CacheMaintenanceStateLoaded, CacheMaintenanceCompletedDate
+    previous := CacheMaintenanceDirectory
+    CancelCacheMaintenanceOpportunity()
+    CacheMaintenanceDirectory := CacheDir
+    if previous = "" || CacheMaintenancePathKey(previous)
+        != CacheMaintenancePathKey(CacheDir) {
+        CacheMaintenanceStateLoaded := false
+        CacheMaintenanceCompletedDate := ""
+    }
 }
 
-RunScheduledCacheMaintenance() {
-    global CacheCleanupEnabled
-    if CacheCleanupEnabled
-        RunCacheMaintenance(false)
-    else
-        SetTimer(RunScheduledCacheMaintenance, 0)
+ScheduleCacheMaintenanceAfterHide() {
+    global PanelVisible, CacheDir, CacheMaintenanceCompletedDate
+    global CacheMaintenanceOpportunityDate, CacheMaintenanceTimer
+    global CacheMaintenanceGeneration, CacheMaintenanceYieldRequested
+    if PanelVisible || CacheDir = ""
+        return false
+    CacheMaintenanceLoadDayState()
+    today := CacheMaintenanceToday()
+    if CacheMaintenanceCompletedDate = today
+        return false
+
+    CancelCacheMaintenanceOpportunity()
+    CacheMaintenanceYieldRequested := false
+    generation := ++CacheMaintenanceGeneration
+    CacheMaintenanceOpportunityDate := today
+    CacheMaintenanceTimer := RunCacheMaintenanceOpportunity.Bind(
+        generation, today)
+    SetTimer(CacheMaintenanceTimer, -10000)
+    return true
 }
 
-RunCacheMaintenance(force := false) {
-    global CacheDir, CacheWritable, CacheCleanupEnabled
-    global CacheRetentionDays, CacheMaintenanceDirectory
-    global CacheMaintenanceLastTick, CacheMaintenanceLastResult
-    result := {RemovedItems: 0, RemovedBytes: 0, FailedItems: 0,
-        TotalBytes: 0, TotalItems: 0, RanAt: A_Now}
+CancelCacheMaintenanceOpportunity() {
+    global CacheMaintenanceTimer, CacheMaintenanceGeneration
+    global CacheMaintenanceYieldRequested
+    if IsObject(CacheMaintenanceTimer)
+        try SetTimer(CacheMaintenanceTimer, 0)
+    CacheMaintenanceTimer := 0
+    CacheMaintenanceGeneration += 1
+    CacheMaintenanceYieldRequested := true
+}
+
+RunCacheMaintenanceOpportunity(generation, opportunityDate) {
+    global PanelVisible, CacheMaintenanceGeneration, CacheMaintenanceTimer
+    global CacheMaintenanceRunning, CacheMaintenanceYieldRequested
+    global CacheMaintenanceCompletedDate
+    if generation != CacheMaintenanceGeneration || PanelVisible
+        return false
+    ; An opportunity never crosses midnight on its own. A new natural day
+    ; requires another real show/hide cycle before maintenance is considered.
+    if opportunityDate != CacheMaintenanceToday()
+        return false
+    if CacheMaintenanceHigherPriorityWorkActive() {
+        if IsObject(CacheMaintenanceTimer)
+            SetTimer(CacheMaintenanceTimer, -2000)
+        return false
+    }
+
+    CacheMaintenanceRunning := true
+    CacheMaintenanceYieldRequested := false
+    try result := RunCacheMaintenanceBounded(opportunityDate)
+    catch {
+        result := {RemovedItems: 0, FailedItems: 1,
+            LimitReached: false, Yielded: false}
+    } finally CacheMaintenanceRunning := false
+
+    if result.Yielded || PanelVisible
+        || generation != CacheMaintenanceGeneration
+        || opportunityDate != CacheMaintenanceToday()
+        return false
+
+    ; Empty scans, ordinary failures and reaching the work cap all complete
+    ; today's opportunity. This prevents repeated work on every later hide.
+    CacheMaintenanceCompletedDate := opportunityDate
+    CacheMaintenanceTimer := 0
+    CacheMaintenanceWriteCompletion(opportunityDate, result)
+    return true
+}
+
+CacheMaintenanceHigherPriorityWorkActive() {
+    global WorkerRunning, InactiveScanJob, ScanCacheWritePending
+    global PreviewCacheActive, PreviewHoverCacheQueue
+    global PreviewEnabled, PreviewCacheEnabled
+    if WorkerRunning || IsObject(InactiveScanJob) || ScanCacheWritePending
+        return true
+    if PreviewCacheActive
+        return true
+    if PreviewEnabled && PreviewCacheEnabled
+        && IsObject(PreviewHoverCacheQueue)
+        && PreviewHoverCacheQueue.Length
+        return true
+    try return PreviewHasActiveTransfer()
+    catch
+        return false
+}
+
+RunCacheMaintenanceBounded(opportunityDate) {
+    global CacheDir, CacheWritable, Workspaces
+    result := {RemovedItems: 0, FailedItems: 0,
+        LimitReached: false, Yielded: false}
+    limits := {StartedTick: A_TickCount, Inspected: 0, Deleted: 0,
+        MaxInspected: 256, MaxDeleted: 24, MaxMilliseconds: 150,
+        OpportunityDate: opportunityDate}
     if CacheDir = "" || !DirExist(CacheDir)
         return result
-    if !force && (!CacheCleanupEnabled || !CacheWritable)
+    if !CacheWritable {
+        result.FailedItems := 1
         return result
+    }
+
     validWorkspaceFiles := CacheMaintenanceWorkspaceFiles()
     corruptGroups := Map()
     Loop Files, CacheDir "\*", "FD" {
+        if !CacheMaintenanceCanContinue(limits, result)
+            break
+        limits.Inspected += 1
         name := A_LoopFileName
         path := A_LoopFileFullPath
         isDirectory := InStr(A_LoopFileAttrib, "D") != 0
@@ -49,30 +130,39 @@ RunCacheMaintenance(force := false) {
             stamp := match[1]
             if !corruptGroups.Has(stamp)
                 corruptGroups[stamp] := []
-            corruptGroups[stamp].Push({Path: path,
-                Bytes: CacheMaintenancePathSize(path), IsDirectory: false})
+            corruptGroups[stamp].Push({Path: path, IsDirectory: false})
             continue
         }
         kind := CacheMaintenanceNameKind(name, isDirectory)
         if kind = ""
             continue
         ageSeconds := CacheMaintenanceAgeSeconds(path)
-        shouldDelete := CacheMaintenanceShouldDelete(
-            kind, name, ageSeconds, CacheRetentionDays,
-            force, CacheMaintenancePathIsActive(path), validWorkspaceFiles)
-        if shouldDelete
-            CacheMaintenanceDelete(path, isDirectory, result)
+        if CacheMaintenanceShouldDelete(kind, name, ageSeconds,
+            CacheMaintenancePathIsActive(path), validWorkspaceFiles)
+            CacheMaintenanceDelete(path, isDirectory, result, limits)
     }
-    CacheMaintenancePruneCorruptGroups(
-        corruptGroups, CacheRetentionDays, force, result)
-    statistics := CacheDirectoryStatistics(CacheDir)
-    result.TotalBytes := statistics.Bytes
-    result.TotalItems := statistics.Items
-    CacheMaintenanceDirectory := CacheDir
-    CacheMaintenanceLastTick := A_TickCount
-    CacheMaintenanceLastResult := result
-    CacheMaintenanceWriteStatus(result)
+    if !result.Yielded
+        CacheMaintenancePruneCorruptGroups(corruptGroups, result, limits)
+    if !result.Yielded && CacheMaintenanceCanContinue(limits, result)
+        try RuntimeIndexPruneWorkspaceSnapshots(Workspaces, 16)
     return result
+}
+
+CacheMaintenanceCanContinue(limits, result) {
+    global PanelVisible, CacheMaintenanceYieldRequested
+    if PanelVisible || CacheMaintenanceYieldRequested
+        || limits.OpportunityDate != CacheMaintenanceToday() {
+        result.Yielded := true
+        return false
+    }
+    if limits.Inspected >= limits.MaxInspected
+        || limits.Deleted >= limits.MaxDeleted
+        || ElapsedTickMilliseconds(limits.StartedTick, A_TickCount)
+            >= limits.MaxMilliseconds {
+        result.LimitReached := true
+        return false
+    }
+    return true
 }
 
 CacheMaintenanceNameKind(name, isDirectory) {
@@ -97,8 +187,8 @@ CacheMaintenanceNameKind(name, isDirectory) {
     return ""
 }
 
-CacheMaintenanceShouldDelete(kind, name, ageSeconds, retentionDays,
-    force, active, validWorkspaceFiles) {
+CacheMaintenanceShouldDelete(kind, name, ageSeconds,
+    active, validWorkspaceFiles) {
     if active
         return false
     if kind = "Transient"
@@ -106,10 +196,10 @@ CacheMaintenanceShouldDelete(kind, name, ageSeconds, retentionDays,
     if kind = "Writing"
         return ageSeconds >= 3600
     if kind = "Legacy"
-        return force || ageSeconds >= 86400
+        return ageSeconds >= 86400
     if kind = "Workspace"
         return !validWorkspaceFiles.Has(StrLower(name))
-            && (force || ageSeconds >= retentionDays * 86400)
+            && ageSeconds >= 7 * 86400
     return false
 }
 
@@ -157,33 +247,16 @@ CacheMaintenanceAgeSeconds(path) {
         return 0
 }
 
-CacheMaintenancePathSize(path) {
-    attributes := FileExist(path)
-    if attributes = ""
-        return 0
-    if !InStr(attributes, "D") {
-        try return FileGetSize(path)
-        catch
-            return 0
-    }
-    total := 0
-    Loop Files, path "\*", "FR" {
-        if InStr(A_LoopFileAttrib, "L")
-            continue
-        try total += A_LoopFileSize
-    }
-    return total
-}
-
-CacheMaintenanceDelete(path, isDirectory, result) {
-    bytes := CacheMaintenancePathSize(path)
+CacheMaintenanceDelete(path, isDirectory, result, limits) {
+    if !CacheMaintenanceCanContinue(limits, result)
+        return false
+    limits.Deleted += 1
     try {
         if isDirectory
             DirDelete(path, true)
         else
             FileDelete(path)
         result.RemovedItems += 1
-        result.RemovedBytes += bytes
         return true
     } catch {
         result.FailedItems += 1
@@ -191,65 +264,65 @@ CacheMaintenanceDelete(path, isDirectory, result) {
     }
 }
 
-CacheMaintenancePruneCorruptGroups(groups, retentionDays, force, result) {
+CacheMaintenancePruneCorruptGroups(groups, result, limits) {
     remaining := []
     for stamp, entries in groups {
+        if !CacheMaintenanceCanContinue(limits, result)
+            return
         ageSeconds := 0
         try ageSeconds := Max(0, DateDiff(A_Now, stamp, "Seconds"))
-        if force || ageSeconds >= retentionDays * 86400 {
+        if ageSeconds >= 7 * 86400 {
             for entry in entries
-                CacheMaintenanceDelete(entry.Path, false, result)
+                if !CacheMaintenanceDelete(
+                    entry.Path, false, result, limits)
+                    && result.Yielded
+                    return
         } else
             remaining.Push({Stamp: stamp, Entries: entries})
     }
     while remaining.Length > 3 {
+        if !CacheMaintenanceCanContinue(limits, result)
+            return
         oldestIndex := 1
         for index, group in remaining
             if group.Stamp < remaining[oldestIndex].Stamp
                 oldestIndex := index
         oldest := remaining.RemoveAt(oldestIndex)
         for entry in oldest.Entries
-            CacheMaintenanceDelete(entry.Path, false, result)
+            if !CacheMaintenanceDelete(entry.Path, false, result, limits)
+                && result.Yielded
+                return
     }
 }
 
-CacheDirectoryStatistics(path) {
-    statistics := {Bytes: 0, Items: 0}
-    if path = "" || !DirExist(path)
-        return statistics
-    Loop Files, path "\*", "FR" {
-        if InStr(A_LoopFileAttrib, "L")
-            continue
-        statistics.Bytes += A_LoopFileSize
-        statistics.Items += 1
-    }
-    return statistics
+CacheMaintenanceToday() {
+    return FormatTime(A_Now, "yyyyMMdd")
 }
 
-CacheMaintenanceWriteStatus(result) {
+CacheMaintenanceLoadDayState() {
+    global CacheMaintenanceStateLoaded, CacheMaintenanceCompletedDate
+    global CacheDir
+    if CacheMaintenanceStateLoaded
+        return
+    CacheMaintenanceStateLoaded := true
+    CacheMaintenanceCompletedDate := ""
+    statusPath := CacheDir "\cache-maintenance.ini"
+    if FileExist(statusPath)
+        try CacheMaintenanceCompletedDate := IniRead(
+            statusPath, "Maintenance", "CompletedDate", "")
+}
+
+CacheMaintenanceWriteCompletion(completedDate, result) {
     global CacheDir, CacheWritable
     if !CacheWritable || CacheDir = ""
         return
     path := CacheDir "\cache-maintenance.ini"
     try {
-        IniWrite(result.RanAt, path, "Maintenance", "LastRun")
+        IniWrite(completedDate, path, "Maintenance", "CompletedDate")
+        IniWrite(A_Now, path, "Maintenance", "CompletedAt")
         IniWrite(result.RemovedItems, path, "Maintenance", "RemovedItems")
-        IniWrite(result.RemovedBytes, path, "Maintenance", "RemovedBytes")
         IniWrite(result.FailedItems, path, "Maintenance", "FailedItems")
-        IniWrite(result.TotalBytes, path, "Maintenance", "TotalBytes")
-        IniWrite(result.TotalItems, path, "Maintenance", "TotalItems")
+        IniWrite(result.LimitReached ? "1" : "0",
+            path, "Maintenance", "LimitReached")
     }
-}
-
-FormatCacheByteCount(bytes) {
-    units := ["B", "KB", "MB", "GB", "TB"]
-    value := bytes + 0.0
-    unitIndex := 1
-    while value >= 1024 && unitIndex < units.Length {
-        value /= 1024
-        unitIndex += 1
-    }
-    return (unitIndex = 1 ? Format("{:.0f}", value)
-        : RegExReplace(Format("{:.1f}", value), "\.0$"))
-        . " " units[unitIndex]
 }

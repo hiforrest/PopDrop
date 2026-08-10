@@ -10,10 +10,9 @@ BeginShellDrag(paths, ownerHwnd, itemContexts := 0) {
             Items: IsObject(itemContexts) ? itemContexts : [],
             Paths: paths.Clone()
         }
-        if paths.Length = 1
-            BeginSingleShellDrag(paths[1], ownerHwnd)
-        else
-            BeginMultiShellDrag(paths, ownerHwnd)
+        ; Always use PopDrop's CF_HDROP object so every internal drag carries
+        ; the private marker. CF_HDROP remains fully native for other targets.
+        BeginMultiShellDrag(paths, ownerHwnd)
     } finally {
         ActiveInternalDragContext := 0
         try {
@@ -75,13 +74,15 @@ BeginSingleShellDrag(path, ownerHwnd) {
 
 BeginMultiShellDrag(paths, ownerHwnd) {
     global DropVTable, DataVTable, DragDataObjects
+    global ActiveInternalDragContext
     dataObject := Buffer(A_PtrSize + 8, 0)
     NumPut("ptr", DataVTable.Ptr, dataObject, 0)
     NumPut("uint", 1, dataObject, A_PtrSize)
     ; Keep the backing Buffer alive for as long as any drop target retains an
     ; IDataObject reference (some targets finish transfer asynchronously).
     DragDataObjects[dataObject.Ptr] := {
-        Memory: dataObject, Kind: "Files", Paths: paths}
+        Memory: dataObject, Kind: "Files", Paths: paths,
+        InternalToken: ActiveInternalDragContext.Token}
 
     dropSource := Buffer(A_PtrSize + 8, 0)
     NumPut("ptr", DropVTable.Ptr, dropSource, 0)
@@ -107,7 +108,9 @@ BeginTextDrag(text, ownerHwnd, paths := 0, itemContexts := 0) {
     NumPut("ptr", DataVTable.Ptr, dataObject, 0)
     NumPut("uint", 1, dataObject, A_PtrSize)
     DragDataObjects[dataObject.Ptr] := {
-        Memory: dataObject, Kind: "Text", Text: text}
+        Memory: dataObject, Kind: "Text", Text: text,
+        InternalToken: A_TickCount "-text-"
+            . DllCall("kernel32\GetCurrentProcessId", "uint")}
     dropSource := Buffer(A_PtrSize + 8, 0)
     NumPut("ptr", DropVTable.Ptr, dropSource, 0)
     NumPut("uint", 1, dropSource, A_PtrSize)
@@ -173,7 +176,9 @@ DataGetData(this, formatEtc, medium) {
     if !DragDataObjects.Has(this)
         return 0x80040064 ; DV_E_FORMATETC
     state := DragDataObjects[this]
-    if state.Kind = "Text" {
+    if IsPopDropInternalDragFormat(formatEtc) {
+        payload := CreateUnicodeTextHGlobal(state.InternalToken)
+    } else if state.Kind = "Text" {
         if IsUnicodeTextFormat(formatEtc)
             payload := CreateUnicodeTextHGlobal(state.Text)
         else if IsAnsiTextFormat(formatEtc)
@@ -204,9 +209,10 @@ DataQueryGetData(this, formatEtc) {
     if !DragDataObjects.Has(this)
         return 0x80040064
     state := DragDataObjects[this]
-    supported := state.Kind = "Text"
+    supported := IsPopDropInternalDragFormat(formatEtc)
+        || (state.Kind = "Text"
         ? (IsUnicodeTextFormat(formatEtc)
-            || IsAnsiTextFormat(formatEtc)) : IsHDropFormat(formatEtc)
+            || IsAnsiTextFormat(formatEtc)) : IsHDropFormat(formatEtc))
     return supported ? 0 : 0x80040064 ; S_OK / DV_E_FORMATETC
 }
 
@@ -231,18 +237,49 @@ DataEnumFormatEtc(this, direction, enumOut) {
         NumPut("ptr", 0, enumOut)
         return 0x80040064
     }
-    formatCount := DragDataObjects[this].Kind = "Text" ? 2 : 1
+    formatCount := DragDataObjects[this].Kind = "Text" ? 3 : 2
     formatEtc := Buffer(formatSize * formatCount, 0)
     if DragDataObjects[this].Kind = "Text" {
         FillUnicodeTextFormat(formatEtc.Ptr)
         FillAnsiTextFormat(formatEtc.Ptr + formatSize)
-    } else
+        FillPopDropInternalDragFormat(formatEtc.Ptr + formatSize * 2)
+    } else {
         FillHDropFormat(formatEtc.Ptr)
+        FillPopDropInternalDragFormat(formatEtc.Ptr + formatSize)
+    }
     enumerator := 0
     hr := DllCall("shell32\SHCreateStdEnumFmtEtc", "uint", formatCount,
         "ptr", formatEtc.Ptr, "ptr*", &enumerator, "int")
     NumPut("ptr", enumerator, enumOut)
     return hr
+}
+
+GetPopDropInternalDragFormat() {
+    static format := DllCall("user32\RegisterClipboardFormatW", "wstr",
+        "PopDrop.InternalDrag.v1", "ushort")
+    return format
+}
+
+IsPopDropInternalDragFormat(formatEtc) {
+    if !formatEtc
+        return false
+    aspectOffset := A_PtrSize = 8 ? 16 : 8
+    indexOffset := A_PtrSize = 8 ? 20 : 12
+    tymedOffset := A_PtrSize = 8 ? 24 : 16
+    return NumGet(formatEtc + 0, "ushort") = GetPopDropInternalDragFormat()
+        && NumGet(formatEtc + aspectOffset, "uint") = 1
+        && NumGet(formatEtc + indexOffset, "int") = -1
+        && (NumGet(formatEtc + tymedOffset, "uint") & 1)
+}
+
+FillPopDropInternalDragFormat(formatEtc) {
+    aspectOffset := A_PtrSize = 8 ? 16 : 8
+    indexOffset := A_PtrSize = 8 ? 20 : 12
+    tymedOffset := A_PtrSize = 8 ? 24 : 16
+    NumPut("ushort", GetPopDropInternalDragFormat(), formatEtc, 0)
+    NumPut("uint", 1, formatEtc, aspectOffset)
+    NumPut("int", -1, formatEtc, indexOffset)
+    NumPut("uint", 1, formatEtc, tymedOffset)
 }
 
 IsUnicodeTextFormat(formatEtc) {

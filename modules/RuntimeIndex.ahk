@@ -300,7 +300,7 @@ RuntimeIndexLoadSnapshot(workspaceId, fingerprint) {
     }
 }
 
-RuntimeIndexPruneWorkspaceSnapshots(workspaces) {
+RuntimeIndexPruneWorkspaceSnapshots(workspaces, maxWork := 16) {
     global RuntimeIndexAvailable
     if !RuntimeIndexAvailable
         return false
@@ -316,6 +316,7 @@ RuntimeIndexPruneWorkspaceSnapshots(workspaces) {
             "cdecl int") = 100 {
             workspaceId := RuntimeIndexColumnText(statement, 0)
             if !valid.Has(StrLower(workspaceId))
+                && stale.Length < maxWork
                 stale.Push(workspaceId)
         }
     } catch {
