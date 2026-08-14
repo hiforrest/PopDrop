@@ -16,7 +16,7 @@ PopulatePanel() {
     global PanelRenderSignature, PanelRenderedWorkspaceId
     global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
     global ItemCountText
-    global TextBlockSelectFirstPending
+    global TextBlockSelectFirstPending, TextBlockSearchQuery
 
     stableViewState := PanelRenderedWorkspaceId != ""
         && StrLower(PanelRenderedWorkspaceId) = StrLower(ActiveWorkspaceId)
@@ -138,6 +138,9 @@ PopulatePanel() {
         if IsTextWorkspace()
             files := PrepareTextBlockFiles(files, folder,
                 folder.MaxFilesPerFolder)
+        if ShouldHideTextSourceForSearch(IsTextWorkspace(),
+            TextBlockSearchQuery, state, files.Length)
+            continue
         filterMode := folder.Filter.Mode
         if state = "Unavailable"
             suffix := " [目录不可用]"
@@ -547,12 +550,14 @@ PopulateRecentSidebar() {
 ComputePanelRenderSignature() {
     global ActiveWorkspaceId, CurrentConfigFingerprint, CurrentScanResult
     global PinnedPaths, ViewMode, ThumbnailSize
-    global TextBlockSearchQuery
+    global TextBlockSearchQuery, TextBlockSearchTitleOnly
+    titleOnly := IsTextWorkspace() && TextBlockSearchTitleOnly
     return StrLower(ActiveWorkspaceId) "|" CurrentConfigFingerprint
         . "|" ResultSignature({Folders: CurrentScanResult.Folders, Recent: []})
         . "|p=" JoinNormalizedPaths(PinnedPaths)
         . "|v=" ViewMode "|t=" ThumbnailSize
         . "|q=" TextBlockSearchQuery
+        . "|titleOnly=" (titleOnly ? 1 : 0)
 }
 
 IsPanelRenderCurrent() {

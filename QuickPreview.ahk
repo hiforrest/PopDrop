@@ -23,6 +23,7 @@ global QuickPreviewRaisedWindows := Map()
 global QuickPreviewProviderWindows := Map()
 global QuickPreviewProviderPids := Map()
 global QuickPreviewReturnFocusHwnd := 0
+global QuickPreviewPanelLevelYieldActive := false
 
 LoadQuickPreviewSettings(settingErrors := 0) {
     global ConfigPath, ExternalQuickPreviewProvider
@@ -218,6 +219,11 @@ OpenExternalQuickPreview(path) {
         QuickViewActive := true
         QuickViewOpenedAt := A_TickCount
         QuickPreviewProviderWasVisible := false
+        ; PopDrop normally occupies the topmost band. Seer can create or swap
+        ; its real preview HWND asynchronously, so raising only the HWND known
+        ; at this instant is racy. Yield PopDrop's topmost level for the whole
+        ; external-preview session; restore it when the session ends.
+        QuickPreviewYieldPanelTopmost()
     }
     ignored := 0
     requestTick := A_TickCount
@@ -230,6 +236,7 @@ OpenExternalQuickPreview(path) {
             QuickViewOpenedAt := 0
             QuickViewRequestedAt := 0
             QuickPreviewRequestedPath := ""
+            QuickPreviewRestorePanelLevel()
             QuickPreviewResetSessionTracking()
             EndAutoHidePause()
         }
@@ -272,6 +279,7 @@ CloseExternalQuickPreview(sendClose := true, restoreFocus := true) {
     QuickPreviewProviderWasVisible := false
     SetTimer(QuickPreviewFlushSeerInvoke, 0)
     SetTimer(QuickPreviewHealthCheck, 0)
+    QuickPreviewRestorePanelLevel()
     if restoreFocus
         QuickPreviewRestorePanelFocus()
     QuickPreviewResetSessionTracking()
@@ -307,6 +315,54 @@ QuickPreviewResetSessionTracking() {
     QuickPreviewProviderWindows := Map()
     QuickPreviewProviderPids := Map()
     QuickPreviewReturnFocusHwnd := 0
+}
+
+QuickPreviewYieldPanelTopmost() {
+    global Panel, QuickViewActive, QuickPreviewPanelLevelYieldActive
+    if !QuickViewActive || !IsObject(Panel) || !Panel.Hwnd
+        return false
+    if !DllCall("user32\IsWindow", "ptr", Panel.Hwnd, "int")
+        return false
+    exStyle := A_PtrSize = 8
+        ? DllCall("user32\GetWindowLongPtrW",
+            "ptr", Panel.Hwnd, "int", -20, "ptr")
+        : DllCall("user32\GetWindowLongW",
+            "ptr", Panel.Hwnd, "int", -20, "int")
+    if !(exStyle & 0x00000008) { ; WS_EX_TOPMOST
+        ; Already outside the topmost band. Do not call SetWindowPos again:
+        ; HWND_NOTOPMOST on every health tick could reorder PopDrop within the
+        ; normal band and put it back in front of Seer.
+        QuickPreviewPanelLevelYieldActive := true
+        return true
+    }
+    ; HWND_NOTOPMOST with SWP_NOACTIVATE changes only the Z-order band. The
+    ; panel stays visible and keeps its current control focus until Seer takes
+    ; foreground ownership through its normal IPC activation path.
+    changed := DllCall("user32\SetWindowPos",
+        "ptr", Panel.Hwnd, "ptr", -2,
+        "int", 0, "int", 0, "int", 0, "int", 0,
+        "uint", 0x0001 | 0x0002 | 0x0010 | 0x0200, "int") != 0
+    if changed
+        QuickPreviewPanelLevelYieldActive := true
+    return changed
+}
+
+QuickPreviewRestorePanelLevel() {
+    global Panel, QuickPreviewPanelLevelYieldActive
+    global WindowMode, WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY
+    if !QuickPreviewPanelLevelYieldActive
+        return false
+    QuickPreviewPanelLevelYieldActive := false
+    if !IsObject(Panel) || !Panel.Hwnd
+        return false
+    if !DllCall("user32\IsWindow", "ptr", Panel.Hwnd, "int")
+        return false
+    insertAfter := (WindowMode = WINDOW_MODE_ALWAYS_ON_TOP
+        || WindowMode = WINDOW_MODE_TEMPORARY) ? -1 : -2
+    return DllCall("user32\SetWindowPos",
+        "ptr", Panel.Hwnd, "ptr", insertAfter,
+        "int", 0, "int", 0, "int", 0, "int", 0,
+        "uint", 0x0001 | 0x0002 | 0x0010 | 0x0200, "int") != 0
 }
 
 QuickPreviewRegisterWindow(hwnd) {
@@ -633,6 +689,9 @@ QuickPreviewEnsureAbovePanel() {
     global Panel, QuickPreviewRaisedWindows
     if !IsObject(Panel)
         return false
+    ; Reassert the session yield in case a settings refresh reapplied the
+    ; configured PopDrop window mode while the external preview was open.
+    QuickPreviewYieldPanelTopmost()
     mainHwnd := QuickPreviewFindProviderWindow()
     if !mainHwnd || mainHwnd = Panel.Hwnd
         return false
@@ -705,8 +764,10 @@ CleanupQuickPreview() {
     global QuickViewActive, QuickPreviewSpacePressed
     if QuickViewActive
         CloseExternalQuickPreview(false, false)
-    else
+    else {
         QuickPreviewRestoreWindowLevels()
+        QuickPreviewRestorePanelLevel()
+    }
     SetTimer(QuickPreviewUpdateFocusedSelection, 0)
     SetTimer(QuickPreviewFlushSeerInvoke, 0)
     SetTimer(QuickPreviewSpaceReleasePoll, 0)

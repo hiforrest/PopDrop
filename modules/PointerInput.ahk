@@ -528,6 +528,14 @@ IsTrackedFileViewHwnd(hwnd) {
         || (IsObject(RecentView) && hwnd = RecentView.Hwnd)
 }
 
+FileViewGotFocus(wParam, lParam, msg, hwnd) {
+    global FileView
+    if IsObject(FileView) && hwnd = FileView.Hwnd
+        ; Let the common control finish WM_SETFOCUS before correcting a view
+        ; mode that changed while Seer or another child window owned focus.
+        SetTimer(EnsureActiveTextBlockCardView.Bind(true), -1)
+}
+
 FileViewRightButtonDown(wParam, lParam, msg, hwnd) {
     global PendingContextMenuMouseShift, PendingContextMenuKeyboardAlternate
     if IsTrackedFileViewHwnd(hwnd) {

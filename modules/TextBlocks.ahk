@@ -630,6 +630,7 @@ TextBlockSearchStamp(path) {
 
 BuildNextTextBlockSearchIndex() {
     global TextBlockSearchQueue, TextBlockSearchIndex, TextBlockSearchQuery
+    global TextBlockSearchTitleOnly
     if !TextBlockSearchQueue.Length {
         SetTimer(BuildNextTextBlockSearchIndex, 0)
         return
@@ -644,7 +645,7 @@ BuildNextTextBlockSearchIndex() {
         TextBlockSearchIndex[key] := {
             Body: "", Stamp: TextBlockSearchStamp(path)}
     }
-    if TextBlockSearchQuery != ""
+    if TextBlockSearchQuery != "" && !TextBlockSearchTitleOnly
         ScheduleTextBlockSearchRefresh()
 }
 
@@ -664,17 +665,28 @@ ApplyTextBlockSearchRefresh() {
 }
 
 TextBlockMatchesQuery(file, folder, query) {
-    global TextBlockSearchIndex
+    global TextBlockSearchIndex, TextBlockSearchTitleOnly
     terms := TextBlockSearchTerms(query)
     if !terms.Length
         return true
-    haystack := StrLower(TextBlockTitleFromPath(file.Path)
-        . " " folder.Name . " " file.Path)
+    title := StrLower(TextBlockTitleFromPath(file.Path))
+    metadata := StrLower(title . " " folder.Name . " " file.Path)
     key := PathKey(file.Path)
     body := TextBlockSearchIndex.Has(key)
         && IsObject(TextBlockSearchIndex[key])
         ? TextBlockSearchIndex[key].Body : ""
-    return TextBlockHaystacksMatchTerms(haystack, body, terms)
+    return TextBlockSearchScopeMatches(
+        title, metadata, body, terms, TextBlockSearchTitleOnly)
+}
+
+TextBlockSearchScopeMatches(title, metadata, body, terms, titleOnly) {
+    ; Title is exactly TextBlockTitleFromPath(), the same extension-free value
+    ; rendered by AddTextBlockTile(). Hidden extensions, source names and full
+    ; paths must never create a hit in the constrained scope.
+    return TextBlockHaystacksMatchTerms(
+        titleOnly ? title : metadata,
+        titleOnly ? "" : body,
+        terms)
 }
 
 TextBlockHaystacksMatchTerms(metadata, body, terms) {
@@ -699,6 +711,14 @@ TextBlockSearchTerms(query) {
         }
     }
     return terms
+}
+
+ShouldHideTextSourceForSearch(textWorkspace, query, state, fileCount) {
+    ; Pending and unavailable sources communicate state rather than a search
+    ; miss. Ready sources with zero matches add only noise while a query is
+    ; active, so omit the entire native group and its placeholder tile.
+    return textWorkspace && Trim(query) != "" && fileCount = 0
+        && state != "Pending" && state != "Unavailable"
 }
 
 PrepareTextBlockFiles(files, folder, maxCount := 0) {
@@ -1018,6 +1038,17 @@ ApplyTextBlockCardView() {
         "uint", 0x10A2, "ptr", 0, "ptr", info.Ptr, "ptr")
 }
 
+EnsureActiveTextBlockCardView(force := false, *) {
+    global FileView
+    if !IsTextWorkspace() || !IsObject(FileView) || !FileView.Hwnd
+        return false
+    currentView := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x108F, "ptr", 0, "ptr", 0, "ptr") ; LVM_GETVIEW
+    if force || currentView != 4
+        ApplyTextBlockCardView()
+    return true
+}
+
 TextBlockSearchChanged(control, *) {
     global TextBlockSearchQuery, TextBlockSelectFirstPending
     query := Trim(control.Value)
@@ -1025,6 +1056,71 @@ TextBlockSearchChanged(control, *) {
         TextBlockSelectFirstPending := true
     TextBlockSearchQuery := query
     PopulatePanel()
+}
+
+TextBlockSearchTitleOnlyChanged(control, *) {
+    SetTextBlockSearchTitleOnly(control.Value = 1, true)
+}
+
+SetTextBlockSearchTitleOnly(titleOnly, restoreSearchFocus := true) {
+    global TextBlockSearchTitleOnly, TextBlockSearchEdit
+    global TextBlockSearchTitleOnlyCheck, TextBlockSelectFirstPending
+    titleOnly := !!titleOnly
+    if IsObject(TextBlockSearchTitleOnlyCheck)
+        TextBlockSearchTitleOnlyCheck.Value := titleOnly ? 1 : 0
+    if titleOnly != TextBlockSearchTitleOnly {
+        TextBlockSearchTitleOnly := titleOnly
+        TextBlockSelectFirstPending := true
+        InvalidateCachedTextBlockSearchViews()
+        PopulatePanel()
+    }
+    ; The checkbox is a temporary modifier for the Edit. Return the caret and
+    ; any existing selection immediately so typing can continue uninterrupted.
+    if restoreSearchFocus && IsTextWorkspace()
+        && IsObject(TextBlockSearchEdit) {
+        selectionStart := 0
+        selectionEnd := 0
+        DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
+            "uint", 0x00B0, "uint*", &selectionStart,
+            "uint*", &selectionEnd, "ptr") ; EM_GETSEL
+        TextBlockSearchEdit.Focus()
+        DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
+            "uint", 0x00B1, "ptr", selectionStart,
+            "ptr", selectionEnd, "ptr") ; EM_SETSEL
+    }
+    return true
+}
+
+CanToggleTextBlockTitleOnly(*) {
+    return IsPopDropPanelActive() && IsTextWorkspace()
+}
+
+ToggleTextBlockTitleOnly(*) {
+    global Panel, TextBlockSearchEdit, TextBlockSearchTitleOnly
+    focused := DllCall("user32\GetFocus", "ptr")
+    searchFocused := IsObject(TextBlockSearchEdit)
+        && focused = TextBlockSearchEdit.Hwnd
+    SetTextBlockSearchTitleOnly(!TextBlockSearchTitleOnly, searchFocused)
+    ; Alt+T also works while navigating cards; retain that control focus.
+    if !searchFocused && focused && IsObject(Panel)
+        && DllCall("user32\IsWindow", "ptr", focused, "int")
+        && (focused = Panel.Hwnd || DllCall("user32\IsChild",
+            "ptr", Panel.Hwnd, "ptr", focused, "int"))
+        DllCall("user32\SetFocus", "ptr", focused, "ptr")
+    return true
+}
+
+InvalidateCachedTextBlockSearchViews() {
+    global WorkspaceFileViewStates
+    ; “仅标题” belongs to the current visible panel session, not to an
+    ; individual workspace. Cached inactive views may have been rendered with
+    ; the previous scope, so mark them stale without restoring scope from them.
+    for _, state in WorkspaceFileViewStates {
+        if HasProp(state, "RenderSignature")
+            state.RenderSignature := ""
+        if HasProp(state, "SelectFirstPending")
+            state.SelectFirstPending := true
+    }
 }
 
 ClearTextBlockSearch(refresh := true, *) {
@@ -1040,6 +1136,30 @@ ClearTextBlockSearch(refresh := true, *) {
     if refresh
         PopulatePanel()
     return true
+}
+
+ResetTextBlockSearchSession(refresh := true, *) {
+    global TextBlockSearchTitleOnly, TextBlockSearchTitleOnlyCheck
+    global TextBlockSelectFirstPending, WorkspaceFileViewStates
+    queryChanged := ClearTextBlockSearch(false)
+    scopeChanged := TextBlockSearchTitleOnly
+    TextBlockSearchTitleOnly := false
+    TextBlockSelectFirstPending := true
+    if IsObject(TextBlockSearchTitleOnlyCheck)
+        TextBlockSearchTitleOnlyCheck.Value := 0
+    ; Inactive hot views belong to the same visible session. Invalidate every
+    ; cached query so reopening cannot resurrect a search from another text
+    ; workspace that happened not to be active when the panel was hidden.
+    for _, state in WorkspaceFileViewStates {
+        if HasProp(state, "SearchQuery") && state.SearchQuery != "" {
+            state.SearchQuery := ""
+            state.SelectFirstPending := true
+            state.RenderSignature := ""
+        }
+    }
+    if refresh && (queryChanged || scopeChanged)
+        PopulatePanel()
+    return queryChanged || scopeChanged
 }
 
 FocusTextBlockSearch(*) {
@@ -1379,7 +1499,7 @@ SendTextBlocksToReturnTargetUnlocked(paths, prepend := false) {
             throw Error("安全输入框不执行自动粘贴。")
         if IsObject(terminalHost) {
             ; A terminal has no host-independent editable "start" position.
-            ; Shift+Enter therefore uses the same safe current-pane paste and
+            ; Prepend send therefore uses the same safe current-pane paste and
             ; never emits Ctrl+Home, which could scroll or alter an app.
             PasteTextToSupportedTerminal(terminalHost)
         } else if prepend {
@@ -1657,7 +1777,7 @@ ShowTextBlockContextMenu(paths, clickedPath, ownerHwnd, x, y) {
     global PinnedPaths
     contextMenu := Menu()
     contextMenu.Add("快速发送`tEnter", QuickSendTextBlocks.Bind(paths.Clone()))
-    contextMenu.Add("前置发送`tShift+Enter",
+    contextMenu.Add("前置发送`tCtrl+Enter",
         PrependTextBlocks.Bind(paths.Clone()))
     contextMenu.Add("复制正文`tCtrl+C", CopyTextBlocks.Bind(paths.Clone()))
     if paths.Length = 1 {

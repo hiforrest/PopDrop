@@ -6,7 +6,8 @@ BuildPanel() {
     global ItemCountText
     global ClipboardPinnedButton, RefreshButton, RemovePinnedButton
     global ExpandAllFoldersButton, CollapseAllFoldersButton
-    global SettingsButton, TextBlockSearchEdit
+    global SettingsButton, TextBlockSearchFrame, TextBlockSearchEdit
+    global TextBlockSearchTitleOnlyCheck
     global TransferStatusText
     global APP_VERSION, WorkspaceTabs, WorkspaceMoreButton
     global WorkspaceBottomRule
@@ -85,13 +86,22 @@ BuildPanel() {
     Loop 6
         ToolbarSeparators.Push(AddPanelDashedSeparator(Panel,
             "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h1"))
+    ; Search is a composite field: the border belongs to the full band while
+    ; the borderless Edit is physically narrower than the title-only area.
+    ; Long input, the caret and selection therefore cannot run under the
+    ; checkbox at any DPI or panel width.
+    TextBlockSearchFrame := Panel.AddText(
+        ScalePanelGuiOptions("x12 y42 w716 h26 Hidden +Border -Tabstop"), "")
     TextBlockSearchEdit := AddUiEdit(Panel,
-        ScalePanelGuiOptions("x430 y8 w196 h26 Hidden"), "")
+        ScalePanelGuiOptions("x16 y43 w620 h24 Hidden -Border"), "")
     TextBlockSearchEdit.OnEvent("Change", TextBlockSearchChanged)
     DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
         "uint", 0x1501, "ptr", 1,
         "wstr", "空格分隔多个关键字（AND）", "ptr")
-
+    TextBlockSearchTitleOnlyCheck := Panel.AddCheckBox(
+        ScalePanelGuiOptions("x644 y43 w76 h24 Hidden"), "仅标题")
+    TextBlockSearchTitleOnlyCheck.OnEvent("Click",
+        TextBlockSearchTitleOnlyChanged)
     ; Pre-create the smart drop surfaces. They cover only the top navigation
     ; band; the independent right action rail remains visible.
     FolderDropAddSourceButton := Panel.AddButton(
@@ -329,11 +339,15 @@ SelectWorkspaceFromMoreMenu(workspaceId, *) {
 }
 
 UpdateWorkspaceTypeUi() {
-    global TextBlockSearchEdit, RefreshButton, PinnedDropButton
+    global TextBlockSearchFrame, TextBlockSearchEdit
+    global TextBlockSearchTitleOnlyCheck
+    global RefreshButton, PinnedDropButton
     global ClipboardPinnedButton, RemovePinnedButton, TextBlockSearchQuery
     global WorkspaceTabs, WorkspaceMoreButton, WorkspaceOverflowIds
     global PanelLayoutWidth
     textMode := IsTextWorkspace()
+    if IsObject(TextBlockSearchFrame)
+        TextBlockSearchFrame.Visible := textMode
     if IsObject(TextBlockSearchEdit) {
         TextBlockSearchEdit.Visible := textMode
         if !textMode {
@@ -341,6 +355,8 @@ UpdateWorkspaceTypeUi() {
             TextBlockSearchEdit.Value := ""
         }
     }
+    if IsObject(TextBlockSearchTitleOnlyCheck)
+        TextBlockSearchTitleOnlyCheck.Visible := textMode
     if IsObject(ClipboardPinnedButton) {
         ClipboardPinnedButton.Visible := true
         SetPanelIconButtonEnabled(ClipboardPinnedButton, textMode)
@@ -356,13 +372,19 @@ UpdateWorkspaceTypeUi() {
 }
 
 EnforceWorkspaceSearchVisibility() {
-    global TextBlockSearchEdit, TextBlockSearchQuery
+    global TextBlockSearchFrame, TextBlockSearchEdit
+    global TextBlockSearchTitleOnlyCheck
+    global TextBlockSearchQuery
     global TextBlockSelectFirstPending
     if !IsObject(TextBlockSearchEdit)
         return false
     textMode := IsTextWorkspace()
     changed := TextBlockSearchEdit.Visible != textMode
+    if IsObject(TextBlockSearchFrame)
+        TextBlockSearchFrame.Visible := textMode
     TextBlockSearchEdit.Visible := textMode
+    if IsObject(TextBlockSearchTitleOnlyCheck)
+        TextBlockSearchTitleOnlyCheck.Visible := textMode
     if !textMode {
         if TextBlockSearchQuery != ""
             TextBlockSearchQuery := ""
@@ -436,7 +458,6 @@ RequestActivateWorkspace(workspaceId, origin := "main") {
 ActivateWorkspace(workspaceId) {
     global ActiveWorkspaceId, PanelVisible, StatusKind, FileView
     global LastFileWorkspaceId
-    global ActiveWorkspaceType
     global SourceWatcherRecentDirty
     global ContentUpdateMode, CONTENT_UPDATE_ACCURACY
     global CurrentScanComplete
@@ -450,21 +471,25 @@ ActivateWorkspace(workspaceId) {
     PreviewSuppress("workspace", false)
     RememberActiveWorkspaceFileView()
     ClearTextBlockSearch(false)
-    previousType := ActiveWorkspaceType
     if !BindRuntimeWorkspace(found.Value)
         return false
-    typeChanged := ParseWorkspaceType(previousType)
-        != ParseWorkspaceType(ActiveWorkspaceType)
     CancelStaleWorkspaceWorker()
     if !ScanResultLoaded
         LoadDiskScanCache()
     StatusKind := "default"
-    hotViewReady := ActivateWorkspaceFileView()
-    if !hotViewReady
-        PopulatePanel()
-    searchVisibilityChanged := EnforceWorkspaceSearchVisibility()
-    if typeChanged || searchVisibilityChanged
-        RequestNativeLayout()
+    ; A workspace switch changes several sibling controls and may also rebuild
+    ; the native ListView. Always finish it as one visual transaction: even if
+    ; rendering raises, the finally block restores the active view geometry,
+    ; search visibility and right-rail paint instead of leaving a half-switched
+    ; blank panel on screen.
+    try {
+        hotViewReady := ActivateWorkspaceFileView()
+        if !hotViewReady
+            PopulatePanel()
+    } finally {
+        EnforceWorkspaceSearchVisibility()
+        CommitWorkspaceSwitchVisuals()
+    }
     if PanelVisible && IsObject(FileView) {
         if IsTextWorkspace()
             RestoreTextBlockSearchFocus()
@@ -674,6 +699,48 @@ ActivateWorkspaceFileView() {
     return hotViewReady
 }
 
+CommitWorkspaceSwitchVisuals() {
+    global Panel, FileView
+    if !IsObject(Panel) || !Panel.Hwnd || !IsObject(FileView)
+        return false
+    panelHwnd := Panel.Hwnd
+    if !DllCall("user32\IsWindowVisible", "ptr", panelHwnd, "int")
+        return false
+
+    ; PostMessage(WM_SIZE) is intentionally used by ordinary deferred layout,
+    ; but it is too late for the end of a workspace switch: focus and another
+    ; tab notification can arrive before that message. Send the same native
+    ; notification synchronously so AHK performs its normal DPI conversion.
+    clientRect := Buffer(16, 0)
+    if !DllCall("user32\GetClientRect", "ptr", panelHwnd,
+        "ptr", clientRect.Ptr, "int")
+        return false
+    clientWidth := NumGet(clientRect, 8, "int")
+        - NumGet(clientRect, 0, "int")
+    clientHeight := NumGet(clientRect, 12, "int")
+        - NumGet(clientRect, 4, "int")
+    packedSize := (clientWidth & 0xFFFF)
+        | ((clientHeight & 0xFFFF) << 16)
+    DllCall("user32\SendMessageW", "ptr", panelHwnd, "uint", 0x0005,
+        "uptr", 0, "uptr", packedSize, "ptr") ; WM_SIZE
+    ; WM_SIZE and a newly created/hot-swapped native ListView are allowed to
+    ; change their internal view state independently. Reassert the product view
+    ; contract after sizing: text workspaces are always card tiles, while file
+    ; workspaces follow the configured thumbnail/list setting.
+    ApplyViewMode()
+    FileView.Visible := true
+
+    ; Repaint the complete sibling tree after every child has its final bounds.
+    ; This covers the independent right rail as well as the top toolbar; the
+    ; old toolbar-only invalidation could leave the refresh icon unpainted.
+    redrawFlags := 0x0001 | 0x0004 | 0x0080 | 0x0100
+        ; RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+    DllCall("user32\RedrawWindow", "ptr", panelHwnd, "ptr", 0,
+        "ptr", 0, "uint", redrawFlags, "int")
+    PreviewRecoverAfterInteraction()
+    return true
+}
+
 BindRuntimeWorkspace(workspace) {
     global ActiveWorkspaceId, ActiveWorkspaceName, ActiveWorkspaceType
     global LastFileWorkspaceId, WORKSPACE_TYPE_FILES
@@ -859,6 +926,8 @@ ApplyWindowMode() {
             Panel.Opt("+AlwaysOnTop")
     }
     PreviewApplyWindowMode()
+    if QuickViewActive
+        QuickPreviewYieldPanelTopmost()
     AutoHideNativeTemporaryEnabled := WindowMode = WINDOW_MODE_TEMPORARY
 
     if WindowMode = WINDOW_MODE_TEMPORARY && PanelVisible
@@ -1050,17 +1119,22 @@ PanelActivationChanged(wParam, lParam, msg, hwnd) {
     if !IsSet(Panel) || !IsObject(Panel) || hwnd != Panel.Hwnd
         return
 
+    activationState := wParam & 0xFFFF
+    if activationState != 0 {
+        ; A native ListView can return from an external preview with its view
+        ; style reset to icon mode. Correct it after activation completes even
+        ; when keyboard focus remains in the search Edit.
+        SetTimer(EnsureActiveTextBlockCardView.Bind(true), -1)
+        return
+    }
+
     if WindowMode != WINDOW_MODE_TEMPORARY
         return
 
-    activationState := wParam & 0xFFFF
-
     ; WA_INACTIVE = 0
-    if activationState = 0 {
-        CancelUncommittedMainHotkeyGesture()
-        CancelFilePointerGesture()
-        ScheduleAutoHideCheck(150)
-    }
+    CancelUncommittedMainHotkeyGesture()
+    CancelFilePointerGesture()
+    ScheduleAutoHideCheck(150)
 }
 
 ScheduleAutoHideCheck(delayMs := 150) {
@@ -1834,7 +1908,7 @@ HidePanel(*) {
     Panel.Hide()
     PanelVisible := false
     AutoHidePauseDepth := 0
-    ClearTextBlockSearch(false)
+    ResetTextBlockSearchSession(false)
     RunPendingConsistencyCheckAfterHide()
     ScheduleCacheMaintenanceAfterHide()
 }
@@ -1858,7 +1932,8 @@ HandlePanelEscape(*) {
 ResizePanel(guiObj, minMax, width, height) {
     global FileView, RecentLabel, RecentView, StatusText, ItemCountText
     global TransferStatusText, WorkspaceBottomRule
-    global TextBlockSearchEdit
+    global TextBlockSearchFrame, TextBlockSearchEdit
+    global TextBlockSearchTitleOnlyCheck
     global ShowRecentSidebar, PanelLayoutWidth
     global PANEL_TOOLBAR_HEIGHT, PANEL_FOOTER_HEIGHT
     global PANEL_SIDE_TOOLBAR_WIDTH, PANEL_SIDE_TOOLBAR_GAP
@@ -1910,8 +1985,8 @@ ResizePanel(guiObj, minMax, width, height) {
             contentWidth - sidebarWidth - contentGap)
         sidebarX := outerMargin + mainWidth + contentGap
         if searchVisible
-            TextBlockSearchEdit.Move(outerMargin, contentTop + contentTopGap,
-                mainWidth, searchHeight)
+            LayoutTextBlockSearchBand(outerMargin,
+                contentTop + contentTopGap, mainWidth, searchHeight)
         FileView.Move(outerMargin, fileContentTop,
             mainWidth, fileContentHeight)
         fileRight := outerMargin + mainWidth
@@ -1926,8 +2001,8 @@ ResizePanel(guiObj, minMax, width, height) {
         RecentView.Visible := true
     } else {
         if searchVisible
-            TextBlockSearchEdit.Move(outerMargin, contentTop + contentTopGap,
-                contentWidth, searchHeight)
+            LayoutTextBlockSearchBand(outerMargin,
+                contentTop + contentTopGap, contentWidth, searchHeight)
         FileView.Move(outerMargin, fileContentTop,
             contentWidth, fileContentHeight)
         RecentLabel.Visible := false
@@ -1948,6 +2023,40 @@ ResizePanel(guiObj, minMax, width, height) {
     StatusText.Move(outerMargin, footerTop, stateWidth, footerHeight)
     TransferStatusText.Move(transferX,
         footerTop, transferWidth, footerHeight)
+}
+
+LayoutTextBlockSearchBand(x, y, width, height) {
+    global TextBlockSearchFrame, TextBlockSearchEdit
+    global TextBlockSearchTitleOnlyCheck
+    if !IsObject(TextBlockSearchFrame) || !IsObject(TextBlockSearchEdit)
+        return
+    scopeWidth := TextBlockSearchScopeWidth(width)
+    dividerX := x + width - scopeWidth
+    ; The borderless Edit fills the left compartment. The previous 4-DIP
+    ; horizontal and 1-DIP vertical inset left a visible empty strip around
+    ; the input; keep separation only at the dedicated divider.
+    editWidth := Max(PanelScale(72), dividerX - x)
+    TextBlockSearchFrame.Move(x, y, width, height)
+    TextBlockSearchEdit.Move(x, y, editWidth, height)
+    if IsObject(TextBlockSearchTitleOnlyCheck)
+        TextBlockSearchTitleOnlyCheck.Move(
+            dividerX + PanelScale(7), y + PanelScale(1),
+            Max(PanelScale(68), scopeWidth - PanelScale(9)),
+            Max(PanelScale(20), height - PanelScale(2)))
+}
+
+TextBlockSearchScopeWidth(width, scaleFactor := 0) {
+    global PanelUiScaleFactor
+    ; ResizePanel can receive a floating-point Gui width after DPI conversion.
+    ; Use regular division and Floor instead of the integer-only // operator,
+    ; which rejects a Float such as 640.0 before Min/Max can evaluate it.
+    if scaleFactor <= 0 {
+        scaleFactor := IsSet(PanelUiScaleFactor) ? PanelUiScaleFactor : 1.0
+    }
+    minimumWidth := Round(78 * scaleFactor)
+    maximumWidth := Round(88 * scaleFactor)
+    widthThird := Floor(width / 3)
+    return Min(maximumWidth, Max(minimumWidth, widthThird))
 }
 
 LayoutWorkspaceBottomRule(fileLeft, fileWidth, contentTop) {

@@ -60,6 +60,38 @@ RunSelfTests() {
         AssertSelfTest(!TextBlockHaystacksMatchTerms(
             "alpha title", "other body", ["alpha", "beta"]),
             "文本块多关键字使用 AND 语义")
+        AssertSelfTest(TextBlockSearchScopeMatches(
+            "alpha beta", "alpha source", "body", ["alpha", "beta"], true),
+            "仅标题模式在可见标题内保持 AND 语义")
+        AssertSelfTest(!TextBlockSearchScopeMatches(
+            "alpha", "alpha source beta", "contains beta",
+            ["alpha", "beta"], true),
+            "仅标题模式排除正文、来源和路径命中")
+        AssertSelfTest(TextBlockSearchScopeMatches(
+            "alpha", "alpha source beta", "body", ["alpha", "beta"], false),
+            "全文模式保持现有跨字段匹配")
+        AssertSelfTest(TextBlockTitleFromPath(
+            "C:\\Blocks\\Visible title.md") = "Visible title",
+            "仅标题口径与卡片显示一致且不包含扩展名")
+        ; --self-test runs before the normal UI globals are initialized.
+        ; Supply the scale explicitly so this regression test is startup-safe.
+        searchScopeWidth := TextBlockSearchScopeWidth(1920.0, 1.0)
+        AssertSelfTest(Type(searchScopeWidth) = "Integer"
+            && searchScopeWidth >= 78
+            && searchScopeWidth <= 88,
+            "文本搜索组合控件兼容 DPI 换算后的浮点 GUI 宽度")
+        AssertSelfTest(ShouldHideTextSourceForSearch(
+            true, "query", "Ready", 0),
+            "文本搜索隐藏零命中的来源分栏")
+        AssertSelfTest(!ShouldHideTextSourceForSearch(
+            true, "", "Ready", 0),
+            "无查询时保留原有空来源提示")
+        AssertSelfTest(!ShouldHideTextSourceForSearch(
+            true, "query", "Unavailable", 0),
+            "搜索时仍保留目录不可用状态")
+        AssertSelfTest(!ShouldHideTextSourceForSearch(
+            false, "query", "Ready", 0),
+            "文件工作区不受文本搜索分栏规则影响")
         AssertSelfTest(ShouldActivateTextBlockSearchResult(
             true, true, false),
             "文本搜索框空闲且结果就绪时 Enter 快速发送")

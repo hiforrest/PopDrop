@@ -13,12 +13,12 @@ OpenFileViewItem(list, row) {
     path := ItemPaths[row]
     modifiers := GetPointerModifierMask()
     if IsTextWorkspace() && IsTextBlockPath(path) {
-        ; Double-click sends the clicked block. Holding Shift alone selects
+        ; Double-click sends the clicked block. Holding Ctrl alone selects
         ; the existing prepend path; other modifier combinations remain inert
-        ; so Ctrl/Alt/Win selection and shell gestures cannot send by accident.
-        if modifiers = 0x02 {
-            ; Native ListView applies Shift range selection before NM_DBLCLK.
-            ; The send owns only this row, so commit the same single-row state
+        ; so Shift/Alt/Win selection and shell gestures cannot send by accident.
+        if modifiers = 0x01 {
+            ; Native ListView updates its selection before NM_DBLCLK for a
+            ; modified click. The send owns only this row, so commit that state
             ; before HidePanel preserves the hot view for the next summon.
             CollapseListSelectionToRow(list, row, true)
             PrependTextBlocks([path])
@@ -124,12 +124,20 @@ InstallPanelHotkeys() {
     ; Do not register Shift+F10 separately. The native ListView ContextMenu
     ; event handles both Shift+F10 and AppsKey, preventing one gesture from
     ; opening a hotkey menu and then a second native-control menu.
-    Hotkey("^Enter", PanelRevealSelection)
     Hotkey("^c", PanelCopyFileObjects)
     Hotkey("^+c", PanelCopyPaths)
     Hotkey("F4", PanelEditTextBlock)
+    ; Native grouped ListView navigation can focus a group header between the
+    ; last item of one group and the first item of the next. Own unmodified
+    ; arrows so navigation always lands on exactly one real item row.
+    Hotkey("Up", NavigatePanelFileViewSingle.Bind("Up"))
+    Hotkey("Down", NavigatePanelFileViewSingle.Bind("Down"))
+    Hotkey("Left", NavigatePanelFileViewSingle.Bind("Left"))
+    Hotkey("Right", NavigatePanelFileViewSingle.Bind("Right"))
+    HotIf(IsFileWorkspaceFileViewActive)
+    Hotkey("^Enter", PanelRevealSelection)
     HotIf(IsTextBlockFileViewActive)
-    Hotkey("+Enter", PanelPrependSelection)
+    Hotkey("^Enter", PanelPrependSelection)
     HotIf(IsPopDropPanelActive)
     Hotkey("^f", FocusTextBlockSearch)
     Loop 9
@@ -138,6 +146,8 @@ InstallPanelHotkeys() {
     ; must never receive the chord while the PopDrop panel owns foreground.
     Hotkey("$^Tab", CycleWorkspace.Bind(1), "On T2")
     Hotkey("$^+Tab", CycleWorkspace.Bind(-1), "On T2")
+    HotIf(CanToggleTextBlockTitleOnly)
+    Hotkey("!t", ToggleTextBlockTitleOnly)
     HotIf(CanFocusTextBlockSearch)
     Hotkey("/", FocusTextBlockSearch)
     HotIf(IsTextBlockSearchActive)
@@ -145,7 +155,7 @@ InstallPanelHotkeys() {
     Hotkey("Tab", FocusTextBlockResults)
     HotIf(IsTextBlockSearchResultReady)
     Hotkey("Enter", ActivateTextBlockSearchResult)
-    Hotkey("+Enter", ActivateTextBlockSearchResultPrepend)
+    Hotkey("^Enter", ActivateTextBlockSearchResultPrepend)
     ; Ctrl+V is intentionally registered only for the text-card surface and
     ; the panel container. Editable controls keep the native paste behavior.
     HotIf(CanPasteClipboardAsPinnedTextBlock)
@@ -284,6 +294,82 @@ IsPanelFileViewActive(*) {
 
 IsTextBlockFileViewActive(*) {
     return IsTextWorkspace() && IsPanelFileViewActive()
+}
+
+IsFileWorkspaceFileViewActive(*) {
+    return !IsTextWorkspace() && IsPanelFileViewActive()
+}
+
+NavigatePanelFileViewSingle(direction, *) {
+    global FileView, RecentView, ItemPaths, RecentItemPaths
+    global SelectedFilePaths
+    focused := DllCall("user32\GetFocus", "ptr")
+    if IsObject(FileView) && focused = FileView.Hwnd {
+        list := FileView
+        paths := ItemPaths
+        EnsureActiveTextBlockCardView()
+    } else if IsObject(RecentView) && focused = RecentView.Hwnd {
+        list := RecentView
+        paths := RecentItemPaths
+    } else
+        return false
+
+    currentRow := list.GetNext(0, "F")
+    if !currentRow
+        currentRow := list.GetNext(0)
+    targetRow := 0
+    if !currentRow {
+        Loop list.GetCount() {
+            if paths.Has(A_Index) {
+                targetRow := A_Index
+                break
+            }
+        }
+    } else {
+        relation := Map("Up", 0x0100, "Down", 0x0200,
+            "Left", 0x0400, "Right", 0x0800)[direction]
+        targetIndex := DllCall("user32\SendMessageW",
+            "ptr", list.Hwnd, "uint", 0x100C,
+            "ptr", currentRow - 1, "ptr", relation, "int")
+        targetRow := targetIndex >= 0 ? targetIndex + 1 : 0
+        if !targetRow || !paths.Has(targetRow) {
+            step := (direction = "Up" || direction = "Left") ? -1 : 1
+            candidateRow := currentRow + step
+            while candidateRow >= 1 && candidateRow <= list.GetCount() {
+                if paths.Has(candidateRow) {
+                    targetRow := candidateRow
+                    break
+                }
+                candidateRow += step
+            }
+        }
+    }
+    if !targetRow || !paths.Has(targetRow)
+        return false
+
+    ; Collapse Ctrl/Shift selections and any native LVGS_SELECTED group state
+    ; before publishing the destination. No all-group state reaches the screen.
+    ClearPanelListGroupSelection(list.Hwnd)
+    list.Modify(0, "-Select -Focus")
+    list.Modify(targetRow, "Select Focus Vis")
+    if IsObject(FileView) && list.Hwnd = FileView.Hwnd
+        SelectedFilePaths := [paths[targetRow]]
+    previewCandidate := PreviewCandidateForRow(list.Hwnd, targetRow)
+    if IsObject(previewCandidate)
+        PreviewArmCandidate(previewCandidate.Path, list.Hwnd,
+            targetRow, "keyboard")
+    QuickPreviewScheduleUpdate()
+    return true
+}
+
+ClearPanelListGroupSelection(hwnd) {
+    global FileView, GroupDropTargets, ActiveDropHighlightedGroup
+    if !IsObject(FileView) || hwnd != FileView.Hwnd
+        return false
+    for groupId, _ in GroupDropTargets
+        SetListGroupSelected(hwnd, groupId, false)
+    ActiveDropHighlightedGroup := 0
+    return true
 }
 
 GetActiveSelectionContext() {

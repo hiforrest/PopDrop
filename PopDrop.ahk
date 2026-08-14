@@ -453,8 +453,11 @@ global SourceMenuDispatchActive := false
 global SourceRemovalDialog := 0
 global SettingsDialog := 0
 global EscapeHidesPanel := true
+global TextBlockSearchFrame := 0
 global TextBlockSearchEdit := 0
+global TextBlockSearchTitleOnlyCheck := 0
 global TextBlockSearchQuery := ""
+global TextBlockSearchTitleOnly := false
 global TextBlockImeComposing := false
 global TextBlockSelectFirstPending := true
 global TextBlockSearchIndex := Map()
@@ -550,6 +553,7 @@ OnMessage(0x02A3, FileViewMouseLeave)        ; WM_MOUSELEAVE
 OnMessage(0x001F, FileViewCancelMode)      ; WM_CANCELMODE
 OnMessage(0x0215, FileViewCaptureChanged)  ; WM_CAPTURECHANGED
 OnMessage(0x0008, FileViewKillFocus)       ; WM_KILLFOCUS
+OnMessage(0x0007, FileViewGotFocus)        ; WM_SETFOCUS
 OnMessage(0x0006, PanelActivationChanged) ; WM_ACTIVATE
 OnMessage(0x0218, PanelPowerBroadcast)    ; WM_POWERBROADCAST
 InitAutoHideForegroundHook()
