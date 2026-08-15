@@ -169,6 +169,12 @@ ClassifyAvailableDropFormats(available) {
     global DROP_ADAPTER_URL, DROP_ADAPTER_TEXT, DROP_ADAPTER_UNSUPPORTED
     if available.Has("HDrop") && available["HDrop"]
         adapter := DROP_ADAPTER_HDROP
+    else if available.Has("ShellIdList") && available["ShellIdList"]
+        ; A Shell IDList represents a Windows Shell selection. Treat it as a
+        ; local-path candidate before virtual-file auxiliary formats; the
+        ; DropTarget layer will accept it only when the PIDLs resolve to real
+        ; file-system paths.
+        adapter := DROP_ADAPTER_HDROP
     else if available.Has("FileDescriptor") && available["FileDescriptor"]
         && available.Has("FileContents") && available["FileContents"]
         adapter := DROP_ADAPTER_VIRTUAL

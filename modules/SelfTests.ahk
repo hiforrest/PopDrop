@@ -649,6 +649,8 @@ RunFolderDropSelfTests() {
         smartSession.PathsCached := true
         smartSession.Paths := [firstFolder]
         smartSession.PayloadKind := "FoldersOnly"
+        ; Explorer folder drags must remain external unless a live PopDrop
+        ; outbound-drag context explicitly proves internal ownership.
         AssertSelfTest(ResolveSmartDropMode(smartSession) = "Folders",
             "外部纯文件夹显示顶部来源入口")
         smartSession.IsInternal := true

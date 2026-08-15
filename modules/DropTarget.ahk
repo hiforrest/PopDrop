@@ -222,7 +222,7 @@ DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
     global DropFolderValidationCache
     global ActiveWorkspaceId, ActiveWorkspaceName, ActiveWorkspaceType
     global FolderSettings
-    global DROP_ADAPTER_UNSUPPORTED
+    global DROP_ADAPTER_HDROP, DROP_ADAPTER_UNSUPPORTED
     try {
         PreviewSuppress("external-drag", false)
         CancelDeferredDropLeave()
@@ -257,17 +257,14 @@ DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
         ActiveDropSession := session
         session.Decision := ClassifyDataObject(dataObject)
         session.AsyncInfo := DataObjectAsyncMode(dataObject)
-        if session.Decision.Adapter = DROP_ADAPTER_UNSUPPORTED {
-            session.Unsupported := true
-            SetDropEffect(effectPtr, 0)
-            ShowDropFeedback(InvalidDropTarget(
-                session.Decision.Reason), 0, 0)
-            return 0
-        }
-        session.IsInternal := DataObjectSupportsFormat(dataObject,
-            GetPopDropInternalDragFormat(), 1, -1)
+        ; QueryGetData for PopDrop's private format is only a capability hint.
+        ; Treat a drag as genuinely internal only while PopDrop itself owns the
+        ; live outbound DoDragDrop context. This prevents Explorer Shell data
+        ; objects from being falsely classified as PopDrop-internal drags.
+        session.IsInternal := IsObject(ActiveInternalDragContext)
+            && DataObjectSupportsFormat(dataObject,
+                GetPopDropInternalDragFormat(), 1, -1)
         session.SourceKind := session.IsInternal
-            && IsObject(ActiveInternalDragContext)
             ? ClassifyDropSource(ActiveInternalDragContext.Items, true)
             : "External"
         ; Internal drags already own a trusted path array. External HDROP is
@@ -279,13 +276,38 @@ DropTargetDragEnterCore(dataObject, keyState, screenX, screenY, effectPtr) {
         if session.IsInternal && IsObject(ActiveInternalDragContext) {
             CacheDropSessionPaths(
                 session, ActiveInternalDragContext.Paths, false)
-        } else if CanPreloadHDropForFolderFeedback(
-            session.Decision, session.AsyncInfo, session.SourceKind) {
-            ; DragEnter preloading is only a visual optimization. Some Shell
-            ; sources (notably Directory Opus address-bar drags) advertise
-            ; CF_HDROP before GetData is ready. An empty/failed preload must
-            ; remain retryable when Drop is actually committed.
-            try PreloadDropSessionHDropPaths(session, dataObject)
+        } else {
+            if CanPreloadHDropForFolderFeedback(
+                session.Decision, session.AsyncInfo, session.SourceKind) {
+                ; Keep the established CF_HDROP path first. Ordinary Explorer
+                ; file drags already work correctly through this route.
+                try PreloadDropSessionHDropPaths(session, dataObject)
+            }
+            if !session.PathsCached
+                && CanReadShellIdListForFolderFeedback(
+                    session.Decision, session.SourceKind) {
+                ; Explorer can make the Shell selection available before a
+                ; hover-time CF_HDROP read yields paths for a folder. Read the
+                ; Shell ID list once and resolve only real file-system paths.
+                try {
+                    shellPaths := ReadShellIdListPaths(dataObject)
+                    if shellPaths.Length {
+                        ; Successfully resolved PIDLs are authoritative local
+                        ; filesystem paths, regardless of the initial adapter.
+                        session.Decision.Adapter := DROP_ADAPTER_HDROP
+                        session.Decision.Reason := ""
+                        session.Decision.HasShellIdList := true
+                        CacheDropSessionPaths(session, shellPaths, false)
+                    }
+                }
+            }
+        }
+        if session.Decision.Adapter = DROP_ADAPTER_UNSUPPORTED {
+            session.Unsupported := true
+            SetDropEffect(effectPtr, 0)
+            ShowDropFeedback(InvalidDropTarget(
+                session.Decision.Reason), 0, 0)
+            return 0
         }
         SyncFolderDropModeForSession(session)
         return UpdateDropFeedback(keyState, screenX, screenY, effectPtr)
@@ -719,6 +741,26 @@ DataObjectSupportsHDrop(dataObject) {
         return false
 }
 
+CanReadShellIdListForFolderFeedback(decision, sourceKind) {
+    global DROP_ADAPTER_HDROP, DROP_ADAPTER_VIRTUAL
+    global DROP_ADAPTER_UNSUPPORTED
+    if sourceKind != "External" || !IsObject(decision)
+        return false
+    adapter := decision.Adapter
+    if adapter != DROP_ADAPTER_HDROP
+        && adapter != DROP_ADAPTER_VIRTUAL
+        && adapter != DROP_ADAPTER_UNSUPPORTED
+        return false
+    ; This asks only for CFSTR_SHELLIDLIST, never CF_HDROP. A browser/virtual
+    ; source that does not implement the Shell format simply returns failure;
+    ; a real Explorer selection can resolve to stable filesystem PIDLs.
+    if HasProp(decision, "HasExplicitUrl") && decision.HasExplicitUrl
+        return false
+    if HasProp(decision, "HasImagePayload") && decision.HasImagePayload
+        return false
+    return true
+}
+
 ReadHDropPaths(dataObject) {
     paths := []
     formatSize := A_PtrSize = 8 ? 32 : 20
@@ -757,6 +799,133 @@ ReadHDropPaths(dataObject) {
     }
     return paths
 }
+
+ReadShellIdListPaths(dataObject) {
+    ; CFSTR_SHELLIDLIST is a CIDA structure: an absolute parent PIDL followed
+    ; by one relative PIDL per selected item. Explorer commonly exposes this
+    ; for ordinary file-system folders even when hover-time CF_HDROP has not
+    ; yielded the path list yet.
+    paths := []
+    if !dataObject
+        return paths
+    formats := GetDropClipboardFormats()
+    if !formats.ShellIdList
+        return paths
+
+    formatSize := A_PtrSize = 8 ? 32 : 20
+    mediumSize := A_PtrSize = 8 ? 24 : 12
+    formatEtc := Buffer(formatSize, 0)
+    medium := Buffer(mediumSize, 0)
+    FillFormatEtc(formatEtc.Ptr, formats.ShellIdList, 1, -1)
+    hr := ComCall(3, dataObject, "ptr", formatEtc.Ptr,
+        "ptr", medium.Ptr, "int")
+    if !HResultSucceeded(hr)
+        return paths
+
+    hGlobal := 0
+    locked := 0
+    try {
+        unionOffset := A_PtrSize = 8 ? 8 : 4
+        hGlobal := NumGet(medium, unionOffset, "ptr")
+        if !hGlobal
+            return paths
+        byteCount := DllCall("kernel32\GlobalSize",
+            "ptr", hGlobal, "uptr")
+        if byteCount < 12
+            return paths
+        locked := DllCall("kernel32\GlobalLock",
+            "ptr", hGlobal, "ptr")
+        if !locked
+            return paths
+
+        childCount := NumGet(locked, 0, "uint")
+        if !childCount || childCount > 4096
+            return paths
+        headerBytes := 4 + (childCount + 1) * 4
+        if headerBytes > byteCount
+            return paths
+
+        endPtr := locked + byteCount
+        parentOffset := NumGet(locked, 4, "uint")
+        if parentOffset >= byteCount
+            return paths
+        parentPidl := locked + parentOffset
+        if !PidlFitsMemoryRange(parentPidl, endPtr)
+            return paths
+
+        Loop childCount {
+            childOffset := NumGet(
+                locked, 4 + A_Index * 4, "uint")
+            if childOffset >= byteCount
+                continue
+            childPidl := locked + childOffset
+            if !PidlFitsMemoryRange(childPidl, endPtr)
+                continue
+
+            absolutePidl := 0
+            try {
+                absolutePidl := DllCall("shell32\ILCombine",
+                    "ptr", parentPidl, "ptr", childPidl, "ptr")
+                if !absolutePidl
+                    continue
+                path := FileSystemPathFromPidl(absolutePidl)
+                if path != "" && !ArrayContainsPath(paths, path)
+                    paths.Push(path)
+            } finally {
+                if absolutePidl
+                    DllCall("shell32\ILFree", "ptr", absolutePidl)
+            }
+        }
+    } finally {
+        if locked && hGlobal
+            DllCall("kernel32\GlobalUnlock", "ptr", hGlobal)
+        DllCall("ole32\ReleaseStgMedium", "ptr", medium.Ptr)
+    }
+    return paths
+}
+
+PidlFitsMemoryRange(pidl, endPtr) {
+    if !pidl || pidl >= endPtr
+        return false
+    Loop 4096 {
+        if pidl + 2 > endPtr
+            return false
+        itemBytes := NumGet(pidl, 0, "ushort")
+        if itemBytes = 0
+            return true
+        if itemBytes < 2 || pidl + itemBytes > endPtr
+            return false
+        pidl += itemBytes
+    }
+    return false
+}
+
+FileSystemPathFromPidl(pidl) {
+    if !pidl
+        return ""
+    pathPtr := 0
+    try {
+        ; SIGDN_FILESYSPATH returns a normal path only for file-system items.
+        hr := DllCall("shell32\SHGetNameFromIDList",
+            "ptr", pidl, "uint", 0x80058000,
+            "ptr*", &pathPtr, "int")
+        if HResultSucceeded(hr) && pathPtr
+            return NormalizePath(StrGet(pathPtr))
+    } catch {
+    } finally {
+        if pathPtr
+            DllCall("ole32\CoTaskMemFree", "ptr", pathPtr)
+    }
+
+    legacy := Buffer(32768 * 2, 0)
+    try {
+        if DllCall("shell32\SHGetPathFromIDListW",
+            "ptr", pidl, "ptr", legacy.Ptr, "int")
+            return NormalizePath(StrGet(legacy))
+    }
+    return ""
+}
+
 
 GetActiveInternalDropItems(paths) {
     global ActiveInternalDragContext
