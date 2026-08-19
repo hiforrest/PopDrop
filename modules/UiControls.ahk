@@ -1,4 +1,4 @@
-﻿; Native control construction, owner drawing and DPI corrections.
+; Native control construction, owner drawing and DPI corrections.
 
 AddUiButton(guiObj, options, text, scaleFactor := 1.0) {
     global UI_SINGLE_LINE_HEIGHT
@@ -29,7 +29,8 @@ AddPanelIconButton(guiObj, options, imagePath, tooltipText, action,
         Hovered: false,
         Pressed: false,
         Selected: false,
-        Enabled: true
+        Enabled: true,
+        PaintRetryCount: 0
     }
     PanelIconButtons[control.Hwnd] := state
     if !PanelIconSubclassCallback
@@ -262,21 +263,31 @@ DrawPanelIconButton(hwnd) {
                 ? state.AlternateImage : state.Image
         if image {
             graphics := 0
-            if DllCall("gdiplus\GdipCreateFromHDC",
-                "ptr", hdc, "ptr*", &graphics, "uint") = 0 && graphics {
+            imageDrawn := false
+            createStatus := DllCall("gdiplus\GdipCreateFromHDC",
+                "ptr", hdc, "ptr*", &graphics, "uint")
+            if createStatus = 0 && graphics {
                 try {
                     DllCall("gdiplus\GdipSetInterpolationMode",
                         "ptr", graphics, "int", 7, "uint")
-                    ; The PNG is already a 64x64 toolbar canvas. Draw the
-                    ; entire canvas edge-to-edge so the button adds no padding.
-                    DllCall("gdiplus\GdipDrawImageRectI",
+                    drawStatus := DllCall("gdiplus\GdipDrawImageRectI",
                         "ptr", graphics, "ptr", image,
                         "int", 0, "int", 0,
                         "int", width, "int", height, "uint")
+                    imageDrawn := drawStatus = 0
                 } finally {
                     DllCall("gdiplus\GdipDeleteGraphics",
                         "ptr", graphics, "uint")
                 }
+            }
+            if imageDrawn
+                state.PaintRetryCount := 0
+            else if state.PaintRetryCount < 2 {
+                ; BeginPaint validates the region even when GDI+ transiently
+                ; fails. Re-invalidate at most twice so an icon cannot remain
+                ; blank forever after one failed paint.
+                state.PaintRetryCount += 1
+                SetTimer(InvalidatePanelIconButton.Bind(hwnd), -16)
             }
         }
         if state.Enabled && DllCall("user32\GetFocus", "ptr") = hwnd {
@@ -296,6 +307,23 @@ DrawPanelIconButton(hwnd) {
 InvalidatePanelIconButton(hwnd) {
     DllCall("user32\InvalidateRect", "ptr", hwnd,
         "ptr", 0, "int", 0)
+}
+
+ResetPanelIconVisualState(repaintNow := false) {
+    global PanelIconButtons, PanelIconHoverHwnd, PanelIconTooltipGeneration
+    PanelIconHoverHwnd := 0
+    PanelIconTooltipGeneration += 1
+    ToolTip()
+    for hwnd, state in PanelIconButtons {
+        state.Hovered := false
+        state.Pressed := false
+        state.PaintRetryCount := 0
+        InvalidatePanelIconButton(hwnd)
+        if repaintNow
+            && DllCall("user32\IsWindowVisible", "ptr", hwnd, "int")
+            DllCall("user32\UpdateWindow", "ptr", hwnd, "int")
+    }
+    return true
 }
 
 SetPanelIconButtonHovered(control, hovered) {

@@ -50,7 +50,8 @@ global PreviewSession := {
     Generation: 0, ListInstance: 0, PanelSession: 0,
     RequestId: 0, RequestStarted: 0, VisiblePath: "",
     Side: "", Suppression: "", CacheCommand: false,
-    DocumentGeneration: false, StatusKind: "", StatusFrame: 0
+    DocumentGeneration: false, StatusKind: "", StatusFrame: 0,
+    TransportRetryCount: 0
 }
 global PreviewNegativeCache := Map()
 global PreviewHoverCacheQueue := []
@@ -344,7 +345,12 @@ PreviewCancelDocumentDisplay() {
 
 PreviewBeginPanelSession() {
     global PreviewPanelSession, PreviewGeneration, PreviewSession
-    global PreviewCacheActive
+    global PreviewCacheActive, PreviewSessionDisabled, PreviewRestartTicks
+    ; Showing the panel is an explicit retry boundary for the preview helper.
+    ; Per-file negative cache still prevents one bad file from crash-looping.
+    PreviewSessionDisabled := false
+    PreviewRestartTicks := []
+    PreviewSession.TransportRetryCount := 0
     PreviewPanelSession += 1
     PreviewGeneration += 1
     PreviewSession.Side := ""
@@ -389,10 +395,9 @@ PreviewHandleMouseMove(hwnd, lParam) {
         return
     x := SignedMouseCoordinate(lParam & 0xFFFF)
     y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
-    screen := ClientToScreenPoint(hwnd, x, y)
-    if !PreviewScreenPointHitsList(hwnd, screen.X, screen.Y) {
-        ; A transient child/overlay hit while crossing card boundaries should
-        ; behave like list whitespace, not synchronously blank the preview.
+    ; The message already came from this exact active ListView HWND. Native
+    ; filename infotips are top-level popups and must not veto the candidate.
+    if !PointInsideControl(hwnd, x, y) {
         PreviewScheduleLeave()
         return
     }
@@ -439,14 +444,22 @@ PreviewCandidateForRow(hwnd, row) {
     if !row
         return 0
     if IsObject(FileView) && hwnd = FileView.Hwnd {
-        if !ItemPaths.Has(row) || !ItemKinds.Has(row)
-            || ItemKinds[row] != "File"
+        if !ItemPaths.Has(row)
             return 0
-        return {Path: ItemPaths[row], Row: row, Hwnd: hwnd}
+        path := ItemPaths[row]
+        if path = "" || !FileExist(path) || DirExist(path)
+            return 0
+        ; Filesystem truth wins over stale hot-view metadata.
+        if !ItemKinds.Has(row) || ItemKinds[row] != "File"
+            ItemKinds[row] := "File"
+        return {Path: path, Row: row, Hwnd: hwnd}
     }
     if IsObject(RecentView) && hwnd = RecentView.Hwnd
-        && RecentItemPaths.Has(row)
-        return {Path: RecentItemPaths[row], Row: row, Hwnd: hwnd}
+        && RecentItemPaths.Has(row) {
+        path := RecentItemPaths[row]
+        if path != "" && FileExist(path) && !DirExist(path)
+            return {Path: path, Row: row, Hwnd: hwnd}
+    }
     return 0
 }
 
@@ -463,9 +476,16 @@ PreviewArmCandidate(path, hwnd, row, authority) {
         return
     }
     SetTimer(PreviewLeaveExpired, 0)
-    if PreviewSession.Path = path
+    sameLiveCandidate := PreviewSession.Path = path
         && PreviewSession.Hwnd = hwnd
-        && PreviewSession.State != "Hidden"
+        && PreviewSession.ListInstance = PreviewListInstance
+        && PreviewSession.PanelSession = PreviewPanelSession
+        && PreviewSession.Generation = PreviewGeneration
+    if sameLiveCandidate
+        && (PreviewSession.State = "Armed"
+            || PreviewSession.State = "Loading"
+            || PreviewSession.State = "Visible"
+            || PreviewSession.State = "Error")
         return
     if PreviewNegativeCache.Has(PathKey(path)) {
         failure := PreviewNegativeCache[PathKey(path)]
@@ -497,6 +517,7 @@ PreviewArmCandidate(path, hwnd, row, authority) {
     PreviewSession.ListInstance := PreviewListInstance
     PreviewSession.PanelSession := PreviewPanelSession
     PreviewSession.CacheCommand := false
+    PreviewSession.TransportRetryCount := 0
     delay := PreviewCandidateDelay(wasVisible, authority)
     SetTimer(PreviewIssueArmedRequest, -Max(1, delay))
     if wasVisible
@@ -534,6 +555,25 @@ PreviewExpireStaleContent() {
     global PreviewSession
     if PreviewSession.State = "Armed" || PreviewSession.State = "Loading"
         PreviewHideWindowOnly()
+}
+
+PreviewRetryArmedTransport(delayMs := 40) {
+    global PreviewSession
+    if PreviewSession.State != "Armed"
+        return false
+    if PreviewSession.TransportRetryCount >= 4
+        return false
+    PreviewSession.TransportRetryCount += 1
+    SetTimer(PreviewIssueArmedRequest, -Max(1, delayMs))
+    return true
+}
+
+PreviewFailInteractiveTransport(path) {
+    global PreviewSession
+    PreviewRememberFailure(path, 9)
+    PreviewSession.State := "Error"
+    PreviewPresentFallbackCard(path)
+    return false
 }
 
 PreviewIssueArmedRequest() {
@@ -658,9 +698,26 @@ PreviewRecoverFromCursor() {
 PreviewScreenPointHitsList(listHwnd, screenX, screenY) {
     packedPoint := (screenY << 32) | (screenX & 0xFFFFFFFF)
     hit := DllCall("user32\WindowFromPoint", "int64", packedPoint, "ptr")
-    return hit = listHwnd
+    if hit = listHwnd
         || (hit && DllCall("user32\IsChild",
             "ptr", listHwnd, "ptr", hit, "int"))
+        return true
+    ; Cursor recovery has no source HWND, so keep an occlusion check here.
+    ; Accept only popup owner chains rooted in this exact ListView.
+    owner := hit ? DllCall("user32\GetWindow",
+        "ptr", hit, "uint", 4, "ptr") : 0 ; GW_OWNER
+    Loop 8 {
+        if !owner
+            break
+        if owner = listHwnd
+            return true
+        if DllCall("user32\IsChild",
+            "ptr", listHwnd, "ptr", owner, "int")
+            return true
+        owner := DllCall("user32\GetWindow",
+            "ptr", owner, "uint", 4, "ptr")
+    }
+    return false
 }
 
 PanelMovingOrSizing(wParam, lParam, msg, hwnd) {
@@ -816,6 +873,14 @@ PreviewSendRequest(command, path) {
     global PreviewDocumentThemeVersion
     PreviewSession.Path := path
     if !PreviewEnsureHelper() {
+        ; Helper shutdown/map replacement can briefly overlap an interrupted
+        ; response reader. Retry interactive hover work instead of poisoning
+        ; the file with a long negative-cache entry on the first collision.
+        if command = 1 {
+            if PreviewRetryArmedTransport()
+                return false
+            return PreviewFailInteractiveTransport(path)
+        }
         if command != 2 {
             PreviewRememberFailure(path)
             PreviewSession.State := "Error"
@@ -836,11 +901,23 @@ PreviewSendRequest(command, path) {
     cacheEdge := Min(1024, panelHeight)
     access := PreviewBeginMapAccess()
     try {
-        if !IsObject(access)
+        if !IsObject(access) {
+            if command = 1 {
+                if PreviewRetryArmedTransport()
+                    return false
+                return PreviewFailInteractiveTransport(path)
+            }
             return false
+        }
         mapView := access.View
-        if !mapView || !PreviewResponseEvent || !PreviewRequestEvent
+        if !mapView || !PreviewResponseEvent || !PreviewRequestEvent {
+            if command = 1 {
+                if PreviewRetryArmedTransport()
+                    return false
+                return PreviewFailInteractiveTransport(path)
+            }
             return false
+        }
         NumPut("uint", command, mapView, 8)
         NumPut("uint", 0, mapView, 12)
         NumPut("int64", PreviewGeneration, mapView, 16)
@@ -877,6 +954,7 @@ PreviewSendRequest(command, path) {
         PreviewSession.PanelSession := PreviewPanelSession
         PreviewSession.CacheCommand := command = 2
         PreviewSession.DocumentGeneration := command = 3
+        PreviewSession.TransportRetryCount := 0
         DllCall("kernel32\SetEvent", "ptr", PreviewRequestEvent)
     } finally PreviewEndMapAccess(access)
     SetTimer(PreviewPollResponse, 15)
@@ -892,6 +970,15 @@ PreviewPollResponse() {
     global PreviewGeneration, PreviewListInstance, PreviewPanelSession
     if !PreviewResponseEvent || !PreviewMapView {
         SetTimer(PreviewPollResponse, 0)
+        if PreviewSession.CacheCommand {
+            PreviewFinishCacheRequest(false)
+            return
+        }
+        if PreviewSession.State = "Loading"
+            || PreviewSession.State = "DocumentGenerating" {
+            PreviewHide("transport-reset", true)
+            PreviewRecoverAfterInteraction()
+        }
         return
     }
     response := PreviewTakeResponseSnapshot()
@@ -908,6 +995,11 @@ PreviewPollResponse() {
             if PreviewSession.DocumentGeneration {
                 PreviewSession.DocumentGeneration := false
                 PreviewStopDocumentStatusTimers()
+            }
+            if PreviewSession.State = "Loading"
+                || PreviewSession.State = "DocumentGenerating" {
+                PreviewHide("stale-response", true)
+                PreviewRecoverAfterInteraction()
             }
             return
         }

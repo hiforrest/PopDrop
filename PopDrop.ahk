@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #NoTrayIcon
 #SingleInstance Off
 
@@ -8,7 +8,7 @@
 ;@Ahk2Exe-AddResource assets\pin.ico, 557
 ;@Ahk2Exe-AddResource assets\empty-folder.ico, 558
 ;@Ahk2Exe-AddResource assets\unknown-file.ico, 559
-;@Ahk2Exe-SetVersion 1.1.2.0
+;@Ahk2Exe-SetVersion 2.0.0.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -20,7 +20,7 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global SORT_SMART := "Smart"
-global APP_VERSION := "1.1.2"
+global APP_VERSION := "2.0"
 global CONFIG_VERSION := "29"
 global CONTENT_UPDATE_FAST := "Fast"
 global CONTENT_UPDATE_ACCURACY := "Accuracy"
@@ -137,6 +137,11 @@ global FileView := 0
 ; Switching back can therefore show the existing HWND instead of rebuilding
 ; every group, item and image like the original single-view implementation.
 global WorkspaceFileViewStates := Map()
+; UI publication is transactional. Timers and GUI callbacks must not interleave
+; two native ListView rebuilds or cache a half-built workspace view.
+global PanelRenderInProgress := false
+global PanelRenderPending := false
+global PanelRenderGeneration := 0
 global RecentLabel := 0
 global RecentView := 0
 global DisplayButton := 0
@@ -329,6 +334,9 @@ global IncomingDropLastEventTick := 0
 global GroupDropTargets := Map()
 global DropFolderValidationCache := Map()
 global ActiveDropHighlightedGroup := 0
+; LVGS_SELECTED is visual drop-target feedback, not a user selection.
+global DropGroupSelectionSnapshot := 0
+global DropGroupSelectionRestoreInProgress := false
 global ConfigErrors := []
 global LastValidFolderSettings := []
 global LastValidWorkspaceId := ""
@@ -466,6 +474,12 @@ global TextBlockSearchRefreshPending := false
 global TextBlockUsage := Map()
 global TextBlockReturnWindow := 0
 global TextBlockReturnFocus := 0
+; Top-level foreground window captured immediately before a hidden PopDrop
+; panel is summoned. Used by integrations that need to return to the caller
+; (for example, locating a Windows Save/Save As dialog to a source folder).
+global PanelInvocationWindow := 0
+; Active only while contextual Save/Save As group task links are visible.
+global SaveDialogTaskLinksVisible := false
 global TextBlockSendInProgress := false
 global CudaTextDragCapture := 0
 

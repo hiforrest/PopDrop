@@ -634,6 +634,14 @@ CreateTransferId(prefix) {
         . "-" A_TickCount
 }
 
+IsCompatibleTransferHelperVersion(helperVersion) {
+    global APP_VERSION
+    ; v2.0 keeps the v1.1.2 transfer protocol. The source package contains
+    ; historical helper binaries so source-mode pre-release testing can still
+    ; run before the Windows release helper is rebuilt.
+    return helperVersion = APP_VERSION || helperVersion = "1.1.2"
+}
+
 WaitForTransferHandshake(batch, timeoutMs) {
     global APP_VERSION
     started := A_TickCount
@@ -645,7 +653,7 @@ WaitForTransferHandshake(batch, timeoutMs) {
                 throw Error("传输组件版本过旧或无法识别。请重新运行 "
                     . "native\build.ps1，并移除脚本目录中残留的旧 "
                     . "PopDropTransfer.exe。")
-            if helperVersion != APP_VERSION
+            if !IsCompatibleTransferHelperVersion(helperVersion)
                 throw Error("传输组件版本不匹配：PopDrop "
                     . APP_VERSION "，helper " helperVersion
                     . "。请重新运行 native\build.ps1。")

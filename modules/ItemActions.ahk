@@ -583,6 +583,7 @@ RecentContextMenu(list, row, isRightClick, x, y) {
 }
 
 FileViewItemSelect(list, row, selected) {
+    global ActiveDropHighlightedGroup, DropGroupSelectionRestoreInProgress
     ; A range or marquee selection emits several ItemSelect events. Defer the
     ; summary until the control has finished updating the full selection.
     ; Owner-drawn text cards need an explicit row invalidation because native
@@ -597,12 +598,17 @@ FileViewItemSelect(list, row, selected) {
         DllCall("user32\InvalidateRect", "ptr", list.Hwnd,
             "ptr", nativeRect.Ptr, "int", 0)
     }
+    if ActiveDropHighlightedGroup || DropGroupSelectionRestoreInProgress
+        return
     SetTimer(UpdateSelectionStatus, -1)
     QuickPreviewScheduleUpdate()
 }
 
 UpdateSelectionStatus() {
     global FileView, ItemPaths, StatusText, SelectedFilePaths, StatusKind
+    global ActiveDropHighlightedGroup, DropGroupSelectionRestoreInProgress
+    if ActiveDropHighlightedGroup || DropGroupSelectionRestoreInProgress
+        return
     selectedRows := GetSelectedFileRows()
     SelectedFilePaths := []
     for row in selectedRows

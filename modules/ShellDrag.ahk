@@ -81,7 +81,7 @@ BeginMultiShellDrag(paths, ownerHwnd) {
     ; Keep the backing Buffer alive for as long as any drop target retains an
     ; IDataObject reference (some targets finish transfer asynchronously).
     DragDataObjects[dataObject.Ptr] := {
-        Memory: dataObject, Kind: "Files", Paths: paths,
+        Memory: dataObject, Kind: "Files", Paths: paths.Clone(),
         InternalToken: ActiveInternalDragContext.Token}
 
     dropSource := Buffer(A_PtrSize + 8, 0)

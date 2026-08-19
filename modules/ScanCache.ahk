@@ -17,7 +17,22 @@ PopulatePanel() {
     global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
     global ItemCountText
     global TextBlockSelectFirstPending, TextBlockSearchQuery
+    global PanelRenderInProgress, PanelRenderPending, PanelRenderGeneration
 
+    ; Publish the ListView and all row metadata as one transaction. A timer
+    ; interrupt between FileView.Delete() and final map/signature publication
+    ; can otherwise save a half-built view under another workspace.
+    if PanelRenderInProgress {
+        PanelRenderPending := true
+        return false
+    }
+    previousCritical := A_IsCritical
+    PanelRenderInProgress := true
+    PanelRenderPending := false
+    renderWorkspaceId := ActiveWorkspaceId
+    renderGeneration := ++PanelRenderGeneration
+    Critical("On")
+    try {
     stableViewState := PanelRenderedWorkspaceId != ""
         && StrLower(PanelRenderedWorkspaceId) = StrLower(ActiveWorkspaceId)
         && ItemPaths.Count ? CaptureViewState([]) : 0
@@ -95,7 +110,8 @@ PopulatePanel() {
             }
             ItemPaths[row] := path
             ItemKinds[row] := DirExist(path) ? "Folder" : "File"
-            ItemOpenContexts[row] := {Area: "Pinned", GroupId: groupId}
+            ItemOpenContexts[row] := {Area: "Pinned", GroupId: groupId,
+                WorkspaceId: ActiveWorkspaceId}
             displayedCount += 1
         }
         groupId += 1
@@ -175,6 +191,7 @@ PopulatePanel() {
             ItemKinds[row] := "Folder"
             ItemOpenContexts[row] := {
                 Area: "Source",
+                WorkspaceId: ActiveWorkspaceId,
                 SourceId: folder.SourceId,
                 SourcePath: folder.Path,
                 SourceMode: folder.Mode,
@@ -195,6 +212,7 @@ PopulatePanel() {
             ItemKinds[row] := "Folder"
             ItemOpenContexts[row] := {
                 Area: "Source",
+                WorkspaceId: ActiveWorkspaceId,
                 SourceId: folder.SourceId,
                 SourcePath: folder.Path,
                 SourceMode: folder.Mode,
@@ -217,6 +235,7 @@ PopulatePanel() {
             ItemKinds[row] := file.IsDirectory ? "Folder" : "File"
             ItemOpenContexts[row] := {
                 Area: "Source",
+                WorkspaceId: ActiveWorkspaceId,
                 SourceId: folder.SourceId,
                 SourcePath: folder.Path,
                 SourceMode: folder.Mode,
@@ -240,6 +259,9 @@ PopulatePanel() {
         ApplyTextBlockCardView()
     else
         ApplyViewMode()
+    ; Apply context-sensitive source task links while redraw is still disabled,
+    ; so a scan refresh never flashes stale links from a previous invocation.
+    UpdateSaveDialogGroupTaskLinks()
     FileView.Opt("+Redraw")
     UpdateTransferGroupHeaders()
     ; Paint the committed rows before publishing their count in the footer.
@@ -276,6 +298,20 @@ PopulatePanel() {
         SelectDefaultTextBlockSearchResult(TextBlockSelectFirstPending)
         TextBlockSelectFirstPending := false
     }
+        ; This should be impossible while Critical is active. Keep the
+        ; invariant as a fail-fast guard rather than silently publishing a
+        ; cross-workspace native view.
+        if StrLower(renderWorkspaceId) != StrLower(ActiveWorkspaceId)
+            throw Error("界面提交期间工作区发生变化，已取消本次呈现。")
+    } finally {
+        rerun := PanelRenderPending
+        PanelRenderPending := false
+        PanelRenderInProgress := false
+        Critical(previousCritical)
+        if rerun
+            SetTimer(PopulatePanel, -1)
+    }
+    return true
 }
 
 RestoreStableScanViewState(restore) {

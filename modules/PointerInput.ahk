@@ -28,6 +28,12 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
         descriptor := FindSourceGroupHeaderAtPoint(hwnd, x, y)
         if IsObject(descriptor) && HasProp(descriptor, "GroupId")
             && descriptor.GroupId {
+            ; The right-aligned native task link must be left to the ListView
+            ; so it can emit LVN_LINKCLICK. Everywhere else the established
+            ; whole-header collapse gesture is unchanged.
+            if IsSaveDialogGroupTaskPoint(
+                hwnd, descriptor.GroupId, x, y)
+                return
             CancelFilePointerGesture()
             FolderGroupHeaderGesture := {
                 Hwnd: hwnd,
@@ -42,9 +48,17 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     modifiers := GetPointerModifierMask()
     path := row && pathMap.Has(row) ? pathMap[row] : ""
     selectedSnapshot := []
-    if isMainView
-        selectedSnapshot := SelectedFilePaths.Clone()
-    else if row && path != "" && IsListRowSelected(hwnd, row)
+    mainDragSnapshot := 0
+    if isMainView {
+        ; ItemSelect updates SelectedFilePaths through a zero-delay timer.
+        ; When a Ctrl/Shift/marquee selection is followed immediately by a
+        ; drag, that cache can still describe the previous selection. Freeze
+        ; the native ListView state now, before default WM_LBUTTONDOWN handling
+        ; has a chance to collapse a multi-selection onto the clicked row.
+        mainDragSnapshot := CaptureMainPointerDragSnapshot(hwnd, row)
+        selectedSnapshot := mainDragSnapshot.Selection
+        SelectedFilePaths := selectedSnapshot.Clone()
+    } else if row && path != "" && IsListRowSelected(hwnd, row)
         selectedSnapshot.Push(path)
 
     serial := ++FilePointerGestureSerial
@@ -72,15 +86,16 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     DragPaths := []
     DragItemContexts := []
     if row && pathMap.Has(row) {
-        ; WM_LBUTTONDOWN can collapse a multi-selection before a drag reaches
-        ; its movement threshold. Use the snapshot saved after the preceding
-        ; Ctrl/Shift/marquee selection instead of querying the live control.
-        if isMainView && ArrayContainsPath(SelectedFilePaths, pathMap[row]) {
-            DragPaths := SelectedFilePaths.Clone()
+        if isMainView && IsObject(mainDragSnapshot) {
+            ; Paths and row contexts come from the same atomic native-selection
+            ; snapshot, so an interrupt cannot leave a multi-file path set with
+            ; only one row context (or vice versa).
+            DragPaths := mainDragSnapshot.Paths
+            DragItemContexts := mainDragSnapshot.Contexts
         } else {
             DragPaths.Push(pathMap[row])
+            DragItemContexts := BuildDragItemContexts(hwnd, row, DragPaths)
         }
-        DragItemContexts := BuildDragItemContexts(hwnd, row, DragPaths)
     }
     DragSourceHwnd := hwnd
     DragStartX := x
@@ -718,6 +733,48 @@ GetListItemBounds(hwnd, row) {
     }
 }
 
+CaptureMainPointerDragSnapshot(hwnd, clickedRow) {
+    global FileView, ItemPaths, ItemOpenContexts
+    result := {Selection: [], Paths: [], Contexts: []}
+    previousCritical := A_IsCritical
+    Critical("On")
+    try {
+        if !IsObject(FileView) || hwnd != FileView.Hwnd
+            return result
+
+        selectedRows := GetSelectedFileRows()
+        clickedSelected := false
+        for selectedRow in selectedRows {
+            if !ItemPaths.Has(selectedRow)
+                continue
+            selectedPath := ItemPaths[selectedRow]
+            result.Selection.Push(selectedPath)
+            if selectedRow = clickedRow
+                clickedSelected := true
+        }
+
+        ; Drag the whole native selection only when the mouse-down row was
+        ; already part of it. Clicking an unselected row keeps the established
+        ; single-item drag behavior.
+        dragRows := clickedSelected ? selectedRows
+            : (clickedRow ? [clickedRow] : [])
+        for dragRow in dragRows {
+            if !ItemPaths.Has(dragRow)
+                continue
+            dragPath := ItemPaths[dragRow]
+            result.Paths.Push(dragPath)
+            context := ItemOpenContexts.Has(dragRow)
+                ? CloneDropItemContext(ItemOpenContexts[dragRow])
+                : {Area: "Unknown"}
+            context.Path := dragPath
+            result.Contexts.Push(context)
+        }
+        return result
+    } finally {
+        Critical(previousCritical)
+    }
+}
+
 BuildDragItemContexts(hwnd, clickedRow, paths) {
     global FileView, RecentView, ItemPaths, ItemOpenContexts, RecentItemPaths
     result := []
@@ -744,7 +801,8 @@ BuildDragItemContexts(hwnd, clickedRow, paths) {
 
 CloneDropItemContext(context) {
     clone := {Area: HasProp(context, "Area") ? context.Area : "Unknown"}
-    for property in ["SourceId", "SourcePath", "SourceMode", "GroupId"] {
+    for property in ["WorkspaceId", "SourceId", "SourcePath",
+        "SourceMode", "GroupId"] {
         if HasProp(context, property)
             clone.%property% := context.%property%
     }

@@ -11,6 +11,8 @@ FileViewNotify(wParam, lParam, msg, hwnd) {
 
     ; NMHDR structure: hwndFrom, idFrom, code
     code := NumGet(lParam + 0, A_PtrSize * 2, "int")
+    if code = -184 ; LVN_LINKCLICK
+        return HandleFileViewGroupTaskLink(lParam)
     if code = -12
         return IsTextWorkspace()
             ? DrawTextBlockCard(lParam)
@@ -776,6 +778,382 @@ CanOpenSourceFolder(descriptor) {
             ? descriptor.Available : DirExist(descriptor.Path))
 }
 
+SaveDialogGroupTaskText() {
+    return "另存为定位到此"
+}
+
+SetListGroupTask(hwnd, groupId, taskText) {
+    if !hwnd || groupId <= 0
+        return false
+    ; LVGROUP.pszTask is offset 72 on x64 and 48 on x86.
+    ; LVGF_TASK = 0x200. Clear with an explicit NULL pszTask instead of an
+    ; empty-string pointer; the latter can leave the old native task retained.
+    groupSize := A_PtrSize = 8 ? 152 : 96
+    taskOffset := A_PtrSize = 8 ? 72 : 48
+    groupInfo := Buffer(groupSize, 0)
+    NumPut("uint", groupSize, groupInfo, 0)
+    NumPut("uint", 0x200, groupInfo, 4) ; LVGF_TASK
+    taskPtr := taskText = "" ? 0 : StrPtr(taskText)
+    NumPut("ptr", taskPtr, groupInfo, taskOffset)
+    return DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1093, "ptr", groupId, "ptr", groupInfo.Ptr,
+        "int") != -1 ; LVM_SETGROUPINFOW
+}
+
+PrepareSaveDialogTaskLinksBeforePanelShow() {
+    global SaveDialogTaskLinksVisible, PanelRenderSignature
+    if !SaveDialogTaskLinksVisible
+        return false
+    if PanelInvocationSaveDialog()
+        return false
+
+    ; This runs only while PopDrop is hidden. Clear the historical contextual
+    ; state first, then rebuild ordinary source groups before the window is
+    ; made visible. This avoids both a visible stale frame and a second queued
+    ; clear rebuild.
+    SaveDialogTaskLinksVisible := false
+    SetTimer(WatchSaveDialogGroupTaskLinks, 0)
+    SetTimer(RebuildPanelAfterSaveTaskLinkRemoval, 0)
+    PanelRenderSignature := ""
+    try return PopulatePanel()
+    catch
+        return false
+}
+
+QueueSaveDialogTaskLinkRemovalRebuild() {
+    global PanelRenderSignature
+    ; Some common-control builds retain a previously-created group task link
+    ; even after LVM_SETGROUPINFO tries to clear pszTask. Reuse the already
+    ; proven normal panel rebuild path exactly once on Save -> normal context.
+    PanelRenderSignature := ""
+    SetTimer(RebuildPanelAfterSaveTaskLinkRemoval, -1)
+    return true
+}
+
+RebuildPanelAfterSaveTaskLinkRemoval() {
+    global PanelVisible, SaveDialogTaskLinksVisible
+    if !PanelVisible || SaveDialogTaskLinksVisible
+        return false
+    if PanelInvocationSaveDialog()
+        return false
+    try return PopulatePanel()
+    catch
+        return false
+}
+
+UpdateSaveDialogGroupTaskLinks() {
+    global FileView, GroupDropTargets, SaveDialogTaskLinksVisible
+    if !IsObject(FileView) || !FileView.Hwnd
+        return false
+
+    saveDialog := PanelInvocationSaveDialog()
+    shouldShow := !!saveDialog
+    wasVisible := SaveDialogTaskLinksVisible
+
+    if shouldShow {
+        taskText := SaveDialogGroupTaskText()
+        changed := false
+        for groupId, descriptor in GroupDropTargets {
+            if !IsSourceManagementDescriptor(descriptor)
+                continue
+            if SetListGroupTask(FileView.Hwnd, groupId, taskText)
+                changed := true
+        }
+        SaveDialogTaskLinksVisible := true
+        SetTimer(WatchSaveDialogGroupTaskLinks, 250)
+        if changed && !wasVisible
+            DllCall("user32\InvalidateRect", "ptr", FileView.Hwnd,
+                "ptr", 0, "int", 0)
+        return changed
+    }
+
+    SaveDialogTaskLinksVisible := false
+    SetTimer(WatchSaveDialogGroupTaskLinks, 0)
+
+    ; Ordinary non-Save use remains a no-op. Rebuild only when links were
+    ; actually visible in the immediately preceding context.
+    if wasVisible {
+        QueueSaveDialogTaskLinkRemovalRebuild()
+        return true
+    }
+    return false
+}
+
+WatchSaveDialogGroupTaskLinks() {
+    global Panel, PanelVisible, PanelInvocationWindow
+    global SaveDialogTaskLinksVisible
+
+    if !PanelVisible || !SaveDialogTaskLinksVisible {
+        SetTimer(WatchSaveDialogGroupTaskLinks, 0)
+        return
+    }
+
+    ; Preserve the invocation while PopDrop owns foreground. If the user moves
+    ; to another external window without hiding PopDrop, that window becomes
+    ; the new context and the save-only links are synchronized immediately.
+    foreground := DllCall("user32\GetForegroundWindow", "ptr")
+    if foreground && (!IsObject(Panel) || foreground != Panel.Hwnd) {
+        PanelInvocationWindow := foreground
+        UpdateSaveDialogGroupTaskLinks()
+        return
+    }
+
+    ; Also remove links if the original Save dialog was closed in the meantime.
+    if !PanelInvocationSaveDialog()
+        UpdateSaveDialogGroupTaskLinks()
+}
+
+GroupTaskLinkIdFromNotify(lParam) {
+    ; NMLVLINK = NMHDR + LITEM + int iItem + int iSubItem.
+    ; LITEM is 4280 bytes on both architectures. Microsoft documents that
+    ; iSubItem contains the identifier of the group containing the task link.
+    iSubItemOffset := A_PtrSize = 8 ? 4308 : 4296
+    try return NumGet(lParam + iSubItemOffset, "int")
+    catch
+        return 0
+}
+
+HandleFileViewGroupTaskLink(lParam) {
+    global GroupDropTargets
+    groupId := GroupTaskLinkIdFromNotify(lParam)
+    if groupId <= 0 || !GroupDropTargets.Has(groupId)
+        return 0
+    descriptor := GroupDropTargets[groupId]
+    if !IsSourceManagementDescriptor(descriptor)
+        return 0
+
+    saveDialog := PanelInvocationSaveDialog()
+    if !saveDialog {
+        ; The dialog may have closed while PopDrop stayed visible. Remove stale
+        ; links immediately rather than leaving a dead action in the header.
+        UpdateSaveDialogGroupTaskLinks()
+        return 0
+    }
+
+    LocateSaveDialogToSourceFolder(
+        CloneSourceManagementDescriptor(descriptor), saveDialog)
+    return 0
+}
+
+MeasureWindowTextWidth(hwnd, text) {
+    if !hwnd || text = ""
+        return 0
+    hdc := DllCall("user32\GetDC", "ptr", hwnd, "ptr")
+    if !hdc
+        return 0
+    oldFont := 0
+    try {
+        font := DllCall("user32\SendMessageW", "ptr", hwnd,
+            "uint", 0x0031, "ptr", 0, "ptr", 0, "ptr") ; WM_GETFONT
+        if font
+            oldFont := DllCall("gdi32\SelectObject",
+                "ptr", hdc, "ptr", font, "ptr")
+        textSize := Buffer(8, 0)
+        if !DllCall("gdi32\GetTextExtentPoint32W",
+            "ptr", hdc, "wstr", text, "int", StrLen(text),
+            "ptr", textSize.Ptr, "int")
+            return 0
+        return NumGet(textSize, 0, "int")
+    } finally {
+        if oldFont
+            DllCall("gdi32\SelectObject", "ptr", hdc,
+                "ptr", oldFont, "ptr")
+        DllCall("user32\ReleaseDC", "ptr", hwnd, "ptr", hdc)
+    }
+}
+
+IsSaveDialogGroupTaskPoint(hwnd, groupId, x, y) {
+    if !PanelInvocationSaveDialog()
+        return false
+    rect := GetListGroupHeaderRectRobust(hwnd, groupId)
+    if !IsObject(rect)
+        return false
+    if x < rect.Left || x >= rect.Right || y < rect.Top || y >= rect.Bottom
+        return false
+
+    taskWidth := MeasureWindowTextWidth(hwnd, SaveDialogGroupTaskText())
+    if taskWidth <= 0
+        taskWidth := PanelPhysicalScale(92, hwnd)
+    ; Native pszTask is drawn right-aligned opposite the group header text.
+    ; Reserve only the measured right-side link area so the rest of the header
+    ; keeps its existing click-to-collapse behavior.
+    padding := PanelPhysicalScale(14, hwnd)
+    taskLeft := Max(rect.Left, rect.Right - taskWidth - padding * 2)
+    return x >= taskLeft
+}
+
+WindowTextByHwnd(hwnd) {
+    if !hwnd
+        return ""
+    length := DllCall("user32\GetWindowTextLengthW", "ptr", hwnd, "int")
+    if length <= 0
+        return ""
+    textBuffer := Buffer((length + 1) * 2, 0)
+    copied := DllCall("user32\GetWindowTextW", "ptr", hwnd,
+        "ptr", textBuffer.Ptr, "int", length + 1, "int")
+    return copied > 0 ? StrGet(textBuffer) : ""
+}
+
+WindowClassByHwnd(hwnd) {
+    if !hwnd
+        return ""
+    classBuffer := Buffer(256 * 2, 0)
+    copied := DllCall("user32\GetClassNameW", "ptr", hwnd,
+        "ptr", classBuffer.Ptr, "int", 256, "int")
+    return copied > 0 ? StrGet(classBuffer) : ""
+}
+
+NormalizeDialogActionText(text) {
+    text := StrLower(Trim(text))
+    text := StrReplace(text, "&")
+    text := RegExReplace(text, "\s+")
+    return text
+}
+
+DialogTextHasSaveMeaning(text) {
+    text := NormalizeDialogActionText(text)
+    if text = ""
+        return false
+    return RegExMatch(text,
+        "i)(另存|保存|save|speichern|enregistrer|guardar|salvar|"
+        . "salva|opslaan|zapisz|сохран|저장)")
+}
+
+IsWindowsCommonSaveDialog(hwnd) {
+    global Panel
+    if !hwnd || !DllCall("user32\IsWindow", "ptr", hwnd, "int")
+        return false
+    if IsObject(Panel) && hwnd = Panel.Hwnd
+        return false
+    if WindowClassByHwnd(hwnd) != "#32770"
+        return false
+
+    actionHwnd := DllCall("user32\GetDlgItem", "ptr", hwnd,
+        "int", 1, "ptr")
+    actionText := WindowTextByHwnd(actionHwnd)
+    if DialogTextHasSaveMeaning(actionText)
+        return true
+
+    title := WindowTextByHwnd(hwnd)
+    return DialogTextHasSaveMeaning(title)
+        && !RegExMatch(NormalizeDialogActionText(actionText),
+            "i)(打开|open|öffnen|ouvrir|abrir)")
+}
+
+PanelInvocationSaveDialog() {
+    global PanelInvocationWindow
+    hwnd := PanelInvocationWindow
+    return IsWindowsCommonSaveDialog(hwnd) ? hwnd : 0
+}
+
+CommonFileDialogFolderPath(hwnd) {
+    static CDM_GETFOLDERPATH := 0x466
+    if !hwnd || !DllCall("user32\IsWindow", "ptr", hwnd, "int")
+        return ""
+    capacity := 32768
+    pathBuffer := Buffer(capacity * 2, 0)
+    length := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", CDM_GETFOLDERPATH, "uptr", capacity,
+        "ptr", pathBuffer.Ptr, "ptr")
+    if length <= 0
+        return ""
+    try return NormalizePath(StrGet(pathBuffer))
+    catch
+        return ""
+}
+
+WaitForCommonFileDialogFolder(hwnd, targetPath, timeoutMs := 900) {
+    started := A_TickCount
+    Loop {
+        current := CommonFileDialogFolderPath(hwnd)
+        if current != "" && PathsEqual(current, targetPath)
+            return true
+        if ElapsedTickMilliseconds(started, A_TickCount) >= timeoutMs
+            return false
+        Sleep(20)
+    }
+}
+
+ActivateExternalDialogSafely(hwnd) {
+    if !hwnd || !DllCall("user32\IsWindow", "ptr", hwnd, "int")
+        return false
+    try WinActivate("ahk_id " hwnd)
+    catch
+        return false
+    return WinWaitActive("ahk_id " hwnd, , 0.8)
+}
+
+SendFolderPathToCommonSaveDialog(hwnd, path, addressShortcut) {
+    if !ActivateExternalDialogSafely(hwnd)
+        return false
+    if DllCall("user32\GetForegroundWindow", "ptr") != hwnd
+        return false
+
+    SendEvent(addressShortcut)
+    Sleep(35)
+    if DllCall("user32\GetForegroundWindow", "ptr") != hwnd
+        return false
+    SendText(path)
+    if DllCall("user32\GetForegroundWindow", "ptr") != hwnd
+        return false
+    SendEvent("{Enter}")
+    return true
+}
+
+NavigateCommonSaveDialogToFolder(hwnd, path) {
+    path := NormalizePath(path)
+    if path = "" || !DirExist(path)
+        return false
+    if !IsWindowsCommonSaveDialog(hwnd)
+        return false
+
+    current := CommonFileDialogFolderPath(hwnd)
+    if current != "" && PathsEqual(current, path) {
+        ActivateExternalDialogSafely(hwnd)
+        return true
+    }
+
+    if SendFolderPathToCommonSaveDialog(hwnd, path, "!d") {
+        if WaitForCommonFileDialogFolder(hwnd, path, 700)
+            return true
+        if CommonFileDialogFolderPath(hwnd) = ""
+            return true
+    }
+
+    if SendFolderPathToCommonSaveDialog(hwnd, path, "^l") {
+        if WaitForCommonFileDialogFolder(hwnd, path, 700)
+            return true
+        if CommonFileDialogFolderPath(hwnd) = ""
+            return true
+    }
+    return false
+}
+
+LocateSaveDialogToSourceFolder(descriptor, dialogHwnd, *) {
+    live := FindRuntimeSourceDescriptor(
+        descriptor.WorkspaceId, descriptor.SourceId)
+    if !IsObject(live) {
+        SetUserStatus("该来源已经不存在，无法定位保存窗口")
+        return false
+    }
+    if !DirExist(live.Path) {
+        SetUserStatus("来源文件夹不存在或当前无法访问")
+        return false
+    }
+    if !IsWindowsCommonSaveDialog(dialogHwnd) {
+        SetUserStatus("原“另存为/保存”窗口已经关闭或发生变化")
+        return false
+    }
+
+    if NavigateCommonSaveDialogToFolder(dialogHwnd, live.Path) {
+        SetUserStatus("已将保存窗口定位到「" live.Name "」")
+        return true
+    }
+
+    SetUserStatus("未能将保存窗口定位到该来源")
+    return false
+}
+
 ShowSourceGroupContextMenu(
     sourceDescriptor, ownerHwnd, x, y
 ) {
@@ -786,6 +1164,14 @@ ShowSourceGroupContextMenu(
     ; AHK identifiers are case-insensitive.  A local named "menu" would
     ; shadow the built-in Menu class even on the right-hand side.
     sourceMenu := Menu()
+
+    saveDialog := PanelInvocationSaveDialog()
+    if saveDialog {
+        sourceMenu.Add("另存为定位到此",
+            LocateSaveDialogToSourceFolder.Bind(descriptor, saveDialog))
+        sourceMenu.Add()
+    }
+
     openText := "打开来源文件夹"
     sourceMenu.Add(openText, OpenSourceFolderFromPanel.Bind(descriptor))
     if !CanOpenSourceFolder(descriptor)

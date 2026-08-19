@@ -532,11 +532,32 @@ ShowDeleteDetails(details, permanent := false, *) {
         permanent ? "永久删除详情" : "回收站操作详情", "Iconi")
 }
 
+RebindPinnedPathsForWorkspace(workspaceId) {
+    global Workspaces, ActiveWorkspaceId, PinnedPaths
+    if workspaceId = ""
+        return false
+    if StrLower(ActiveWorkspaceId) != StrLower(workspaceId)
+        return false
+    found := FindWorkspace(workspaceId, Workspaces)
+    if !IsObject(found)
+        return false
+    ; PinnedPaths is only a runtime alias of the active workspace model.
+    ; OLE/IFileOperation is re-entrant, so reassert that alias immediately
+    ; before a synchronous repaint after an internal move. This does not write
+    ; config or modify the workspace's actual fixed-item contents.
+    PinnedPaths := found.Value.PinnedPaths
+    return true
+}
+
 PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
     ; Native IFileOperation pipeline. The advised
     ; IFileOperationProgressSink records actual destination Shell items;
     ; PerformOperations is always followed by GetAnyOperationsAborted.
-    global Panel, PinnedPaths
+    global Panel, PinnedPaths, ActiveWorkspaceId
+    operationWorkspaceId := IsObject(operationContext)
+        && HasProp(operationContext, "WorkspaceId")
+        && operationContext.WorkspaceId != ""
+        ? operationContext.WorkspaceId : ActiveWorkspaceId
     if operation != "copy" && operation != "move"
         return {Success: 0, Failed: paths.Length, Skipped: 0,
             Aborted: false, Changed: false, RefreshQueued: false}
@@ -754,14 +775,23 @@ PerformShellFileOperation(operation, paths, targetPath, operationContext := 0) {
         if operation = "move" {
             confirmedMovedPaths := CollectConfirmedMovedSourcePaths(
                 validPaths, state.Mappings)
-            ApplyConfirmedMovedPathsToCurrentView(confirmedMovedPaths)
+            if StrLower(operationWorkspaceId) = StrLower(ActiveWorkspaceId) {
+                RebindPinnedPathsForWorkspace(operationWorkspaceId)
+                ApplyConfirmedMovedPathsToCurrentView(confirmedMovedPaths)
+            }
         }
         try RememberSuccessfulTarget(targetPath)
         catch as err
             ShowPanelMsgBox("文件操作已完成，但无法保存最近目标：`n"
                 err.Message, "目标记录失败", "Icon!")
-        QueueSingleRefreshAfterFileOperation(viewState, state.Mappings)
-        refreshQueued := true
+        if StrLower(operationWorkspaceId) = StrLower(ActiveWorkspaceId) {
+            QueueSingleRefreshAfterFileOperation(viewState, state.Mappings)
+            refreshQueued := true
+        }
+        ; If the user switched workspaces while the Shell operation re-entered
+        ; the message loop, do not publish selection/scan-restore state into
+        ; the newly active workspace. The inactive source will reconcile from
+        ; normal file-system observation when it is revisited.
         actionText := operation = "copy" ? "复制" : "移动"
         if totalFailures {
             message := "已" actionText " " state.Success " 个项目到「"

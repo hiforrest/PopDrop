@@ -1,4 +1,4 @@
-﻿; Main panel construction, layout, display modes and window behavior.
+; Main panel construction, layout, display modes and window behavior.
 
 BuildPanel() {
     global Panel, FileView, RecentLabel, RecentView
@@ -468,6 +468,9 @@ ActivateWorkspace(workspaceId) {
         SyncWorkspaceControls()
         return true
     }
+    previousCritical := A_IsCritical
+    Critical("On")
+    try {
     PreviewSuppress("workspace", false)
     RememberActiveWorkspaceFileView()
     ClearTextBlockSearch(false)
@@ -495,6 +498,13 @@ ActivateWorkspace(workspaceId) {
             RestoreTextBlockSearchFocus()
         else
             FileView.Focus()
+    }
+    } finally {
+        Critical(previousCritical)
+        ; Hot-view hits swap the native ListView HWND without PopulatePanel(),
+        ; so preview identity must advance on every workspace transition.
+        PreviewInvalidateList("workspace")
+        PreviewRecoverAfterInteraction()
     }
     ; Persist only after the new workspace has completed its synchronous paint.
     ; The shared timer makes rapid A -> B -> C switching write only C.
@@ -544,8 +554,93 @@ FinishWorkspaceActivation(workspaceId, generation) {
     return true
 }
 
+CaptureRenderedPinnedViewState(itemPaths, itemOpenContexts,
+    workspaceId) {
+    paths := []
+    ownerValid := true
+    row := 1
+    while itemPaths.Has(row) && itemOpenContexts.Has(row) {
+        context := itemOpenContexts[row]
+        if !IsObject(context) || !HasProp(context, "Area")
+            || context.Area != "Pinned"
+            break
+        if !HasProp(context, "WorkspaceId")
+            || StrLower(context.WorkspaceId) != StrLower(workspaceId)
+            ownerValid := false
+        paths.Push(itemPaths[row])
+        row += 1
+    }
+    return {
+        Paths: paths,
+        Signature: JoinNormalizedPaths(paths),
+        OwnerValid: ownerValid
+    }
+}
+
+CachedPinnedViewMatchesActiveWorkspace(state) {
+    global ActiveWorkspaceType, ActiveWorkspaceId, PinnedPaths
+    global WORKSPACE_TYPE_TEXT
+    if !IsObject(state)
+        || !HasProp(state, "RenderedPinnedPaths")
+        || !HasProp(state, "RenderedPinnedSignature")
+        || !HasProp(state, "RenderedPinnedOwnerValid")
+        || !state.RenderedPinnedOwnerValid
+        return false
+
+    ; File workspaces show the persisted fixed list verbatim, so sequence and
+    ; count must match exactly. Text workspaces may hide fixed rows under the
+    ; active search query; their underlying full PinnedSignature is already
+    ; checked separately, so only ownership/subset validity is required here.
+    if ParseWorkspaceType(ActiveWorkspaceType) != WORKSPACE_TYPE_TEXT
+        return state.RenderedPinnedSignature
+            = JoinNormalizedPaths(PinnedPaths)
+
+    for path in state.RenderedPinnedPaths {
+        if !ArrayContainsPath(PinnedPaths, path)
+            return false
+    }
+    return true
+}
+
+NativeListRowGroupId(listHwnd, zeroBasedRow) {
+    itemSize := A_PtrSize = 8 ? 88 : 60
+    groupOffset := A_PtrSize = 8 ? 52 : 40
+    item := Buffer(itemSize, 0)
+    NumPut("uint", 0x100, item, 0) ; LVIF_GROUPID
+    NumPut("int", zeroBasedRow, item, 4)
+    ok := DllCall("user32\SendMessageW", "ptr", listHwnd,
+        "uint", 0x104B, "ptr", 0, "ptr", item.Ptr, "ptr") ; LVM_GETITEMW
+    return ok ? NumGet(item, groupOffset, "int") : -2147483648
+}
+
+CachedNativePinnedGroupMatchesState(state) {
+    if !IsObject(state) || !HasProp(state, "Control")
+        || !IsObject(state.Control) || !state.Control.Hwnd
+        || !HasProp(state, "RenderedPinnedPaths")
+        return false
+    hwnd := state.Control.Hwnd
+    if !DllCall("user32\IsWindow", "ptr", hwnd, "int")
+        return false
+    expected := state.RenderedPinnedPaths.Length
+    total := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1004, "ptr", 0, "ptr", 0, "ptr") ; LVM_GETITEMCOUNT
+    if total < expected
+        return false
+    Loop expected {
+        if NativeListRowGroupId(hwnd, A_Index - 1) != 1
+            return false
+    }
+    ; Pinned rows are always the first group. If the very next native row is
+    ; still group 1, the cached control contains more pinned rows than its
+    ; workspace model says it should.
+    if total > expected && NativeListRowGroupId(hwnd, expected) = 1
+        return false
+    return true
+}
+
 RememberActiveWorkspaceFileView() {
-    global ActiveWorkspaceId, FileView, WorkspaceFileViewStates
+    global ActiveWorkspaceId, ActiveWorkspaceType
+    global FileView, WorkspaceFileViewStates
     global ItemPaths, ItemLabels, ItemFolderPaths, ItemKinds, ItemOpenContexts
     global GroupFolderPaths, GroupDropTargets, SelectedFilePaths
     global ThumbnailImageList, ThumbnailImageListEdge, ThumbnailIconCache
@@ -559,7 +654,11 @@ RememberActiveWorkspaceFileView() {
         return false
     SetTimer(EnhanceNextThumbnail, 0)
     SetTimer(BuildNextTextBlockSearchIndex, 0)
+    renderedPinned := CaptureRenderedPinnedViewState(
+        ItemPaths, ItemOpenContexts, ActiveWorkspaceId)
     WorkspaceFileViewStates[StrLower(ActiveWorkspaceId)] := {
+        WorkspaceId: ActiveWorkspaceId,
+        WorkspaceType: ActiveWorkspaceType,
         Control: FileView,
         ItemPaths: ItemPaths,
         ItemLabels: ItemLabels,
@@ -585,7 +684,13 @@ RememberActiveWorkspaceFileView() {
         StatusKind: StatusKind,
         ScanResult: CurrentScanResult,
         ConfigFingerprint: CurrentConfigFingerprint,
-        PinnedPaths: PinnedPaths,
+        ; Pin arrays are intentionally mutated in-place. Cache validity must
+        ; compare their CONTENT, not their object address.
+        PinnedPaths: PinnedPaths.Clone(),
+        PinnedSignature: JoinNormalizedPaths(PinnedPaths),
+        RenderedPinnedPaths: renderedPinned.Paths,
+        RenderedPinnedSignature: renderedPinned.Signature,
+        RenderedPinnedOwnerValid: renderedPinned.OwnerValid,
         ViewMode: ViewMode,
         ThumbnailSize: ThumbnailSize,
         RenderRevision: PanelRenderedScanRevision
@@ -594,7 +699,8 @@ RememberActiveWorkspaceFileView() {
 }
 
 ActivateWorkspaceFileView() {
-    global ActiveWorkspaceId, FileView, WorkspaceFileViewStates
+    global ActiveWorkspaceId, ActiveWorkspaceType
+    global FileView, WorkspaceFileViewStates
     global ItemPaths, ItemLabels, ItemFolderPaths, ItemKinds, ItemOpenContexts
     global GroupFolderPaths, GroupDropTargets, SelectedFilePaths
     global ThumbnailImageList, ThumbnailImageListEdge, ThumbnailIconCache
@@ -684,9 +790,18 @@ ActivateWorkspaceFileView() {
     ; object identity this also detects in-place mutation by partial workers.
     hotViewReady := IsSet(state) && CurrentScanComplete
         && PanelRenderSignature != ""
+        && HasProp(state, "WorkspaceId")
+        && StrLower(state.WorkspaceId) = StrLower(ActiveWorkspaceId)
+        && HasProp(state, "WorkspaceType")
+        && ParseWorkspaceType(state.WorkspaceType)
+            = ParseWorkspaceType(ActiveWorkspaceType)
+        && StrLower(state.RenderedWorkspaceId) = StrLower(ActiveWorkspaceId)
         && state.ConfigFingerprint = CurrentConfigFingerprint
         && state.RenderRevision = CurrentScanRevision
-        && ObjPtr(state.PinnedPaths) = ObjPtr(PinnedPaths)
+        && HasProp(state, "PinnedSignature")
+        && state.PinnedSignature = JoinNormalizedPaths(PinnedPaths)
+        && CachedPinnedViewMatchesActiveWorkspace(state)
+        && CachedNativePinnedGroupMatchesState(state)
         && state.ViewMode = ViewMode
         && state.ThumbnailSize = ThumbnailSize
         && state.SearchQuery = TextBlockSearchQuery
@@ -729,6 +844,8 @@ CommitWorkspaceSwitchVisuals() {
     ; workspaces follow the configured thumbnail/list setting.
     ApplyViewMode()
     FileView.Visible := true
+    ResetPanelIconVisualState()
+    UpdateSaveDialogGroupTaskLinks()
 
     ; Repaint the complete sibling tree after every child has its final bounds.
     ; This covers the independent right rail as well as the top toolbar; the
@@ -737,7 +854,6 @@ CommitWorkspaceSwitchVisuals() {
         ; RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
     DllCall("user32\RedrawWindow", "ptr", panelHwnd, "ptr", 0,
         "ptr", 0, "uint", redrawFlags, "int")
-    PreviewRecoverAfterInteraction()
     return true
 }
 
@@ -1611,6 +1727,11 @@ ShowPanelInstant(*) {
 
     ; Keep the last complete native frame visible. Configuration loading and
     ; refresh checks are deliberately moved to FinishPanelShow().
+    ;
+    ; The sole exception is a stale Save-dialog task link. If this invocation
+    ; is ordinary, rebuild while hidden so the historical native frame is never
+    ; exposed by Panel.Show().
+    PrepareSaveDialogTaskLinksBeforePanelShow()
     PreviewBeginPanelSession()
     ApplyWindowMode()
     ; When the previous session ended in Text, the hidden FileView may still
@@ -1658,12 +1779,19 @@ FinishPanelShow(generation) {
             BuildTrayMenu()
         }
     }
+    ; F2's same-workspace fast path does not call BindRuntimeWorkspace().
+    ; Reassert the runtime pin alias before deciding the retained frame is
+    ; current. A mismatch clears PanelRenderSignature and is rebuilt below.
+    RepairActiveWorkspacePinnedRuntimeBinding()
     if EnforceWorkspaceSearchVisibility()
         RequestNativeLayout()
     if !ScanResultLoaded
         LoadDiskScanCache()
     if !IsPanelRenderCurrent()
         PopulatePanel()
+    ; A retained same-workspace frame can survive across F2 summons. Reapply
+    ; the invocation-specific task links even when no ListView rebuild occurred.
+    UpdateSaveDialogGroupTaskLinks()
     if !IsRecentRenderCurrent()
         PopulateRecentSidebar()
     SetTimer(UpdateSelectionStatus, 0)
@@ -1693,14 +1821,53 @@ ResetMainHotkeyGesture(clearRequestedAction := true) {
         MainHotkeyRequestedAction := ""
 }
 
+RepairActiveWorkspacePinnedRuntimeBinding() {
+    global Workspaces, ActiveWorkspaceId, PinnedPaths
+    global PanelRenderSignature
+
+    if ActiveWorkspaceId = ""
+        return false
+    found := FindWorkspace(ActiveWorkspaceId, Workspaces)
+    if !IsObject(found) || !IsObject(found.Value.PinnedPaths)
+        return false
+
+    authoritative := found.Value.PinnedPaths
+    contentChanged := !IsObject(PinnedPaths)
+        || !PathArraysEqual(PinnedPaths, authoritative)
+
+    ; The active runtime should always alias the model owned by the active
+    ; workspace. Internal OLE/IFileOperation is re-entrant, so repair a
+    ; transient cross-workspace alias without changing either workspace model
+    ; or config. Even equal-content arrays are rebound to restore the invariant.
+    if !IsObject(PinnedPaths)
+        || ObjPtr(PinnedPaths) != ObjPtr(authoritative)
+        PinnedPaths := authoritative
+
+    ; Only a real content mismatch requires a ListView rebuild. Pointer-only
+    ; repair is invisible and keeps the normal F2 path allocation-free.
+    if contentChanged
+        PanelRenderSignature := ""
+    return contentChanged
+}
+
 ActivateMainFileWorkspace() {
     global LastFileWorkspaceId, Workspaces, ActiveWorkspaceId
+    global PanelVisible
     targetId := ResolveFileWorkspaceId(
         LastFileWorkspaceId, Workspaces, ActiveWorkspaceId)
     if targetId = ""
         return false
-    if StrLower(targetId) = StrLower(ActiveWorkspaceId)
+    if StrLower(targetId) = StrLower(ActiveWorkspaceId) {
+        ; Same-workspace F2 activation intentionally avoids a full workspace
+        ; switch, but it still must restore the active workspace's runtime pin
+        ; alias. A Tab switch already does this through BindRuntimeWorkspace().
+        repaired := RepairActiveWorkspacePinnedRuntimeBinding()
+        ; If the panel is hidden, correct the retained native frame before it
+        ; becomes visible again. This only runs on an actual mismatch.
+        if repaired && !PanelVisible
+            try PopulatePanel()
         return true
+    }
     return ActivateWorkspace(targetId)
 }
 
@@ -1890,6 +2057,7 @@ RefreshPanel(*) {
 
 HidePanel(*) {
     global Panel, PanelVisible, SourceRemovalDialog, AutoHidePauseDepth
+    global SaveDialogTaskLinksVisible, PanelRenderSignature
     if AutoHideGuiOwnerAlive(SourceRemovalDialog) {
         try WinActivate("ahk_id " SourceRemovalDialog.Hwnd)
         return
@@ -1905,6 +2073,16 @@ HidePanel(*) {
     CancelAutoHideCheck()
     StopAutoHideWatchdog()
     ResetActiveDropSession(true)
+    SetTimer(WatchSaveDialogGroupTaskLinks, 0)
+    if SaveDialogTaskLinksVisible {
+        ; Do not rebuild while hidden. Make the retained frame ineligible for
+        ; reuse so the next ordinary invocation recreates source groups cleanly.
+        PanelRenderSignature := ""
+    }
+    ; Internal Shell drag/drop can re-enter the AHK message loop. Before the
+    ; hidden-session scan/cache work begins, restore the one runtime alias that
+    ; must always belong to ActiveWorkspaceId.
+    RepairActiveWorkspacePinnedRuntimeBinding()
     Panel.Hide()
     PanelVisible := false
     AutoHidePauseDepth := 0

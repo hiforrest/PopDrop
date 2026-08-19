@@ -488,25 +488,42 @@ WriteNewTextBlock(text, directory) {
 }
 
 SaveCapturedTextBlock(text, target) {
-    global PinnedPaths
+    global ActiveWorkspaceId, WORKSPACE_TYPE_TEXT
     pin := target.Type = "TextPinned"
-    directory := pin ? TextBlockInboxDirectory() : target.Path
+    workspaceId := ActiveWorkspaceId
+    directory := pin ? TextBlockInboxDirectory(workspaceId) : target.Path
     path := WriteNewTextBlock(text, directory)
+
     if pin {
-        original := PinnedPaths.Clone()
+        ; Do not build the next pinned set from the live UI array. A hot-view
+        ; refresh can legitimately replace/rebind runtime maps between events,
+        ; and a temporarily incomplete PinnedPaths must never be allowed to
+        ; overwrite the already-persisted fixed list.
+        ;
+        ; Reuse the same path as Explorer drag-to-pin:
+        ; WriteDroppedPinnedPaths() reads the CURRENT WorkspacePinned section
+        ; from the private AtomicConfigEdit copy, prepends the new item, then
+        ; PinDroppedItemsToWorkspace() publishes that exact merged result back
+        ; to the workspace model and active runtime.
         try {
-            PinnedPaths.InsertAt(1, path)
-            SavePinnedFiles()
+            result := PinDroppedItemsToWorkspace(
+                [path], workspaceId, WORKSPACE_TYPE_TEXT)
+            if !result.Changed
+                throw Error("无法把新文本块加入固定项。")
         } catch {
-            PinnedPaths := original
+            ; The backing file belongs to the fixed-item operation. If the
+            ; atomic pin transaction fails, remove only this newly-created file;
+            ; existing fixed items/config are untouched by AtomicConfigEdit.
             try FileDelete(path)
             throw
         }
+    } else {
+        InjectCapturedTextBlock(path, target)
+        StartBackgroundScan()
     }
-    InjectCapturedTextBlock(path, target)
+
     SetUserStatus((pin ? "已保存独立文本块到固定项：" : "已保存文本块到「"
         . target.Name . "」：") TextBlockTitleFromPath(path))
-    StartBackgroundScan()
     return path
 }
 
@@ -1036,6 +1053,16 @@ ApplyTextBlockCardView() {
     NumPut("int", 3, info, 20)
     DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
         "uint", 0x10A2, "ptr", 0, "ptr", info.Ptr, "ptr")
+    currentView := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x108F, "ptr", 0, "ptr", 0, "ptr") ; LVM_GETVIEW
+    if currentView != 4 {
+        DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+            "uint", 0x108E, "ptr", 4, "ptr", 0, "ptr")
+        DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+            "uint", 0x10A2, "ptr", 0, "ptr", info.Ptr, "ptr")
+    }
+    DllCall("user32\InvalidateRect", "ptr", FileView.Hwnd,
+        "ptr", 0, "int", 0)
 }
 
 EnsureActiveTextBlockCardView(force := false, *) {
@@ -1377,11 +1404,14 @@ PutTextBlocksOnClipboard(paths, text, statusPrefix := "已复制") {
 
 CaptureTextBlockReturnTarget() {
     global TextBlockReturnWindow, TextBlockReturnFocus
+    global PanelInvocationWindow
     try {
         TextBlockReturnWindow := WinGetID("A")
+        PanelInvocationWindow := TextBlockReturnWindow
         TextBlockReturnFocus := GetGuiThreadFocus(TextBlockReturnWindow)
     } catch {
         TextBlockReturnWindow := 0
+        PanelInvocationWindow := 0
         TextBlockReturnFocus := 0
     }
 }

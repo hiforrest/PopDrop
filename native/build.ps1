@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $PSScriptRoot "PopDropTransfer\PopDropTransfer.cpp"
@@ -6,8 +6,8 @@ $previewSource = Join-Path $PSScriptRoot "PopDropPreview\PopDropPreview.cpp"
 $outRoot = Join-Path $PSScriptRoot "bin"
 
 $transferText = Get-Content -LiteralPath $source -Raw
-if ($transferText -notmatch 'kHelperVersion\[\]\s*=\s*L"1\.1\.2"') {
-    throw "PopDropTransfer source version is not 1.1.2."
+if ($transferText -notmatch 'kHelperVersion\[\]\s*=\s*L"2\.0"') {
+    throw "PopDropTransfer source version is not 2.0."
 }
 
 function Build-Architecture([string]$Architecture, [string]$HostArchitecture) {
