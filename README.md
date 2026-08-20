@@ -98,7 +98,7 @@ PopDrop 免费使用。如果它确实替你省下了一点时间，欢迎请我
 <table>
   <tr>
     <th>微信赞赏</th>
-    <th><a href="https://afdian.com/a/kat">爱发电</a></th>
+    <th><a href="https://afdian.com/a/diyshare">爱发电</a></th>
   </tr>
   <tr>
     <td align="center">
