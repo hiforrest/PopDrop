@@ -1624,7 +1624,7 @@ BuildAboutSettingsPage(c, tabs) {
     global APP_VERSION
     tabs.UseTab(7)
     g := c.Gui
-    g.AddGroupBox("x200 y29 w818 h520", "关于 PopDrop")
+    g.AddGroupBox("x200 y29 w818 h500", "关于 PopDrop")
 
     title := g.AddText("x232 y68 w520 h42", "PopDrop")
     title.SetFont("s22 Bold", "Microsoft YaHei UI")
@@ -1649,8 +1649,8 @@ BuildAboutSettingsPage(c, tabs) {
 
     g.AddText("x235 y389 w180 h24", "打赏")
     g.AddText("x235 y421 w650 h44",
-        "如果你喜欢 PopDrop，或者它帮你提高了效率，欢迎把这份好心情也传递给我！")
-    donate := AddUiButton(g, "x235 y477 w130", "打赏链接")
+        "如果你喜欢 PopDrop，或者觉得它用起来还挺顺手，欢迎把这份好心情也传递给我！")
+    donate := AddUiButton(g, "x235 y457 w130", "请我喝杯饮料 🥤")
     donate.OnEvent("Click", OpenAboutUrl.Bind(
         "https://fs.to/support-popdrop"))
 }
