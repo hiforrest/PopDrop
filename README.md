@@ -105,7 +105,7 @@ PopDrop 免费使用。如果它确实替你省下了一点时间，欢迎请我
       <img src="https://i.see.you/2026/08/14/h4Ge/Supportme-QR-Code.avif" width="320" alt="微信赞赏二维码">
     </td>
     <td align="center">
-      <a href="https://afdian.com/a/kat">
+      <a href="https://afdian.com/a/diyshare">
         <img src="https://i.see.you/2026/08/20/6clP/afdian-kat.jpg" width="320" alt="爱发电二维码">
       </a>
     </td>
