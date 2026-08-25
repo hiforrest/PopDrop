@@ -8,7 +8,7 @@
 ;@Ahk2Exe-AddResource assets\pin.ico, 557
 ;@Ahk2Exe-AddResource assets\empty-folder.ico, 558
 ;@Ahk2Exe-AddResource assets\unknown-file.ico, 559
-;@Ahk2Exe-SetVersion 2.0.0.0
+;@Ahk2Exe-SetVersion 2.0.1.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -20,8 +20,8 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global SORT_SMART := "Smart"
-global APP_VERSION := "2.0"
-global CONFIG_VERSION := "29"
+global APP_VERSION := "2.0.1"
+global CONFIG_VERSION := "30"
 global CONTENT_UPDATE_FAST := "Fast"
 global CONTENT_UPDATE_ACCURACY := "Accuracy"
 global UI_SCALE_100 := "100"
@@ -39,6 +39,8 @@ global LoadedConfigStamp := ""
 ; ──── 工作区类型 ────
 global WORKSPACE_TYPE_FILES := "Files"
 global WORKSPACE_TYPE_TEXT := "Text"
+global MAIN_HOTKEY_LAST_WORKSPACE := "LastWorkspace"
+global MAIN_HOTKEY_DEFAULT_WORKSPACE := "DefaultWorkspace"
 
 ; ──── 文件管理器适配器 ────
 global FILE_MANAGER_WINDOWS_SHELL := "WindowsShell"
@@ -98,6 +100,12 @@ global DROP_ADAPTER_UNSUPPORTED := "Unsupported"
 
 if A_Args.Length && A_Args[1] = "--self-test" {
     RunSelfTests()
+    ExitApp
+}
+
+if A_Args.Length >= 3 && A_Args[1] = "--thumbnail-cache-worker" {
+    try WinHide("ahk_id " A_ScriptHwnd)
+    RunThumbnailCacheWorkerMode(A_Args[2], A_Args[3])
     ExitApp
 }
 
@@ -217,8 +225,10 @@ global UI_SINGLE_LINE_HEIGHT := 26
 global UI_DROPDOWN_FIELD_HEIGHT := 22
 global PANEL_TOOLBAR_HEIGHT := 42
 global PANEL_FOOTER_HEIGHT := 42
-; Navigation/rail metrics below are visible-pixel targets. The main panel is
-; DPI-aware, so convert them back to Gui units before Add/Move.
+; Tab metrics are visible-pixel targets because their native geometry is
+; measured in physical pixels.  The side rail uses logical DIPs instead: a
+; 32-DIP button is 32 px at 100% and 64 px at 200%, so it keeps the same
+; physical-world size across Windows display scaling settings.
 global PANEL_TAB_HEIGHT_PX := 54
 global PANEL_TAB_FONT_PX := 12
 ; Native Tab control default padding is approximately 6/3 on this layout.
@@ -227,17 +237,23 @@ global PANEL_TAB_PADDING_X_PX := 22
 ; Legacy layout contract: PANEL_TAB_PADDING_Y_PX := 14. Owner-drawn text
 ; offsets now provide the vertical alignment, so the runtime value stays zero.
 global PANEL_TAB_PADDING_Y_PX := 0 ;无效
-global PANEL_TAB_BOTTOM_MARGIN_PX := 8 ; tab菜单距离底部的距离
+; Visible selected-tab extension below the native item rectangle. The crop
+; routine reserves the same number of physical pixels, so this value now
+; changes the actual button height instead of being clipped by the Tab3 HWND.
+; The owner painter fills the extension; the native page pane stays hidden.
+global PANEL_TAB_BOTTOM_MARGIN_PX := 8
 global PANEL_TAB_TEXT_VERTICAL_EXTRA_PX := 3
 global PANEL_TAB_TEXT_Y_OFFSET_PX := 4
 global WorkspaceTabPaintSubclassCallback := 0
+; Optional physical-pixel gap after the complete Tab3 button. r40 transfers
+; r39's four empty pixels into the selected tab itself, so no extra gap remains.
 global PANEL_CONTENT_TOP_OFFSET_PX := 0
-global PANEL_SIDE_BUTTON_SIZE := 64
-global PANEL_SIDE_TOOLBAR_WIDTH := 64
-global PANEL_SIDE_TOOLBAR_GAP := 2
-global PANEL_SIDE_TOOLBAR_EDGE_GAP := 2
-global PANEL_SIDE_BUTTON_GAP := 2
-global PANEL_SIDE_SEPARATOR_GAP := 5
+global PANEL_SIDE_BUTTON_SIZE := 32
+global PANEL_SIDE_TOOLBAR_WIDTH := 32
+global PANEL_SIDE_TOOLBAR_GAP := 1
+global PANEL_SIDE_TOOLBAR_EDGE_GAP := 1
+global PANEL_SIDE_BUTTON_GAP := 1
+global PANEL_SIDE_SEPARATOR_GAP := 3
 global PANEL_SIDE_SEPARATOR_HEIGHT := 1
 global PanelIconButtons := Map()
 global PanelIconSubclassCallback := 0
@@ -272,6 +288,23 @@ global PendingPanelWorkspaceId := ""
 global PendingPanelWorkspaceOrigin := ""
 global PanelWorkspaceSwitchGeneration := 0
 global PanelWorkspaceSwitchRunning := false
+global WorkspaceSwitchRecoveryActive := false
+global LastWorkspaceTabMessageLagMs := -1
+global LastWorkspaceTabQueuedTick := 0
+global LastWorkspaceTabQueuedId := ""
+global WorkspacePerformanceLogQueue := []
+global WorkspacePerformanceLogScheduled := false
+; A hot workspace already owns a fully laid-out native ListView. Its first
+; paint must not fall through the full WM_SIZE / per-row label rewrite path.
+global WorkspaceSwitchFastVisualCommit := false
+; A complete cached frame may safely lead a newer complete snapshot by one
+; revision. Present that frame first, then coalesce its refresh after input.
+global WorkspaceViewNeedsDeferredRefresh := false
+global WORKSPACE_VIEW_REFRESH_DELAY_MS := 220
+global WORKSPACE_POST_PAINT_DELAY_MS := 16
+; Starting a scanner and rebuilding a newer complete frame are maintenance,
+; not input work. Give a rapid tab sequence a short idle window first.
+global WORKSPACE_SCAN_START_DELAY_MS := 180
 ; Delayed workspace maintenance is generation-gated so a callback queued for
 ; an older tab cannot touch the newly active workspace.
 global WorkspaceActivationMaintenanceGeneration := 0
@@ -284,6 +317,7 @@ global ActiveWorkspacePersistAttempts := 0
 global ACTIVE_WORKSPACE_PERSIST_DELAY_MS := 250
 global DoubleHotkeyWorkspaceId := ""
 global LastFileWorkspaceId := ""
+global MainHotkeyWorkspaceMode := MAIN_HOTKEY_LAST_WORKSPACE
 ; The main shortcut is parsed as a gesture independently from panel state.
 ; Keeping input collection separate from UI work prevents a fast second press
 ; from being dropped while the first press is loading a workspace.
@@ -348,6 +382,7 @@ global CacheFilePath := ""
 global CacheWritable := false
 global CacheWriteWarningShown := false
 global ScanCacheWritePending := false
+global DeferredWorkspaceSnapshotWrites := Map()
 global CacheMaintenanceDirectory := ""
 global CacheMaintenanceStateLoaded := false
 global CacheMaintenanceCompletedDate := ""
@@ -375,6 +410,7 @@ global WorkspaceScanSnapshots := Map()
 global PanelRenderSignature := ""
 global PanelRenderedWorkspaceId := ""
 global PanelRenderedScanRevision := 0
+global PanelRenderedScanComplete := false
 global RecentRenderSignature := ""
 global WorkerRunning := false
 global WorkerFullScan := false
@@ -390,11 +426,25 @@ global PendingRefresh := false
 global PendingFullRefresh := false
 global PendingScanSourceKeys := Map()
 global PendingIncludeRecent := false
+; Complete cached views stay interactive while the panel is visible. Automatic
+; refresh requests are coalesced here and started after HidePanel; explicit
+; refresh/file-operation recovery and incomplete cold loads still run now.
+global DeferredVisibleScanPending := false
+global DeferredVisibleScanFull := false
+global DeferredVisibleScanSourceKeys := Map()
+global DeferredVisibleScanIncludeRecent := false
 global WorkerAppliedSourceIndexes := Map()
 global WorkerSourceDirtyTokens := Map()
 global WorkerRecentDirtyToken := 0
 global WorkerRecentApplied := false
 global WorkerChanged := false
+global WorkerMainChanged := false
+global WorkerStartedWithComplete := false
+; A refresh builds a separate generation and publishes it only after the
+; worker completion marker passes structural validation. The visible complete
+; frame is never mutated source-by-source underneath a cached ListView.
+global WorkerPendingScanResult := 0
+global WorkerPendingHiddenBySource := Map()
 global InactiveScanJob := 0
 global InactiveScanQueue := Map()
 global InactiveRecentPending := false
@@ -422,6 +472,26 @@ global SourceWatcherRefreshPending := false
 global SourceWatcherReopenDue := false
 global ThumbnailEnhanceQueue := []
 global ThumbnailEnhanceGeneration := 0
+global ThumbnailCacheWorkerJob := 0
+global ThumbnailCacheWorkerGeneration := 0
+global ThumbnailCacheImportQueue := []
+; Dedicated PopDropPreview transport for ListView thumbnails. Expensive WIC
+; and Shell work stays in the helper; the UI thread only copies a bounded
+; bitmap into the already-owned ImageList.
+global ThumbnailNativePreviewJob := 0
+global ThumbnailNativePreviewGeneration := 0
+global ThumbnailNativePreviewRequestSerial := 0
+global ThumbnailNativePreviewMapHandle := 0
+global ThumbnailNativePreviewMapView := 0
+global ThumbnailNativePreviewRequestEvent := 0
+global ThumbnailNativePreviewResponseEvent := 0
+global ThumbnailNativePreviewShutdownEvent := 0
+global ThumbnailNativePreviewHelperPid := 0
+global ThumbnailNativePreviewJobHandle := 0
+global ThumbnailNativePreviewObjectBase := ""
+global ThumbnailNativePreviewFailureTicks := []
+global ThumbnailNativePreviewBackoffTick := 0
+global ThumbnailNativePreviewBackoffMs := 0
 global PanelIconHandle := 0
 global OpenApps := []
 global TransferFavorites := []
@@ -432,8 +502,8 @@ global GlobalNoiseFilter := {
     Enabled: true,
     HideHidden: true,
     HideSystem: true,
-    HideTemporary: false,
-    HideIncompleteDownloads: false,
+    HideTemporary: true,
+    HideIncompleteDownloads: true,
     CustomPatterns: [],
     CustomPatternTexts: [],
     PatternErrors: []

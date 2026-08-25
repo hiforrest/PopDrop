@@ -267,6 +267,13 @@ CommitPanelWorkspaceSwitch(generation) {
             RequestActivateWorkspace(workspaceId, "main")
         else
             try ActivateWorkspace(workspaceId)
+    } catch as err {
+        ; No timer or GUI event may surface an unhandled workspace exception.
+        ; ActivateWorkspace performs its own transactional rollback; this is
+        ; the last-resort boundary for settings-controller dispatch failures.
+        RecordWorkspaceSwitchFailure(workspaceId, err, false)
+        try SyncWorkspaceControls()
+        try SetUserStatus("工作区切换失败，请重试")
     }
     finally {
         previousCritical := A_IsCritical

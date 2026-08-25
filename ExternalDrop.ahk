@@ -636,10 +636,11 @@ CreateTransferId(prefix) {
 
 IsCompatibleTransferHelperVersion(helperVersion) {
     global APP_VERSION
-    ; v2.0 keeps the v1.1.2 transfer protocol. The source package contains
-    ; historical helper binaries so source-mode pre-release testing can still
-    ; run before the Windows release helper is rebuilt.
-    return helperVersion = APP_VERSION || helperVersion = "1.1.2"
+    ; v2.0.1 keeps the v2.0/v1.1.2 transfer protocol. Source-mode testing may
+    ; therefore use either prior compatible helper until the Windows release
+    ; binaries are rebuilt from this package.
+    return helperVersion = APP_VERSION || helperVersion = "2.0"
+        || helperVersion = "1.1.2"
 }
 
 WaitForTransferHandshake(batch, timeoutMs) {

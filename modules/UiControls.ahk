@@ -17,20 +17,40 @@ AddPanelIconButton(guiObj, options, imagePath, tooltipText, action,
         ? LoadPanelIconImage(ResolvePanelAssetPath(alternateImagePath)) : 0
     disabledImage := disabledImagePath != ""
         ? LoadPanelIconImage(ResolvePanelAssetPath(disabledImagePath)) : 0
+    bitmap := 0
+    alternateBitmap := 0
+    disabledBitmap := 0
+    try {
+        bitmap := CreatePanelIconBitmap(image)
+        alternateBitmap := alternateImage
+            ? CreatePanelIconBitmap(alternateImage) : 0
+        disabledBitmap := disabledImage
+            ? CreatePanelIconBitmap(disabledImage) : 0
+    } catch as err {
+        DisposePanelIconBitmap(bitmap)
+        DisposePanelIconBitmap(alternateBitmap)
+        DisposePanelIconBitmap(disabledBitmap)
+        DisposePanelIconImage(image)
+        DisposePanelIconImage(alternateImage)
+        DisposePanelIconImage(disabledImage)
+        throw err
+    }
     control := guiObj.AddText(options " +Tabstop +0x100", "") ; SS_NOTIFY
     state := {
         Control: control,
         Image: image,
         AlternateImage: alternateImage,
         DisabledImage: disabledImage,
+        Bitmap: bitmap,
+        AlternateBitmap: alternateBitmap,
+        DisabledBitmap: disabledBitmap,
         UseAlternate: false,
         Tooltip: tooltipText,
         Action: action,
         Hovered: false,
         Pressed: false,
         Selected: false,
-        Enabled: true,
-        PaintRetryCount: 0
+        Enabled: true
     }
     PanelIconButtons[control.Hwnd] := state
     if !PanelIconSubclassCallback
@@ -45,6 +65,9 @@ AddPanelIconButton(guiObj, options, imagePath, tooltipText, action,
         DisposePanelIconImage(image)
         DisposePanelIconImage(alternateImage)
         DisposePanelIconImage(disabledImage)
+        DisposePanelIconBitmap(bitmap)
+        DisposePanelIconBitmap(alternateBitmap)
+        DisposePanelIconBitmap(disabledBitmap)
         PanelIconButtons.Delete(control.Hwnd)
         throw OSError(A_LastError, "无法创建图标工具栏按钮")
     }
@@ -84,9 +107,28 @@ LoadPanelIconImage(path) {
     return image
 }
 
+CreatePanelIconBitmap(image) {
+    if !image
+        return 0
+    bitmap := 0
+    ; Convert the immutable PNG once. WM_PAINT then uses only GDI handles;
+    ; repeatedly entering GDI+ from a subclass callback caused transient blank
+    ; buttons and could amplify a failed paint into a message storm.
+    status := DllCall("gdiplus\GdipCreateHBITMAPFromBitmap",
+        "ptr", image, "ptr*", &bitmap, "uint", 0x00000000, "uint")
+    if status || !bitmap
+        throw Error("无法创建工具栏原生位图（GDI+ 状态 " status "）。")
+    return bitmap
+}
+
 DisposePanelIconImage(image) {
     if image
         DllCall("gdiplus\GdipDisposeImage", "ptr", image, "uint")
+}
+
+DisposePanelIconBitmap(bitmap) {
+    if bitmap
+        DllCall("gdi32\DeleteObject", "ptr", bitmap)
 }
 
 InvokePanelIconButton(hwnd, *) {
@@ -102,8 +144,11 @@ PanelIconButtonSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
     global PanelIconButtons, PanelIconHoverHwnd
     try {
         if msg = 0x000F { ; WM_PAINT
-            DrawPanelIconButton(hwnd)
-            return 0
+            ; Consume WM_PAINT only after BeginPaint/EndPaint succeeded. If
+            ; BeginPaint transiently fails, DefSubclassProc validates the
+            ; region instead of leaving an endless WM_PAINT pending.
+            if DrawPanelIconButton(hwnd)
+                return 0
         }
         if msg = 0x0014 ; WM_ERASEBKGND
             return 1
@@ -232,7 +277,7 @@ DrawPanelIconButton(hwnd) {
     hdc := DllCall("user32\BeginPaint", "ptr", hwnd,
         "ptr", paint.Ptr, "ptr")
     if !hdc
-        return
+        return false
     try {
         rect := Buffer(16, 0)
         DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect.Ptr)
@@ -257,39 +302,12 @@ DrawPanelIconButton(hwnd) {
                 "ptr", DllCall("user32\GetSysColorBrush",
                     "int", 15, "ptr")) ; COLOR_BTNFACE
         }
-        image := !state.Enabled && state.DisabledImage
-            ? state.DisabledImage
-            : state.UseAlternate && state.AlternateImage
-                ? state.AlternateImage : state.Image
-        if image {
-            graphics := 0
-            imageDrawn := false
-            createStatus := DllCall("gdiplus\GdipCreateFromHDC",
-                "ptr", hdc, "ptr*", &graphics, "uint")
-            if createStatus = 0 && graphics {
-                try {
-                    DllCall("gdiplus\GdipSetInterpolationMode",
-                        "ptr", graphics, "int", 7, "uint")
-                    drawStatus := DllCall("gdiplus\GdipDrawImageRectI",
-                        "ptr", graphics, "ptr", image,
-                        "int", 0, "int", 0,
-                        "int", width, "int", height, "uint")
-                    imageDrawn := drawStatus = 0
-                } finally {
-                    DllCall("gdiplus\GdipDeleteGraphics",
-                        "ptr", graphics, "uint")
-                }
-            }
-            if imageDrawn
-                state.PaintRetryCount := 0
-            else if state.PaintRetryCount < 2 {
-                ; BeginPaint validates the region even when GDI+ transiently
-                ; fails. Re-invalidate at most twice so an icon cannot remain
-                ; blank forever after one failed paint.
-                state.PaintRetryCount += 1
-                SetTimer(InvalidatePanelIconButton.Bind(hwnd), -16)
-            }
-        }
+        bitmap := !state.Enabled && state.DisabledBitmap
+            ? state.DisabledBitmap
+            : state.UseAlternate && state.AlternateBitmap
+                ? state.AlternateBitmap : state.Bitmap
+        if bitmap
+            DrawPanelIconNativeBitmap(hdc, bitmap, width, height)
         if state.Enabled && DllCall("user32\GetFocus", "ptr") = hwnd {
             focusRect := Buffer(16, 0)
             NumPut("int", 3, focusRect, 0)
@@ -302,6 +320,50 @@ DrawPanelIconButton(hwnd) {
     } finally {
         DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
     }
+    return true
+}
+
+DrawPanelIconNativeBitmap(hdc, bitmap, width, height) {
+    if !hdc || !bitmap || width <= 0 || height <= 0
+        return false
+    bitmapInfo := Buffer(A_PtrSize = 8 ? 32 : 24, 0)
+    if !DllCall("gdi32\GetObjectW", "ptr", bitmap,
+        "int", bitmapInfo.Size, "ptr", bitmapInfo.Ptr, "int")
+        return false
+    sourceWidth := NumGet(bitmapInfo, 4, "int")
+    sourceHeight := Abs(NumGet(bitmapInfo, 8, "int"))
+    if sourceWidth <= 0 || sourceHeight <= 0
+        return false
+    sourceDc := DllCall("gdi32\CreateCompatibleDC", "ptr", hdc, "ptr")
+    if !sourceDc
+        return false
+    oldBitmap := DllCall("gdi32\SelectObject", "ptr", sourceDc,
+        "ptr", bitmap, "ptr")
+    drawn := false
+    try {
+        ; AC_SRC_ALPHA with a pre-rendered 32-bit bitmap preserves the PNG's
+        ; transparent background while native GDI owns every paint operation.
+        blendFunction := 0x01FF0000
+        drawn := !!DllCall("msimg32\AlphaBlend",
+            "ptr", hdc, "int", 0, "int", 0,
+            "int", width, "int", height,
+            "ptr", sourceDc, "int", 0, "int", 0,
+            "int", sourceWidth, "int", sourceHeight,
+            "uint", blendFunction, "int")
+        if !drawn
+            drawn := !!DllCall("gdi32\StretchBlt",
+                "ptr", hdc, "int", 0, "int", 0,
+                "int", width, "int", height,
+                "ptr", sourceDc, "int", 0, "int", 0,
+                "int", sourceWidth, "int", sourceHeight,
+                "uint", 0x00CC0020, "int") ; SRCCOPY
+    } finally {
+        if oldBitmap
+            DllCall("gdi32\SelectObject", "ptr", sourceDc,
+                "ptr", oldBitmap, "ptr")
+        DllCall("gdi32\DeleteDC", "ptr", sourceDc)
+    }
+    return drawn
 }
 
 InvalidatePanelIconButton(hwnd) {
@@ -314,14 +376,17 @@ ResetPanelIconVisualState(repaintNow := false) {
     PanelIconHoverHwnd := 0
     PanelIconTooltipGeneration += 1
     ToolTip()
+    redrawFlags := 0x0001 ; RDW_INVALIDATE
+    if repaintNow
+        redrawFlags |= 0x0100 ; RDW_UPDATENOW
     for hwnd, state in PanelIconButtons {
         state.Hovered := false
         state.Pressed := false
-        state.PaintRetryCount := 0
-        InvalidatePanelIconButton(hwnd)
-        if repaintNow
-            && DllCall("user32\IsWindowVisible", "ptr", hwnd, "int")
-            DllCall("user32\UpdateWindow", "ptr", hwnd, "int")
+        ; RedrawWindow invalidates even a previously validated child window.
+        ; RDW_UPDATENOW then dispatches WM_PAINT before the caller returns, so
+        ; a button cannot remain blank until the mouse happens to enter it.
+        DllCall("user32\RedrawWindow", "ptr", hwnd,
+            "ptr", 0, "ptr", 0, "uint", redrawFlags, "int")
     }
     return true
 }
@@ -389,6 +454,9 @@ RemovePanelIconButton(hwnd, subclassId := 0x50444942) {
     DisposePanelIconImage(state.Image)
     DisposePanelIconImage(state.AlternateImage)
     DisposePanelIconImage(state.DisabledImage)
+    DisposePanelIconBitmap(state.Bitmap)
+    DisposePanelIconBitmap(state.AlternateBitmap)
+    DisposePanelIconBitmap(state.DisabledBitmap)
     PanelIconButtons.Delete(hwnd)
 }
 
@@ -434,8 +502,8 @@ PanelSolidRuleSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
     global PanelSolidRuleControls, PanelSolidRuleSubclassCallback
     try {
         if msg = 0x000F { ; WM_PAINT
-            DrawPanelSolidRule(hwnd)
-            return 0
+            if DrawPanelSolidRule(hwnd)
+                return 0
         }
         if msg = 0x0014 ; WM_ERASEBKGND
             return 1
@@ -457,7 +525,7 @@ DrawPanelSolidRule(hwnd) {
     hdc := DllCall("user32\BeginPaint", "ptr", hwnd,
         "ptr", paint.Ptr, "ptr")
     if !hdc
-        return
+        return false
     try {
         rect := Buffer(16, 0)
         DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect.Ptr)
@@ -471,6 +539,7 @@ DrawPanelSolidRule(hwnd) {
     } finally {
         DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
     }
+    return true
 }
 
 CleanupPanelSolidRules() {
@@ -514,8 +583,8 @@ PanelDashedSeparatorSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
     global PanelSeparatorControls, PanelSeparatorSubclassCallback
     try {
         if msg = 0x000F { ; WM_PAINT
-            DrawPanelDashedSeparator(hwnd)
-            return 0
+            if DrawPanelDashedSeparator(hwnd)
+                return 0
         }
         if msg = 0x0014 ; WM_ERASEBKGND
             return 1
@@ -536,7 +605,7 @@ DrawPanelDashedSeparator(hwnd) {
     hdc := DllCall("user32\BeginPaint", "ptr", hwnd,
         "ptr", paint.Ptr, "ptr")
     if !hdc
-        return
+        return false
     try {
         rect := Buffer(16, 0)
         DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rect.Ptr)
@@ -569,6 +638,7 @@ DrawPanelDashedSeparator(hwnd) {
     } finally {
         DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
     }
+    return true
 }
 
 CleanupPanelDashedSeparators() {

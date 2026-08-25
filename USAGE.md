@@ -76,7 +76,7 @@
 - `F4`：使用内置编辑器编辑；支持 `Ctrl+S`、未保存关闭确认和“另存为副本”，右键菜单也可交给系统默认编辑器。
 - 读取、复制、快速发送、前置发送以及内置编辑器保存/另存为都会保留现有文件首尾的空行，便于把
   自带换行边界的文本插入光标位置。
-- `Ctrl+1`～`Ctrl+9`、`Ctrl+Tab`：切换工作区；快速连续输入会合并到最后一个目标并按顺序提交。设置中还可给每个工作区指定独立快捷键；面板隐藏时，主快捷键单击进入最近文件区、快速双击进入“默认文本区”；面板显示时按主快捷键只关闭面板。
+- `Ctrl+1`～`Ctrl+9`、`Ctrl+Tab`：切换工作区；快速连续输入会合并到最后一个目标并按顺序提交。设置中还可给每个工作区指定独立快捷键；面板隐藏时，主快捷键单击默认打开上次关闭时的工作区（也可设为总是打开默认工作区）、快速双击进入“默认文本区”；面板显示时按主快捷键只关闭面板。
 
 #### 向 Windows 终端发送
 
@@ -155,9 +155,10 @@ Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之�
 
 ```ini
 [General]
-ConfigVersion=29
+ConfigVersion=30
 Hotkey=F2
 DoubleHotkeyWorkspaceId=workspace-text-default
+MainHotkeyWorkspaceMode=LastWorkspace
 LastFileWorkspaceId=workspace-default
 OpenFileMode=DoubleClick
 DefaultContextMenu=PopDrop
@@ -248,8 +249,9 @@ Path=%USERPROFILE%\Downloads
 | `[TextSourcePinned:<SourceId>]` | 文本来源内部置顶顺序，键为 `File001`、`File002` 等；与全局固定项互不替代。 |
 | `Type` | 工作区类型：`Files` 或 `Text`。旧工作区缺失时自动补为 `Files`。 |
 | 工作区 `Hotkey` | 可选的独立呼出快捷键；不得与主快捷键或其他工作区重复。 |
-| `DoubleHotkeyWorkspaceId` | 可选的默认文本区 ID，只能选择文本块工作区。两次主快捷键须在 240 ms 内完成；单击动作提交后手势立即结束，窗口出现后的下一次按键不会继续上一组双击。 |
-| `LastFileWorkspaceId` | 最近使用的文件工作区。主快捷键单击始终进入这里；从文本块工作区按主快捷键也会返回这里。目标失效时回退到首个文件工作区。 |
+| `DoubleHotkeyWorkspaceId` | 可选的默认文本区 ID，只能选择文本块工作区。两次主快捷键须在 400 ms 内完成；单击动作提交后手势立即结束，窗口出现后的下一次按键不会继续上一组双击。 |
+| `MainHotkeyWorkspaceMode` | 主快捷键单击唤出目标：`LastWorkspace`（默认）打开上次关闭时工作区；`DefaultWorkspace` 总是打开 `[Workspaces] Order` 的第一项。 |
+| `LastFileWorkspaceId` | 最近使用的文件工作区，保留用于兼容回退与文本块返回；目标失效时回退到首个文件工作区。 |
 | `DisplayScope` | `FilesOnly`=仅当前目录文件；`FilesAndFolders`=当前目录文件和直接子文件夹；`RecursiveFiles`=递归文件平铺。 |
 | `FolderTimeMode` | `DirectoryModified`=文件夹自身时间；`LatestContent`=允许扫描的后代文件最新时间。 |
 | `IncludeSubfolders` | v0.6 及更早版本兼容项；缺少 `DisplayScope` 时，`0` 迁移为 `FilesOnly`，`1` 迁移为 `RecursiveFiles`。 |
@@ -527,8 +529,10 @@ OpenFileMode=Inherit
 Hidden、System、Temporary 属性、未完成下载文件和自定义文件名通配规则。自定义规则
 每行一条，只支持 `*` 和 `?`，不区分大小写，也不会删除或修改真实文件。
 
-新安装和升级安装都采用“配置项缺失即使用默认值”的兼容策略：总开关、Hidden、System
-默认开启；Temporary 和未完成下载默认关闭。每个来源可选择使用共享默认值、启用或禁用，并可
+新安装和升级安装都采用“配置项缺失即使用默认值”的兼容策略：总开关、Hidden、System、
+Temporary 和未完成下载全部默认开启。未完成下载覆盖 `.crdownload`、`.part`、`.download`、
+`.opdownload`、`.partial`、`.aria2`，以及迅雷和常见 BT 客户端的 `.td`、`.td.cfg`、`.xltd`、
+`.bt`、`.bc!`、`.!ut`、`.!qB`；正常的 `.torrent` 元数据不会被隐藏。每个来源可选择使用共享默认值、启用或禁用，并可
 添加来源专属规则。固定项目始终优先显示。
 
 ```ini
@@ -538,9 +542,9 @@ Enabled=1
 ; HideHidden / HideSystem：排除相应 Windows 文件属性。
 HideHidden=1
 HideSystem=1
-; Temporary 属性和未完成下载默认不排除。
-HideTemporaryAttribute=0
-HideIncompleteDownloads=0
+; Temporary 属性和未完成下载默认排除。
+HideTemporaryAttribute=1
+HideIncompleteDownloads=1
 ; CustomPatternCount 是下方 CustomPatternNNN 规则的数量。
 CustomPatternCount=2
 CustomPattern001=*.myapp-lock

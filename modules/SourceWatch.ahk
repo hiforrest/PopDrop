@@ -101,14 +101,7 @@ ClearWorkspaceSourceDirty(workspaceId, sourceId, token := 0) {
         ; A foreground scan may satisfy work that was previously queued while
         ; this workspace was inactive.  Do not let that stale queue later
         ; overwrite the freshly committed snapshot.
-        if InactiveScanQueue.Has(workspaceKey) {
-            queued := InactiveScanQueue[workspaceKey]
-            if queued.Has(sourceKey)
-                && (token = 0 || queued[sourceKey] = token)
-                queued.Delete(sourceKey)
-            if !queued.Count
-                InactiveScanQueue.Delete(workspaceKey)
-        }
+        ClearInactiveScanQueueSourceToken(workspaceKey, sourceKey, token)
     }
 }
 

@@ -14,6 +14,8 @@ BuildPanel() {
     global UiScaleFactor, PanelUiScaleFactor
     global PANEL_TAB_HEIGHT_PX, PANEL_TAB_FONT_PX
     global PANEL_TAB_PADDING_X_PX, PANEL_TAB_PADDING_Y_PX
+    global PANEL_SIDE_BUTTON_SIZE, PANEL_SIDE_TOOLBAR_WIDTH
+    global PANEL_SIDE_SEPARATOR_HEIGHT
     global FolderDropAddSourceButton, FolderDropPinnedZone
     global ToolbarSeparators
 
@@ -46,60 +48,73 @@ BuildPanel() {
     ; The action rail is intentionally separate from the content ListView so
     ; its hover surface can never cover the native vertical scrollbar.
     RefreshButton := AddPanelIconButton(Panel,
-        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-refresh.png", "刷新当前工作区内容", RefreshPanel)
     ExpandAllFoldersButton := AddPanelIconButton(Panel,
-        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-expansion.png",
         "展开当前工作区的全部文件夹", ExpandAllFolderGroups)
     CollapseAllFoldersButton := AddPanelIconButton(Panel,
-        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-collapse.png",
         "收起当前工作区的全部文件夹（固定项除外）",
         CollapseAllFolderGroups)
     ClipboardPinnedButton := AddPanelIconButton(Panel,
-        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-paste.png",
         "将剪贴板文本添加到固定项（文本块工作区）",
         AddClipboardTextToPinned, "",
         "assets\toolbar\btn-paste-gray.png")
     PinnedDropButton := AddPanelIconButton(Panel,
-        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-add.png", "添加固定项", AddPinnedFiles)
     RemovePinnedButton := AddPanelIconButton(Panel,
-        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-remove.png", "移除所选固定项",
         RemovePinnedFile)
     DisplayButton := AddPanelIconButton(Panel,
-        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-eye.png", "显示方式与预览选项",
         ShowDisplayMenu)
     BuildDisplayMenu()
     SettingsButton := AddPanelIconButton(Panel,
-        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-setting.png", "打开设置", OpenConfig)
     WindowModeButton := AddPanelIconButton(Panel,
-        "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h" PanelPixelsToGui(64, Panel.Hwnd),
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-pin-off.png", "窗口置顶：关",
         ToggleWindowMode, "assets\toolbar\btn-pin-on.png")
     ToolbarSeparators := []
     Loop 6
         ToolbarSeparators.Push(AddPanelDashedSeparator(Panel,
-            "x0 y0 w" PanelPixelsToGui(64, Panel.Hwnd) " h1"))
+            "x0 y0 w" PanelScale(PANEL_SIDE_TOOLBAR_WIDTH)
+                " h" Max(1, PanelScale(PANEL_SIDE_SEPARATOR_HEIGHT))))
     ; Search is a composite field: the border belongs to the full band while
     ; the borderless Edit is physically narrower than the title-only area.
     ; Long input, the caret and selection therefore cannot run under the
     ; checkbox at any DPI or panel width.
     TextBlockSearchFrame := Panel.AddText(
-        ScalePanelGuiOptions("x12 y42 w716 h26 Hidden +Border -Tabstop"), "")
+        ScalePanelGuiOptions(
+            "x12 y42 w716 h26 Hidden +Border -Tabstop +0x04000000"), "")
     TextBlockSearchEdit := AddUiEdit(Panel,
-        ScalePanelGuiOptions("x16 y43 w620 h24 Hidden -Border"), "")
+        ScalePanelGuiOptions(
+            "x16 y43 w620 h24 Hidden -Border -E0x200 +0x04000000"), "")
     TextBlockSearchEdit.OnEvent("Change", TextBlockSearchChanged)
     DllCall("user32\SendMessageW", "ptr", TextBlockSearchEdit.Hwnd,
         "uint", 0x1501, "ptr", 1,
         "wstr", "空格分隔多个关键字（AND）", "ptr")
     TextBlockSearchTitleOnlyCheck := Panel.AddCheckBox(
-        ScalePanelGuiOptions("x644 y43 w76 h24 Hidden"), "仅标题")
+        ScalePanelGuiOptions(
+            "x644 y43 w76 h24 Hidden +0x04000000"), "仅标题")
     TextBlockSearchTitleOnlyCheck.OnEvent("Click",
         TextBlockSearchTitleOnlyChanged)
     ; Pre-create the smart drop surfaces. They cover only the top navigation
@@ -114,7 +129,7 @@ BuildPanel() {
     FolderDropPinnedZone.Visible := false
 
     FileView := CreatePanelFileView()
-    
+
     RecentLabel := Panel.AddText(ScalePanelGuiOptions(
         "x740 y42 w220 h22 +0x200"), "最近打开")
     RecentLabel.SetFont("s" Round(10 * PanelUiScaleFactor) " Bold")
@@ -357,6 +372,7 @@ UpdateWorkspaceTypeUi() {
     }
     if IsObject(TextBlockSearchTitleOnlyCheck)
         TextBlockSearchTitleOnlyCheck.Visible := textMode
+    ApplyWorkspaceSearchNativeState(textMode)
     if IsObject(ClipboardPinnedButton) {
         ClipboardPinnedButton.Visible := true
         SetPanelIconButtonEnabled(ClipboardPinnedButton, textMode)
@@ -385,6 +401,7 @@ EnforceWorkspaceSearchVisibility() {
     TextBlockSearchEdit.Visible := textMode
     if IsObject(TextBlockSearchTitleOnlyCheck)
         TextBlockSearchTitleOnlyCheck.Visible := textMode
+    ApplyWorkspaceSearchNativeState(textMode)
     if !textMode {
         if TextBlockSearchQuery != ""
             TextBlockSearchQuery := ""
@@ -393,6 +410,42 @@ EnforceWorkspaceSearchVisibility() {
             TextBlockSearchEdit.Value := ""
     }
     return changed
+}
+
+ApplyWorkspaceSearchNativeState(textMode, repaintNow := false) {
+    global TextBlockSearchFrame, TextBlockSearchEdit
+    global TextBlockSearchTitleOnlyCheck
+    controls := [TextBlockSearchFrame, TextBlockSearchEdit,
+        TextBlockSearchTitleOnlyCheck]
+    for control in controls {
+        if !IsObject(control) || !control.Hwnd
+            continue
+        hwnd := control.Hwnd
+        if !textMode {
+            DllCall("user32\ShowWindow", "ptr", hwnd, "int", 0)
+            continue
+        }
+        ; Retained ListView HWNDs are created later than the search controls.
+        ; A fast swap can therefore leave the Edit correctly marked Visible
+        ; but below a sibling native window. Restore both visibility and
+        ; sibling z-order; frame -> edit -> checkbox leaves interactive parts
+        ; above the shared border without moving or activating them.
+        DllCall("user32\SetWindowPos", "ptr", hwnd, "ptr", 0,
+            "int", 0, "int", 0, "int", 0, "int", 0,
+            "uint", 0x0053, "int")
+            ; SWP_NOSIZE | NOMOVE | NOACTIVATE | SHOWWINDOW
+        DllCall("user32\ShowWindow", "ptr", hwnd, "int", 5)
+        ; RDW_FRAME is important for Button-class checkboxes: without it,
+        ; Windows can validate the child after its overlapping frame sibling
+        ; moved while leaving only the hover-state repaint able to reveal the
+        ; label. The immediate path is used only for these three fixed-size
+        ; native controls, never for the potentially large ListView.
+        redrawFlags := 0x0001 | 0x0004 | 0x0400
+            | (repaintNow ? 0x0100 : 0)
+        DllCall("user32\RedrawWindow", "ptr", hwnd,
+            "ptr", 0, "ptr", 0, "uint", redrawFlags, "int")
+    }
+    return true
 }
 
 RedrawPanelToolbar() {
@@ -430,20 +483,24 @@ RedrawPanelToolbar() {
 
 MainWorkspaceChanged(control, *) {
     global WorkspaceTabIds, ActiveWorkspaceId
-    global InactiveScanJob
+    global LastWorkspaceTabMessageLagMs, LastWorkspaceTabQueuedTick
+    global LastWorkspaceTabQueuedId
     index := control.Value
     if index < 1 || index > WorkspaceTabIds.Length
         return
     targetId := WorkspaceTabIds[index]
     if StrLower(targetId) = StrLower(ActiveWorkspaceId)
         return
-    if IsObject(InactiveScanJob)
-        && StrLower(InactiveScanJob.WorkspaceId) = StrLower(targetId)
-        CancelInactiveWorkspaceScan(false)
+    messageTick := DllCall("user32\GetMessageTime", "uint")
+    LastWorkspaceTabMessageLagMs := messageTick
+        ? ElapsedTickMilliseconds(messageTick, A_TickCount & 0xFFFFFFFF) : -1
+    LastWorkspaceTabQueuedTick := A_TickCount
+    LastWorkspaceTabQueuedId := targetId
     ; Native tab clicks use the same latest-target dispatcher as keyboard
-    ; switching.  Do not run a complete activation synchronously from the
-    ; control notification: a second click must be able to replace this one.
-    if !QueuePanelWorkspaceSwitch(targetId, 4, "main")
+    ; switching. Do not synchronously stop an inactive scanner here: process
+    ; termination and IPC cleanup can take longer than the visual swap. The
+    ; generation-gated post-paint maintenance owns that work instead.
+    if !QueuePanelWorkspaceSwitch(targetId, 1, "main")
         SyncWorkspaceControls()
 }
 
@@ -456,11 +513,30 @@ RequestActivateWorkspace(workspaceId, origin := "main") {
 }
 
 ActivateWorkspace(workspaceId) {
-    global ActiveWorkspaceId, PanelVisible, StatusKind, FileView
+    global ActiveWorkspaceId, ActiveWorkspaceType
+    global PanelVisible, StatusKind, FileView
     global LastFileWorkspaceId
     global SourceWatcherRecentDirty
     global ContentUpdateMode, CONTENT_UPDATE_ACCURACY
     global CurrentScanComplete
+    global WorkspaceSwitchFastVisualCommit
+    global WorkspaceViewNeedsDeferredRefresh
+    global WORKSPACE_POST_PAINT_DELAY_MS
+    global LastWorkspaceTabMessageLagMs, LastWorkspaceTabQueuedTick
+    global LastWorkspaceTabQueuedId
+    switchStartedTick := A_TickCount
+    messageLagMs := -1
+    dispatchLagMs := -1
+    if StrLower(LastWorkspaceTabQueuedId) = StrLower(workspaceId) {
+        messageLagMs := LastWorkspaceTabMessageLagMs
+        dispatchLagMs := ElapsedTickMilliseconds(
+            LastWorkspaceTabQueuedTick, switchStartedTick)
+        LastWorkspaceTabQueuedId := ""
+    }
+    rememberMs := 0
+    bindMs := 0
+    viewMs := 0
+    hotViewReady := false
     found := FindWorkspace(workspaceId)
     if !IsObject(found)
         return false
@@ -468,43 +544,79 @@ ActivateWorkspace(workspaceId) {
         SyncWorkspaceControls()
         return true
     }
+    previousWorkspaceId := ActiveWorkspaceId
     previousCritical := A_IsCritical
+    switchError := 0
+    recoveredPreviousView := false
     Critical("On")
     try {
     PreviewSuppress("workspace", false)
+    previousWorkspaceType := ActiveWorkspaceType
+    phaseTick := A_TickCount
     RememberActiveWorkspaceFileView()
     ClearTextBlockSearch(false)
+    rememberMs := ElapsedTickMilliseconds(phaseTick, A_TickCount)
+    phaseTick := A_TickCount
     if !BindRuntimeWorkspace(found.Value)
-        return false
-    CancelStaleWorkspaceWorker()
-    if !ScanResultLoaded
-        LoadDiskScanCache()
+        throw Error("无法绑定目标工作区运行时状态。")
+    bindMs := ElapsedTickMilliseconds(phaseTick, A_TickCount)
     StatusKind := "default"
     ; A workspace switch changes several sibling controls and may also rebuild
     ; the native ListView. Always finish it as one visual transaction: even if
     ; rendering raises, the finally block restores the active view geometry,
     ; search visibility and right-rail paint instead of leaving a half-switched
     ; blank panel on screen.
+    phaseTick := A_TickCount
     try {
         hotViewReady := ActivateWorkspaceFileView()
-        if !hotViewReady
+        if !hotViewReady {
+            ; A retained native view must be offered before any SQLite/INI
+            ; access. Disk cache latency is unbounded on a busy or sleeping
+            ; volume and must never sit between the selected Tab and its frame.
+            if !ScanResultLoaded
+                LoadDiskScanCache()
             PopulatePanel()
+        }
     } finally {
         EnforceWorkspaceSearchVisibility()
+        workspaceTypeChanged := ParseWorkspaceType(previousWorkspaceType)
+            != ParseWorkspaceType(ActiveWorkspaceType)
+        WorkspaceSwitchFastVisualCommit := hotViewReady
+            && !workspaceTypeChanged
         CommitWorkspaceSwitchVisuals()
     }
+    viewMs := ElapsedTickMilliseconds(phaseTick, A_TickCount)
     if PanelVisible && IsObject(FileView) {
         if IsTextWorkspace()
             RestoreTextBlockSearchFocus()
         else
             FileView.Focus()
     }
+    } catch as err {
+        switchError := err
+        recoveredPreviousView := RecoverPreviousWorkspaceAfterSwitchFailure(
+            previousWorkspaceId)
     } finally {
         Critical(previousCritical)
         ; Hot-view hits swap the native ListView HWND without PopulatePanel(),
         ; so preview identity must advance on every workspace transition.
         PreviewInvalidateList("workspace")
         PreviewRecoverAfterInteraction()
+    }
+    if IsObject(switchError) {
+        totalMs := ElapsedTickMilliseconds(switchStartedTick, A_TickCount)
+        QueueWorkspacePerformanceTrace("switch",
+            "workspace=" workspaceId "`thot=0`terror=1"
+            . "`tmessageLagMs=" messageLagMs
+            . "`tdispatchMs=" dispatchLagMs
+            . "`trememberMs=" rememberMs "`tbindMs=" bindMs
+            . "`tviewMs=" viewMs "`ttotalMs=" totalMs)
+        RecordWorkspaceSwitchFailure(workspaceId, switchError,
+            recoveredPreviousView)
+        try SetUserStatus(recoveredPreviousView
+            ? "工作区切换未完成，已恢复上一个完整视图"
+            : "工作区切换失败，请重试")
+        return false
     }
     ; Persist only after the new workspace has completed its synchronous paint.
     ; The shared timer makes rapid A -> B -> C switching write only C.
@@ -514,17 +626,110 @@ ActivateWorkspace(workspaceId) {
     ; expose an already-rendered hot view.  Queue them after returning to the
     ; message loop so a burst of clicks can commit the next target first.
     QueueWorkspaceActivationMaintenance(ActiveWorkspaceId,
-        PanelVisible ? 1 : MainHotkeyDoubleTolerance() + 40)
+        PanelVisible ? WORKSPACE_POST_PAINT_DELAY_MS
+            : MainHotkeyDoubleTolerance() + 40,
+        WorkspaceViewNeedsDeferredRefresh)
+    totalMs := ElapsedTickMilliseconds(switchStartedTick, A_TickCount)
+    if !hotViewReady || totalMs >= 32 || messageLagMs >= 32
+        QueueWorkspacePerformanceTrace("switch",
+            "workspace=" workspaceId "`thot=" (hotViewReady ? 1 : 0)
+            . "`terror=0`tmessageLagMs=" messageLagMs
+            . "`tdispatchMs=" dispatchLagMs
+            . "`trememberMs=" rememberMs "`tbindMs=" bindMs
+            . "`tviewMs=" viewMs "`ttotalMs=" totalMs)
     return true
 }
 
-QueueWorkspaceActivationMaintenance(workspaceId, delayMs := 1) {
+RecoverPreviousWorkspaceAfterSwitchFailure(previousWorkspaceId) {
+    global ActiveWorkspaceId, WorkspaceSwitchRecoveryActive
+    global WorkspaceSwitchFastVisualCommit
+    if WorkspaceSwitchRecoveryActive || previousWorkspaceId = ""
+        return false
+    found := FindWorkspace(previousWorkspaceId)
+    if !IsObject(found)
+        return false
+    WorkspaceSwitchRecoveryActive := true
+    try {
+        if StrLower(ActiveWorkspaceId) != StrLower(previousWorkspaceId)
+            && !BindRuntimeWorkspace(found.Value)
+            return false
+        ; This is the exact frame that was visible immediately before the
+        ; failed switch. It is safe to restore even if it represented an
+        ; in-progress scan; all row maps and its HWND were saved together.
+        if !ActivateWorkspaceFileView()
+            return false
+        EnforceWorkspaceSearchVisibility()
+        WorkspaceSwitchFastVisualCommit := true
+        return CommitWorkspaceSwitchVisuals()
+    } catch {
+        return false
+    } finally {
+        WorkspaceSwitchRecoveryActive := false
+    }
+}
+
+RecordWorkspaceSwitchFailure(workspaceId, err, recovered) {
+    global DataRootDir
+    try {
+        line := FormatTime(A_Now, "yyyy-MM-dd HH:mm:ss")
+            . "`tworkspace=" workspaceId
+            . "`trecovered=" (recovered ? 1 : 0)
+            . "`t" err.Message
+            . "`t" err.What ":" err.Line "`r`n"
+        FileAppend(line, DataRootDir "\workspace-switch-errors.log", "UTF-8")
+    }
+}
+
+QueueWorkspacePerformanceTrace(kind, detail) {
+    global WorkspacePerformanceLogQueue, WorkspacePerformanceLogScheduled
+    line := FormatTime(A_Now, "yyyy-MM-dd HH:mm:ss")
+        . "`t" kind "`t" detail "`r`n"
+    WorkspacePerformanceLogQueue.Push(line)
+    while WorkspacePerformanceLogQueue.Length > 64
+        WorkspacePerformanceLogQueue.RemoveAt(1)
+    if !WorkspacePerformanceLogScheduled {
+        WorkspacePerformanceLogScheduled := true
+        SetTimer(FlushWorkspacePerformanceTrace, -400)
+    }
+}
+
+FlushWorkspacePerformanceTrace(force := false) {
+    global WorkspacePerformanceLogQueue, WorkspacePerformanceLogScheduled
+    global DataRootDir, PanelVisible
+    WorkspacePerformanceLogScheduled := false
+    if !WorkspacePerformanceLogQueue.Length
+        return
+    if PanelVisible && !force {
+        WorkspacePerformanceLogScheduled := true
+        SetTimer(FlushWorkspacePerformanceTrace, -750)
+        return
+    }
+    payload := ""
+    for line in WorkspacePerformanceLogQueue
+        payload .= line
+    WorkspacePerformanceLogQueue := []
+    try {
+        logPath := DataRootDir "\workspace-performance.log"
+        if FileExist(logPath) && FileGetSize(logPath) > 524288 {
+            try FileDelete(logPath ".previous")
+            FileMove(logPath, logPath ".previous", 1)
+        }
+        FileAppend(payload, logPath, "UTF-8")
+    }
+}
+
+QueueWorkspaceActivationMaintenance(workspaceId, delayMs := 1,
+    refreshPresentedView := false) {
     global WorkspaceActivationMaintenanceGeneration
     global WorkspaceActivationMaintenanceWorkspaceId
+    global WORKSPACE_VIEW_REFRESH_DELAY_MS
     generation := ++WorkspaceActivationMaintenanceGeneration
     WorkspaceActivationMaintenanceWorkspaceId := workspaceId
     SetTimer(FinishWorkspaceActivation.Bind(workspaceId, generation),
         -Max(1, delayMs))
+    if refreshPresentedView
+        SetTimer(RefreshPresentedWorkspaceView.Bind(workspaceId, generation),
+            -Max(WORKSPACE_VIEW_REFRESH_DELAY_MS, delayMs))
     return true
 }
 
@@ -533,6 +738,7 @@ FinishWorkspaceActivation(workspaceId, generation) {
     global WorkspaceActivationMaintenanceWorkspaceId
     global ScanResultLoaded, CurrentScanComplete, ContentUpdateMode
     global CONTENT_UPDATE_ACCURACY, ShowRecentSidebar, SourceWatcherRecentDirty
+    global WORKSPACE_SCAN_START_DELAY_MS
     if generation != WorkspaceActivationMaintenanceGeneration
         return false
     if StrLower(workspaceId) != StrLower(WorkspaceActivationMaintenanceWorkspaceId)
@@ -540,18 +746,79 @@ FinishWorkspaceActivation(workspaceId, generation) {
     if StrLower(workspaceId) != StrLower(ActiveWorkspaceId)
         return false
 
-    PopulateRecentSidebar()
-    ReconcileSourceWatchers()
-    refreshKeys := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, true)
-    needsFullScan := !ScanResultLoaded || !CurrentScanComplete
-        || ContentUpdateMode = CONTENT_UPDATE_ACCURACY
-    includeRecent := ShowRecentSidebar && (!ScanResultLoaded
-        || SourceWatcherRecentDirty)
-    if needsFullScan
-        StartBackgroundScan(0, "workspace", includeRecent)
-    else if refreshKeys.Count || includeRecent
-        StartBackgroundScan(refreshKeys, "workspace", includeRecent)
-    return true
+    try {
+        ; A hot view normally restores its matching scan object directly. This
+        ; disk fallback is therefore cold-only and still runs after first paint.
+        if !ScanResultLoaded
+            LoadDiskScanCache()
+        ; Worker cancellation can close a process and recursively clean its IPC
+        ; directory. Keep it behind the already-painted target ListView.
+        CancelStaleWorkspaceWorker()
+        PopulateRecentSidebar()
+        ReconcileSourceWatchers()
+        refreshKeys := GetWorkspaceRefreshSourceKeys(ActiveWorkspaceId, true)
+        needsFullScan := !ScanResultLoaded || !CurrentScanComplete
+            || ContentUpdateMode = CONTENT_UPDATE_ACCURACY
+        includeRecent := ShowRecentSidebar && (!ScanResultLoaded
+            || SourceWatcherRecentDirty)
+        if needsFullScan || refreshKeys.Count || includeRecent
+            SetTimer(StartWorkspaceActivationScan.Bind(workspaceId,
+                generation, refreshKeys, needsFullScan, includeRecent),
+                -WORKSPACE_SCAN_START_DELAY_MS)
+        return true
+    } catch as err {
+        ; This callback runs from a timer. Keep the already-presented workspace
+        ; interactive and report failure without an AHK exception dialog.
+        RecordWorkspaceSwitchFailure(workspaceId, err, true)
+        try SetUserStatus("内容已显示，后台刷新失败；可点击刷新重试")
+        return false
+    }
+}
+
+StartWorkspaceActivationScan(workspaceId, generation, refreshKeys,
+    needsFullScan, includeRecent) {
+    global ActiveWorkspaceId, WorkspaceActivationMaintenanceGeneration
+    global WorkspaceActivationMaintenanceWorkspaceId
+    if generation != WorkspaceActivationMaintenanceGeneration
+        || StrLower(workspaceId)
+            != StrLower(WorkspaceActivationMaintenanceWorkspaceId)
+        || StrLower(workspaceId) != StrLower(ActiveWorkspaceId)
+        return false
+    try {
+        if needsFullScan
+            return StartBackgroundScan(0, "workspace", includeRecent)
+        if refreshKeys.Count || includeRecent
+            return StartBackgroundScan(refreshKeys, "workspace", includeRecent)
+        return true
+    } catch as err {
+        RecordWorkspaceSwitchFailure(workspaceId, err, true)
+        try SetUserStatus("内容已显示，后台刷新失败；可点击刷新重试")
+        return false
+    }
+}
+
+RefreshPresentedWorkspaceView(workspaceId, generation) {
+    global ActiveWorkspaceId, WorkspaceActivationMaintenanceGeneration
+    global WorkspaceActivationMaintenanceWorkspaceId
+    global CurrentScanComplete, CurrentScanRevision
+    global PanelRenderedScanRevision, PanelVisible
+    if generation != WorkspaceActivationMaintenanceGeneration
+        return false
+    if StrLower(workspaceId)
+        != StrLower(WorkspaceActivationMaintenanceWorkspaceId)
+        || StrLower(workspaceId) != StrLower(ActiveWorkspaceId)
+        || !PanelVisible
+        return false
+    if !CurrentScanComplete
+        || PanelRenderedScanRevision = CurrentScanRevision
+        return false
+    ; The cached frame remains fully interactive because its row maps and
+    ; HWND were restored together. Rebuild only after that frame has painted;
+    ; rapid A -> B -> C input invalidates this callback by generation.
+    try return PopulatePanel()
+    catch {
+        return false
+    }
 }
 
 CaptureRenderedPinnedViewState(itemPaths, itemOpenContexts,
@@ -626,6 +893,11 @@ CachedNativePinnedGroupMatchesState(state) {
         "uint", 0x1004, "ptr", 0, "ptr", 0, "ptr") ; LVM_GETITEMCOUNT
     if total < expected
         return false
+    ; With no rendered pinned rows, group id 1 belongs to the first source.
+    ; Treating that row as an unexpected pinned row rejected every otherwise
+    ; valid hot view for the overwhelmingly common zero-pinned workspace.
+    if expected = 0
+        return true
     Loop expected {
         if NativeListRowGroupId(hwnd, A_Index - 1) != 1
             return false
@@ -646,10 +918,12 @@ RememberActiveWorkspaceFileView() {
     global ThumbnailImageList, ThumbnailImageListEdge, ThumbnailIconCache
     global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
     global PanelRenderSignature, PanelRenderedWorkspaceId
+    global PanelRenderedScanComplete
     global TextBlockSearchIndex, TextBlockSearchQueue, TextBlockSearchQuery
     global TextBlockSelectFirstPending, ItemCountText, StatusText, StatusKind
     global CurrentScanResult, CurrentConfigFingerprint, PinnedPaths
     global ViewMode, ThumbnailSize, PanelRenderedScanRevision
+    global SaveDialogTaskLinksVisible
     if ActiveWorkspaceId = "" || !IsObject(FileView)
         return false
     SetTimer(EnhanceNextThumbnail, 0)
@@ -693,7 +967,10 @@ RememberActiveWorkspaceFileView() {
         RenderedPinnedOwnerValid: renderedPinned.OwnerValid,
         ViewMode: ViewMode,
         ThumbnailSize: ThumbnailSize,
-        RenderRevision: PanelRenderedScanRevision
+        RenderRevision: PanelRenderedScanRevision,
+        RenderedScanComplete: PanelRenderedScanComplete,
+        LayoutSignature: WorkspaceFileViewLayoutSignature(),
+        SaveTaskLinksVisible: SaveDialogTaskLinksVisible
     }
     return true
 }
@@ -706,13 +983,18 @@ ActivateWorkspaceFileView() {
     global ThumbnailImageList, ThumbnailImageListEdge, ThumbnailIconCache
     global ThumbnailEnhanceQueue, ThumbnailEnhanceGeneration
     global PanelRenderSignature, PanelRenderedWorkspaceId
+    global PanelRenderedScanComplete
     global TextBlockSearchIndex, TextBlockSearchQueue, TextBlockSearchQuery
     global TextBlockSelectFirstPending, TextBlockSearchEdit
     global ItemCountText, StatusText, StatusKind
     global CurrentScanResult, CurrentConfigFingerprint, PinnedPaths
-    global ViewMode, ThumbnailSize, CurrentScanComplete
+    global ViewMode, ThumbnailSize, CurrentScanComplete, ScanResultLoaded
     global CurrentScanRevision, PanelRenderedScanRevision
+    global WorkspaceViewNeedsDeferredRefresh
+    global SaveDialogTaskLinksVisible
+    global WorkspaceSwitchRecoveryActive
 
+    WorkspaceViewNeedsDeferredRefresh := false
     oldView := FileView
     key := StrLower(ActiveWorkspaceId)
     if WorkspaceFileViewStates.Has(key) {
@@ -738,6 +1020,8 @@ ActivateWorkspaceFileView() {
         PanelRenderSignature := state.RenderSignature
         PanelRenderedWorkspaceId := state.RenderedWorkspaceId
         PanelRenderedScanRevision := state.RenderRevision
+        PanelRenderedScanComplete := HasProp(state, "RenderedScanComplete")
+            ? state.RenderedScanComplete : false
         TextBlockSearchIndex := state.SearchIndex
         TextBlockSearchQueue := state.SearchQueue
         TextBlockSearchQuery := state.SearchQuery
@@ -765,30 +1049,38 @@ ActivateWorkspaceFileView() {
         PanelRenderSignature := ""
         PanelRenderedWorkspaceId := ""
         PanelRenderedScanRevision := 0
+        PanelRenderedScanComplete := false
         TextBlockSearchIndex := Map()
         TextBlockSearchQueue := []
         TextBlockSearchQuery := ""
         TextBlockSelectFirstPending := true
     }
 
-    ApplyFileViewGroupSpacing(FileView.Hwnd)
+    layoutMatches := IsSet(state)
+        && HasProp(state, "LayoutSignature")
+        && state.LayoutSignature = WorkspaceFileViewLayoutSignature()
+    if !layoutMatches
+        ApplyFileViewGroupSpacing(FileView.Hwnd)
     ; Every cached view follows the active view's current geometry. This keeps
     ; hidden views correct after the panel was resized while another tab was
     ; active, without running the full layout pipeline on the switch path.
     if IsObject(oldView) && oldView.Hwnd != FileView.Hwnd {
         oldView.GetPos(&x, &y, &width, &height)
-        FileView.Move(x, y, width, height)
+        FileView.GetPos(&targetX, &targetY, &targetWidth, &targetHeight)
+        if targetX != x || targetY != y
+            || targetWidth != width || targetHeight != height
+            FileView.Move(x, y, width, height)
         oldView.Visible := false
     }
-    FileView.Visible := true
     if IsObject(TextBlockSearchEdit)
         TextBlockSearchEdit.Value := TextBlockSearchQuery
 
-    ; Constant-time validity check. ComputePanelRenderSignature walks every
-    ; scanned row, which would make a supposedly hot switch scale with folder
-    ; size. Every content publication advances an explicit revision; unlike
-    ; object identity this also detects in-place mutation by partial workers.
-    hotViewReady := IsSet(state) && CurrentScanComplete
+    ; Presentation safety and freshness are intentionally separate. A complete
+    ; frame with the exact workspace/config/layout ownership is safe to show
+    ; even when an inactive scanner has published a newer revision. Its maps
+    ; and native HWND move together, so all clicks remain scoped correctly;
+    ; the newer rows are rebuilt by a generation-gated post-paint callback.
+    presentable := IsSet(state)
         && PanelRenderSignature != ""
         && HasProp(state, "WorkspaceId")
         && StrLower(state.WorkspaceId) = StrLower(ActiveWorkspaceId)
@@ -797,30 +1089,94 @@ ActivateWorkspaceFileView() {
             = ParseWorkspaceType(ActiveWorkspaceType)
         && StrLower(state.RenderedWorkspaceId) = StrLower(ActiveWorkspaceId)
         && state.ConfigFingerprint = CurrentConfigFingerprint
-        && state.RenderRevision = CurrentScanRevision
         && HasProp(state, "PinnedSignature")
         && state.PinnedSignature = JoinNormalizedPaths(PinnedPaths)
         && CachedPinnedViewMatchesActiveWorkspace(state)
         && CachedNativePinnedGroupMatchesState(state)
-        && state.ViewMode = ViewMode
-        && state.ThumbnailSize = ThumbnailSize
+        && HasProp(state, "RenderedScanComplete")
+        && (state.RenderedScanComplete || WorkspaceSwitchRecoveryActive)
+        && layoutMatches
+        && HasProp(state, "SaveTaskLinksVisible")
+        && state.SaveTaskLinksVisible = !!PanelInvocationSaveDialog()
         && state.SearchQuery = TextBlockSearchQuery
-    if hotViewReady {
+    if presentable && !ScanResultLoaded && IsObject(state.ScanResult) {
+        ; The rendered rows were built from this exact scan object. Restoring
+        ; it is an O(1) memory assignment and avoids a post-paint SQLite/INI
+        ; read that could block a second rapid Tab click.
+        CurrentScanResult := state.ScanResult
+        ScanResultLoaded := true
+        CurrentScanComplete := state.RenderedScanComplete
+        CurrentScanRevision := state.RenderRevision
+        RememberCurrentWorkspaceSnapshot()
+    }
+    hotViewCurrent := IsSet(state) && CurrentScanComplete
+        && presentable
+        && state.RenderRevision = CurrentScanRevision
+    WorkspaceViewNeedsDeferredRefresh := presentable && !hotViewCurrent
+    FileView.Visible := presentable
+    if presentable {
+        ; The cached native group tasks were validated against the current
+        ; invocation above. Adopt that state in O(1) instead of calling the
+        ; general updater, whose Save-dialog branch walks every source group.
+        SaveDialogTaskLinksVisible := state.SaveTaskLinksVisible
+        SetTimer(WatchSaveDialogGroupTaskLinks,
+            SaveDialogTaskLinksVisible ? 250 : 0)
         if ThumbnailEnhanceQueue.Length
             SetTimer(EnhanceNextThumbnail, -1)
         if TextBlockSearchQueue.Length
             SetTimer(BuildNextTextBlockSearchIndex, -1)
     }
-    return hotViewReady
+    return presentable
+}
+
+WorkspaceFileViewLayoutSignature() {
+    global FileView, ViewMode, ThumbnailSize
+    global ThumbnailHorizontalGap, ThumbnailVerticalGap, ThumbnailTextLines
+    global FileViewGroupTopSpacing, FileViewGroupBottomSpacing
+    global TextBlockCardWidth, TextBlockCardHeight
+    dpi := A_ScreenDPI
+    if IsObject(FileView) && FileView.Hwnd {
+        viewDpi := DllCall("user32\GetDpiForWindow", "ptr", FileView.Hwnd,
+            "uint")
+        if viewDpi
+            dpi := viewDpi
+    }
+    return dpi "|" ViewMode "|" ThumbnailSize
+        . "|" ThumbnailHorizontalGap "|" ThumbnailVerticalGap
+        . "|" ThumbnailTextLines
+        . "|" FileViewGroupTopSpacing "|" FileViewGroupBottomSpacing
+        . "|" TextBlockCardWidth "|" TextBlockCardHeight
 }
 
 CommitWorkspaceSwitchVisuals() {
-    global Panel, FileView
+    global Panel, FileView, WorkspaceSwitchFastVisualCommit
+    fastCommit := WorkspaceSwitchFastVisualCommit
+    ; Consume this one-shot decision immediately. An exception, a hidden-panel
+    ; activation or an unrelated later call must use the full fallback.
+    WorkspaceSwitchFastVisualCommit := false
     if !IsObject(Panel) || !Panel.Hwnd || !IsObject(FileView)
         return false
     panelHwnd := Panel.Hwnd
     if !DllCall("user32\IsWindowVisible", "ptr", panelHwnd, "int")
         return false
+
+    if fastCommit {
+        ; This branch stays independent of item count. In particular, avoid
+        ; the full view-mode setter: label normalization rewrites every row.
+        EnsureActiveWorkspaceViewMode()
+        FileView.Visible := true
+        DllCall("user32\RedrawWindow", "ptr", FileView.Hwnd, "ptr", 0,
+            "ptr", 0, "uint", 0x0001, "int") ; RDW_INVALIDATE
+        ; The retained ListView is only one child of the panel. Explicitly
+        ; invalidate the constant-size chrome set as well: otherwise a native
+        ; Edit/checkbox or one owner-drawn rail icon can retain a validated
+        ; blank region after the HWND swap. This queues paint but never forces
+        ; RDW_UPDATENOW, so Tab dispatch still returns immediately.
+        InvalidateWorkspaceChromeAfterSwitch()
+        ; Return to the message loop before painting. Forcing RDW_UPDATENOW
+        ; here makes the Tab notification wait on ListView paint/layout.
+        return true
+    }
 
     ; PostMessage(WM_SIZE) is intentionally used by ordinary deferred layout,
     ; but it is too late for the end of a workspace switch: focus and another
@@ -854,6 +1210,23 @@ CommitWorkspaceSwitchVisuals() {
         ; RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
     DllCall("user32\RedrawWindow", "ptr", panelHwnd, "ptr", 0,
         "ptr", 0, "uint", redrawFlags, "int")
+    InvalidateWorkspaceChromeAfterSwitch()
+    return true
+}
+
+InvalidateWorkspaceChromeAfterSwitch() {
+    global TextBlockSearchFrame, TextBlockSearchEdit
+    global TextBlockSearchTitleOnlyCheck, WorkspaceBottomRule
+    ; These controls are a constant-size set and paint only cached memory
+    ; bitmaps/native chrome. Finish them synchronously after the retained
+    ; ListView swap so no checkbox label or rail slot waits for mouse hover.
+    ApplyWorkspaceSearchNativeState(IsTextWorkspace(), true)
+    ResetPanelIconVisualState(true)
+    if IsObject(WorkspaceBottomRule) && WorkspaceBottomRule.Hwnd
+        DllCall("user32\RedrawWindow", "ptr", WorkspaceBottomRule.Hwnd,
+            "ptr", 0, "ptr", 0,
+            "uint", 0x0001 | 0x0004, "int")
+            ; RDW_INVALIDATE | RDW_ERASE (asynchronous)
     return true
 }
 
@@ -934,13 +1307,45 @@ DeferPendingCurrentScanCacheWrite() {
     if !ScanCacheWritePending || ActiveWorkspaceId = ""
         return false
     ; The existing cache timer uses active globals. Capture the old identity
-    ; before rebinding them, then let the exact snapshot write after first
-    ; paint instead of performing disk I/O on the switch path.
+    ; before rebinding, but never write a scan snapshot while the panel is
+    ; visible: even deferred SQLite/INI work can delay the next Tab message.
     SetTimer(FlushPendingScanCacheWrite, 0)
     ScanCacheWritePending := false
-    SetTimer(WriteWorkspaceSnapshot.Bind(
-        CurrentScanResult, ActiveWorkspaceId, CurrentConfigFingerprint), -1)
+    QueueDeferredWorkspaceSnapshotWrite(
+        CurrentScanResult, ActiveWorkspaceId, CurrentConfigFingerprint)
     return true
+}
+
+QueueDeferredWorkspaceSnapshotWrite(result, workspaceId, fingerprint) {
+    global DeferredWorkspaceSnapshotWrites
+    if workspaceId = "" || !IsObject(result)
+        return false
+    DeferredWorkspaceSnapshotWrites[StrLower(workspaceId)] := {
+        Result: CloneScanResultForWorker(result),
+        WorkspaceId: workspaceId,
+        Fingerprint: fingerprint
+    }
+    SetTimer(FlushDeferredWorkspaceSnapshotWrites, -750)
+    return true
+}
+
+FlushDeferredWorkspaceSnapshotWrites(force := false) {
+    global DeferredWorkspaceSnapshotWrites, PanelVisible
+    if !DeferredWorkspaceSnapshotWrites.Count
+        return true
+    if PanelVisible && !force {
+        SetTimer(FlushDeferredWorkspaceSnapshotWrites, -750)
+        return false
+    }
+    pending := DeferredWorkspaceSnapshotWrites
+    DeferredWorkspaceSnapshotWrites := Map()
+    success := true
+    for _, job in pending {
+        if !WriteWorkspaceSnapshot(
+            job.Result, job.WorkspaceId, job.Fingerprint)
+            success := false
+    }
+    return success
 }
 
 CancelStaleWorkspaceWorker() {
@@ -948,13 +1353,27 @@ CancelStaleWorkspaceWorker() {
     global WorkerPid, PendingRefresh, PendingFullRefresh
     global PendingScanSourceKeys, PendingIncludeRecent
     global InactiveScanJob
+    global PanelVisible
     if IsObject(InactiveScanJob)
         && StrLower(InactiveScanJob.WorkspaceId) = StrLower(ActiveWorkspaceId)
         CancelInactiveWorkspaceScan(false)
     if !WorkerRunning
         return
-    if StrLower(WorkerWorkspaceId) = StrLower(ActiveWorkspaceId)
+    if StrLower(WorkerWorkspaceId) = StrLower(ActiveWorkspaceId) {
+        ; A previous visible Tab switch may have paused this worker in an old
+        ; build. Reassert its liveness monitor whenever ownership is active.
+        SetTimer(PollWorkerResult, 75)
         return
+    }
+    if PanelVisible {
+        ; The worker is already isolated in another process. Stop polling it,
+        ; but do not terminate the process or recursively delete its IPC tree
+        ; while the Tab message loop is visible. The timer itself stays alive
+        ; and performs only an O(1) identity check, so returning to the worker's
+        ; workspace can consume its completion marker instead of getting stuck.
+        SetTimer(PollWorkerResult, 75)
+        return false
+    }
     if WorkerPid && ProcessExist(WorkerPid)
         try ProcessClose(WorkerPid)
     FinishWorker(false)
@@ -969,21 +1388,27 @@ ScheduleActiveWorkspacePersistence(workspaceId, lastFileWorkspaceId) {
     global PendingLastFileWorkspacePersistId
     global ActiveWorkspacePersistAttempts
     global ACTIVE_WORKSPACE_PERSIST_DELAY_MS
+    global PanelVisible
     PendingActiveWorkspacePersistId := workspaceId
     PendingLastFileWorkspacePersistId := lastFileWorkspaceId
     ActiveWorkspacePersistAttempts := 0
-    SetTimer(PersistPendingActiveWorkspaceState,
-        -ACTIVE_WORKSPACE_PERSIST_DELAY_MS)
+    SetTimer(PersistPendingActiveWorkspaceState, 0)
+    if !PanelVisible
+        SetTimer(PersistPendingActiveWorkspaceState,
+            -ACTIVE_WORKSPACE_PERSIST_DELAY_MS)
 }
 
-PersistPendingActiveWorkspaceState(*) {
+PersistPendingActiveWorkspaceState(force := false, *) {
     global PendingActiveWorkspacePersistId
     global PendingLastFileWorkspacePersistId
     global ActiveWorkspacePersistAttempts
+    global PanelVisible
     workspaceId := PendingActiveWorkspacePersistId
     lastFileWorkspaceId := PendingLastFileWorkspacePersistId
     if workspaceId = ""
         return true
+    if PanelVisible && !force
+        return false
     try AtomicConfigEdit(
         WriteActiveWorkspaceState.Bind(workspaceId, lastFileWorkspaceId))
     catch {
@@ -1009,7 +1434,7 @@ FlushPendingActiveWorkspacePersistence(throwOnFailure := false) {
     SetTimer(PersistPendingActiveWorkspaceState, 0)
     if PendingActiveWorkspacePersistId = ""
         return true
-    saved := PersistPendingActiveWorkspaceState()
+    saved := PersistPendingActiveWorkspaceState(true)
     if !saved && throwOnFailure
         throw Error("当前工作区状态尚未写入配置文件。")
     return saved
@@ -1579,10 +2004,10 @@ HandleMainHotkey(*) {
     MainHotkeyGestureArmed := true
     MainHotkeySecondPressPending := false
     MainHotkeyFirstPressTick := 0
-    ; Show the single-press workspace immediately. The armed pair state only
+    ; Show the configured single-press workspace immediately. The armed pair state only
     ; decides whether a second press should redirect to Text; it never delays
     ; the first visible frame.
-    PresentMainHotkeyWorkspace("Files")
+    PresentMainHotkeyWorkspace("Single")
     ; Start the pair window only after the first action has returned. If a
     ; cold activation briefly occupied the AHK thread, a physical second press
     ; queued during that work must still be accepted as the pair's second edge.
@@ -1627,13 +2052,11 @@ MainHotkeyCommitSingle(generation) {
     ; Commit closes the gesture before any potentially slow UI work begins.
     ; A press after the window appears can therefore never complete this pair.
     MainHotkeyFirstPressTick := 0
-    ; When the panel is already active in Files, the committed single action
-    ; is already satisfied. Avoid a redundant WinActivate that could race
-    ; with the user's next click into another application.
-    if PanelVisible && !IsTextWorkspace()
-        && WinActive("ahk_id " Panel.Hwnd)
+    ; The first edge already presented the configured single-press target.
+    ; Avoid a redundant activation that could race with the user's next click.
+    if PanelVisible && WinActive("ahk_id " Panel.Hwnd)
         return
-    RequestMainHotkeyAction("Files")
+    RequestMainHotkeyAction("Single")
 }
 
 CancelUncommittedMainHotkeyGesture() {
@@ -1649,7 +2072,7 @@ CancelUncommittedMainHotkeyGesture() {
 
 RequestMainHotkeyAction(action) {
     global MainHotkeyRequestedAction
-    ; Text has priority if the second press arrives while Files is loading.
+    ; Text has priority if the second press arrives while Single is loading.
     if action = "Text" || MainHotkeyRequestedAction = ""
         MainHotkeyRequestedAction := action
     SetTimer(ProcessMainHotkeyAction, -1)
@@ -1684,9 +2107,9 @@ PresentMainHotkeyWorkspace(action) {
         if IsObject(found)
             ActivateWorkspace(found.Value.Id)
         else
-            ActivateMainFileWorkspace()
+            ActivateConfiguredMainHotkeyWorkspace()
     } else
-        ActivateMainFileWorkspace()
+        ActivateConfiguredMainHotkeyWorkspace()
     if !PanelVisible
         ShowPanelInstant()
     else {
@@ -1741,6 +2164,10 @@ ShowPanelInstant(*) {
     AutoHideNativeShownTick := A_TickCount
     Panel.Show("w" PanelScale(WindowWidth) " h" PanelScale(WindowHeight))
     PanelVisible := true
+    ; ResizePanel runs while hidden so the first frame has final geometry.
+    ; Force one bounded synchronous paint after Show: Windows can otherwise
+    ; preserve a validated-but-empty child slot until hover invalidates it.
+    ResetPanelIconVisualState(true)
     AutoHidePauseDepth := 0
     AutoHidePanelShownTick := A_TickCount
     if WindowMode = WINDOW_MODE_TEMPORARY
@@ -1801,8 +2228,14 @@ FinishPanelShow(generation) {
     }
     RedrawFooterTextControls()
     UpdateWindowModeButton()
+    ; UpdateWindowModeButton can swap the pin bitmap after the first visible
+    ; paint. Commit that state immediately together with the other rail icons.
+    ResetPanelIconVisualState(true)
     CheckRefreshPolicyOnShow()
-    if !CurrentScanComplete && !WorkerRunning
+    ; StartBackgroundScan coalesces an already-active matching worker and
+    ; safely replaces a stale one. Do not let a stale WorkerRunning flag block
+    ; repair of an incomplete retained frame.
+    if !CurrentScanComplete
         StartBackgroundScan(0, "incomplete-show", ShowRecentSidebar)
     RestoreTextBlockSearchFocus()
     SetTimer(RequestNativeLayout, -30)
@@ -1852,9 +2285,26 @@ RepairActiveWorkspacePinnedRuntimeBinding() {
 
 ActivateMainFileWorkspace() {
     global LastFileWorkspaceId, Workspaces, ActiveWorkspaceId
-    global PanelVisible
     targetId := ResolveFileWorkspaceId(
         LastFileWorkspaceId, Workspaces, ActiveWorkspaceId)
+    return ActivateMainHotkeyWorkspaceTarget(targetId)
+}
+
+ActivateConfiguredMainHotkeyWorkspace() {
+    global MainHotkeyWorkspaceMode, MAIN_HOTKEY_DEFAULT_WORKSPACE
+    global Workspaces, ActiveWorkspaceId
+    if MainHotkeyWorkspaceMode = MAIN_HOTKEY_DEFAULT_WORKSPACE
+        targetId := ResolveDefaultWorkspaceId(Workspaces)
+    else {
+        found := FindWorkspace(ActiveWorkspaceId, Workspaces)
+        targetId := IsObject(found) ? found.Value.Id
+            : ResolveDefaultWorkspaceId(Workspaces)
+    }
+    return ActivateMainHotkeyWorkspaceTarget(targetId)
+}
+
+ActivateMainHotkeyWorkspaceTarget(targetId) {
+    global ActiveWorkspaceId, PanelVisible
     if targetId = ""
         return false
     if StrLower(targetId) = StrLower(ActiveWorkspaceId) {
@@ -2020,7 +2470,7 @@ ShowAndRefresh(*) {
     ; A worker may have been canceled after publishing only part of a cold
     ; scan. Reopening within the same process must actively repair it instead
     ; of waiting for the next daily/consistency calibration.
-    if !CurrentScanComplete && !WorkerRunning
+    if !CurrentScanComplete
         StartBackgroundScan(0, "incomplete-show", ShowRecentSidebar)
     RestoreTextBlockSearchFocus()
     ; First-show stabilization pass: some workspace-dependent controls settle
@@ -2088,6 +2538,15 @@ HidePanel(*) {
     AutoHidePauseDepth := 0
     ResetTextBlockSearchSession(false)
     RunPendingConsistencyCheckAfterHide()
+    SetTimer(CancelStaleWorkspaceWorker, -1)
+    SetTimer(StartDeferredVisibleBackgroundScan, -5)
+    SetTimer(FlushPendingScanCacheWrite, -10)
+    SetTimer(FlushDeferredWorkspaceSnapshotWrites, -20)
+    SetTimer(FlushWorkspacePerformanceTrace, -30)
+    SetTimer(ImportNextWarmedThumbnail, -40)
+    SetTimer(EnhanceNextThumbnail, -50)
+    SetTimer(PersistPendingActiveWorkspaceState, -60)
+    SetTimer(StartNextInactiveWorkspaceScan, -80)
     ScheduleCacheMaintenanceAfterHide()
 }
 
@@ -2130,14 +2589,11 @@ ResizePanel(guiObj, minMax, width, height) {
         + PanelPixelsToGui(PANEL_CONTENT_TOP_OFFSET_PX, guiObj.Hwnd)
     footerHeight := PanelScale(PANEL_FOOTER_HEIGHT)
     outerMargin := PanelScale(12)
-    ; ResizePanel width/height are Gui units. Convert the requested visible
-    ; pixels first so monitor DPI does not enlarge the rail again.
-    sideToolbarWidth := PanelPixelsToGui(
-        PANEL_SIDE_TOOLBAR_WIDTH, guiObj.Hwnd)
-    sideToolbarGap := PanelPixelsToGui(
-        PANEL_SIDE_TOOLBAR_GAP, guiObj.Hwnd)
-    sideToolbarEdgeGap := PanelPixelsToGui(
-        PANEL_SIDE_TOOLBAR_EDGE_GAP, guiObj.Hwnd)
+    ; The rail metrics are logical DIPs. Gui.Move applies the monitor DPI, so
+    ; the toolbar occupies the same real-world size at 100%, 150% and 200%.
+    sideToolbarWidth := PanelScale(PANEL_SIDE_TOOLBAR_WIDTH)
+    sideToolbarGap := PanelScale(PANEL_SIDE_TOOLBAR_GAP)
+    sideToolbarEdgeGap := PanelScale(PANEL_SIDE_TOOLBAR_EDGE_GAP)
     contentWidth := Max(PanelScale(200),
         width - outerMargin - sideToolbarWidth - sideToolbarGap
             - sideToolbarEdgeGap)
@@ -2147,8 +2603,12 @@ ResizePanel(guiObj, minMax, width, height) {
     searchVisible := IsTextWorkspace()
         && IsObject(TextBlockSearchEdit) && TextBlockSearchEdit.Visible
     searchHeight := searchVisible ? PanelScale(26) : 0
-    contentTopGap := PanelPixelsToGui(
-        searchVisible ? 2 : 1, guiObj.Hwnd)
+    ; Text mode lets the search frame own the same top row as the explicit
+    ; workspace divider. File mode keeps a one-device-pixel hand-off from the
+    ; divider to the ListView. Using DIPs here created separate white/grey
+    ; rows at 96 DPI while higher-DPI rounding happened to hide them.
+    contentTopGap := searchVisible ? 0
+        : PanelPixelsToGui(1, guiObj.Hwnd)
     fileContentTop := contentTop + searchHeight + contentTopGap
     fileContentHeight := Max(PanelScale(100),
         contentHeight - searchHeight - contentTopGap)
@@ -2201,6 +2661,10 @@ ResizePanel(guiObj, minMax, width, height) {
     StatusText.Move(outerMargin, footerTop, stateWidth, footerHeight)
     TransferStatusText.Move(transferX,
         footerTop, transferWidth, footerHeight)
+    ; Moving the active ListView can change sibling z-order even when the AHK
+    ; Visible property remains true. Reassert the complete search band only
+    ; after every content HWND has reached its final bounds.
+    ApplyWorkspaceSearchNativeState(searchVisible, true)
 }
 
 LayoutTextBlockSearchBand(x, y, width, height) {
@@ -2210,17 +2674,23 @@ LayoutTextBlockSearchBand(x, y, width, height) {
         return
     scopeWidth := TextBlockSearchScopeWidth(width)
     dividerX := x + width - scopeWidth
-    ; The borderless Edit fills the left compartment. The previous 4-DIP
-    ; horizontal and 1-DIP vertical inset left a visible empty strip around
-    ; the input; keep separation only at the dedicated divider.
-    editWidth := Max(PanelScale(72), dividerX - x)
+    ; The static frame is the only owner of the search border. Gui.AddEdit
+    ; normally adds WS_EX_CLIENTEDGE even with -Border, so construction also
+    ; removes E0x200. Keep the Edit and checkbox one *device pixel* inside the
+    ; frame: this preserves its single outline at every monitor DPI without
+    ; reintroducing the old multi-DIP empty strip.
+    borderInset := PanelPixelsToGui(1, TextBlockSearchFrame.Hwnd)
+    innerY := y + borderInset
+    innerHeight := Max(PanelScale(18), height - borderInset * 2)
+    editX := x + borderInset
+    editWidth := Max(PanelScale(72), dividerX - editX)
     TextBlockSearchFrame.Move(x, y, width, height)
-    TextBlockSearchEdit.Move(x, y, editWidth, height)
+    TextBlockSearchEdit.Move(editX, innerY, editWidth, innerHeight)
     if IsObject(TextBlockSearchTitleOnlyCheck)
         TextBlockSearchTitleOnlyCheck.Move(
-            dividerX + PanelScale(7), y + PanelScale(1),
+            dividerX + PanelScale(7), innerY,
             Max(PanelScale(68), scopeWidth - PanelScale(9)),
-            Max(PanelScale(20), height - PanelScale(2)))
+            innerHeight)
 }
 
 TextBlockSearchScopeWidth(width, scaleFactor := 0) {
@@ -2275,8 +2745,8 @@ WorkspaceTabItemSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
         ; Paint exactly once. The previous version let Windows paint first and
         ; then painted a second expanded selected tab on top, creating the
         ; visible double white layer.
-        DrawWorkspaceTabItems(hwnd)
-        return 0
+        if DrawWorkspaceTabItems(hwnd)
+            return 0
     }
     if msg = 0x0014 ; WM_ERASEBKGND
         return 1
@@ -2299,7 +2769,7 @@ DrawWorkspaceTabItems(hwnd) {
     hdc := DllCall("user32\BeginPaint", "ptr", hwnd,
         "ptr", paint.Ptr, "ptr")
     if !hdc
-        return
+        return false
 
     clientRect := Buffer(16, 0)
     DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", clientRect.Ptr)
@@ -2310,7 +2780,7 @@ DrawWorkspaceTabItems(hwnd) {
 
     if itemCount <= 0 {
         DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
-        return
+        return true
     }
     theme := DllCall("uxtheme\OpenThemeData",
         "ptr", hwnd, "wstr", "TAB", "ptr")
@@ -2348,6 +2818,7 @@ DrawWorkspaceTabItems(hwnd) {
             DllCall("uxtheme\CloseThemeData", "ptr", theme)
         DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
     }
+    return true
 }
 
 DrawWorkspaceTabItem(hwnd, hdc, theme, itemIndex, selected) {
@@ -2369,19 +2840,19 @@ DrawWorkspaceTabItem(hwnd, hdc, theme, itemIndex, selected) {
     right := NumGet(itemRect, 8, "int")
     bottom := NumGet(itemRect, 12, "int")
 
-    ; Expand the BUTTON itself downward. Padding increases available space;
-    ; it never takes space away from the text.
+    ; Expand the selected BUTTON itself downward. FitWorkspaceTabsToHeader()
+    ; reserves the same pixels in the child HWND, so this paint is no longer
+    ; clipped at the native TCM_GETITEMRECT boundary.
     selectedExpandX := selected ? 2 : 0
 	selectedExpandTop := selected ? 2 : 0
-	selectedExpandBottom := selected ? 1 : 0
+	selectedExpandBottom := selected
+	    ? Max(0, PANEL_TAB_BOTTOM_MARGIN_PX) : 0
 
 	paintRect := Buffer(16, 0)
 	NumPut("int", left - selectedExpandX, paintRect, 0)
 	NumPut("int", top - selectedExpandTop, paintRect, 4)
 	NumPut("int", right + selectedExpandX, paintRect, 8)
-	NumPut("int",
-	    bottom + PANEL_TAB_BOTTOM_MARGIN_PX + selectedExpandBottom,
-	    paintRect, 12)
+	NumPut("int", bottom + selectedExpandBottom, paintRect, 12)
 
     stateId := selected ? 3 : 1 ; TIS_SELECTED / TIS_NORMAL
     if theme {
@@ -2479,10 +2950,9 @@ LayoutWorkspaceNavigation(width) {
     ; Lift the tab strip by exactly one visible pixel.
     rowY := PanelScale(6) - PanelPixelsToGui(1, Panel.Hwnd)
     rowHeight := PanelPixelsToGui(PANEL_TAB_HEIGHT_PX, Panel.Hwnd)
-    railWidth := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_WIDTH, Panel.Hwnd)
-    railGap := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_GAP, Panel.Hwnd)
-    railEdgeGap := PanelPixelsToGui(
-        PANEL_SIDE_TOOLBAR_EDGE_GAP, Panel.Hwnd)
+    railWidth := PanelScale(PANEL_SIDE_TOOLBAR_WIDTH)
+    railGap := PanelScale(PANEL_SIDE_TOOLBAR_GAP)
+    railEdgeGap := PanelScale(PANEL_SIDE_TOOLBAR_EDGE_GAP)
     right := width - railWidth - railGap - railEdgeGap
     ; Text-block search is laid out inside the file region by ResizePanel.
     if IsObject(WorkspaceMoreButton) && WorkspaceMoreButton.Visible {
@@ -2503,9 +2973,11 @@ FitWorkspaceTabsToHeader() {
     if !IsObject(WorkspaceTabs) || !WorkspaceTabs.Hwnd
         return
 
-    ; TCM_ADJUSTRECT(FALSE) gives the first row of the page pane. Cropping at
-    ; exactly that boundary preserves the *entire native tab header*, including
-    ; its lower themed margin, without exposing the white Tab3 page background.
+    ; TCM_ADJUSTRECT(FALSE) locates the page client area, not the first pixel
+    ; of the themed page frame. Windows 10 draws that frame several pixels
+    ; above pageTop, so using pageTop as the crop height exposes a white stripe.
+    ; Keep it only as a no-item fallback; real tabs are cropped at the exclusive
+    ; bottom returned by TCM_GETITEMRECT.
     displayRect := Buffer(16, 0)
     if !DllCall("user32\GetClientRect", "ptr", WorkspaceTabs.Hwnd,
         "ptr", displayRect.Ptr, "int")
@@ -2514,9 +2986,8 @@ FitWorkspaceTabsToHeader() {
         "uint", 0x1328, "ptr", 0, "ptr", displayRect.Ptr, "ptr")
     pageTop := NumGet(displayRect, 4, "int")
 
-    ; Fallback: find the lowest real tab item. The old code only inspected item
-    ; 0 and then took Min(pageTop, itemBottom+1), which could cut away the
-    ; header's lower margin and make the labels look visually bottom-heavy.
+    ; Find the lowest real tab item because a themed control can vary its item
+    ; metrics by Windows version and DPI.
     itemCount := DllCall("user32\SendMessageW", "ptr", WorkspaceTabs.Hwnd,
         "uint", 0x1304, "ptr", 0, "ptr", 0, "ptr") ; TCM_GETITEMCOUNT
     maxItemBottom := 0
@@ -2529,14 +3000,11 @@ FitWorkspaceTabsToHeader() {
                 NumGet(itemRect, 12, "int"))
     }
 
-    ; The themed Tab3 can report pageTop above the visual bottom of the text
-    ; row. Keep the lowest real tab item plus an explicit lower breathing room.
-    ; This prevents glyph descenders / lower item border from being clipped.
-    bottomMargin := Max(0, PANEL_TAB_BOTTOM_MARGIN_PX)
-    itemTarget := maxItemBottom > 0
-        ? maxItemBottom + bottomMargin : 0
-    targetHeight := pageTop > 0
-        ? Max(pageTop, itemTarget) : itemTarget
+    ; RECT.bottom is exclusive. Reserve the same owner-painted extension used
+    ; by DrawWorkspaceTabItem(), then crop before the native page pane. r39's
+    ; content offset is zeroed so the file region keeps exactly the same Y.
+    targetHeight := maxItemBottom > 0
+        ? maxItemBottom + Max(0, PANEL_TAB_BOTTOM_MARGIN_PX) : pageTop
     if targetHeight <= 0
         return
 
@@ -2547,8 +3015,8 @@ FitWorkspaceTabsToHeader() {
     controlWidth := Max(1, NumGet(windowRect, 8, "int")
         - NumGet(windowRect, 0, "int"))
 
-    ; Do not crop at an individual item's bottom. Keep the native lower header
-    ; margin, but stop before the white page pane starts.
+    ; Crop before the themed page pane starts. This remains correct even when
+    ; custom painting temporarily falls back to DefSubclassProc.
     DllCall("user32\SetWindowPos", "ptr", WorkspaceTabs.Hwnd, "ptr", 0,
         "int", 0, "int", 0, "int", controlWidth,
         "int", targetHeight, "uint", 0x0016, "int")
@@ -2592,15 +3060,14 @@ LayoutSideToolbar(width, contentTop, contentHeight) {
     global PANEL_SIDE_SEPARATOR_HEIGHT
     if !IsObject(RefreshButton)
         return
-    ; Gui.Move is DPI-aware. Convert requested visible pixels to Gui units
-    ; first; otherwise Windows scales 64/2/5 a second time.
-    railWidth := PanelPixelsToGui(PANEL_SIDE_BUTTON_SIZE, Panel.Hwnd)
-    edgeGap := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_EDGE_GAP, Panel.Hwnd)
-    buttonGap := PanelPixelsToGui(PANEL_SIDE_BUTTON_GAP, Panel.Hwnd)
-    separatorGap := PanelPixelsToGui(PANEL_SIDE_SEPARATOR_GAP, Panel.Hwnd)
-    separatorHeight := Max(1, PanelPixelsToGui(
-        PANEL_SIDE_SEPARATOR_HEIGHT, Panel.Hwnd))
-    topGap := PanelPixelsToGui(2, Panel.Hwnd)
+    ; Logical DIP metrics are deliberately passed directly to Gui.Move. A
+    ; 32-DIP icon becomes 32 physical px at 100% and 64 px at 200%.
+    railWidth := PanelScale(PANEL_SIDE_BUTTON_SIZE)
+    edgeGap := PanelScale(PANEL_SIDE_TOOLBAR_EDGE_GAP)
+    buttonGap := PanelScale(PANEL_SIDE_BUTTON_GAP)
+    separatorGap := PanelScale(PANEL_SIDE_SEPARATOR_GAP)
+    separatorHeight := Max(1, PanelScale(PANEL_SIDE_SEPARATOR_HEIGHT))
+    topGap := PanelScale(1)
     buttons := [RefreshButton, ClipboardPinnedButton,
         ExpandAllFoldersButton, CollapseAllFoldersButton, PinnedDropButton,
         RemovePinnedButton, DisplayButton, SettingsButton,
@@ -2613,7 +3080,7 @@ LayoutSideToolbar(width, contentTop, contentHeight) {
     fixedHeight := topGap
         + separatorCount * (separatorGap * 2 + separatorHeight)
         + plainGapCount * buttonGap
-    minimumButtonSize := PanelPixelsToGui(24, Panel.Hwnd)
+    minimumButtonSize := PanelScale(24)
     availableButtonSize := Floor((contentHeight - fixedHeight)
         / buttons.Length)
     buttonSize := Min(railWidth,
@@ -2622,10 +3089,15 @@ LayoutSideToolbar(width, contentTop, contentHeight) {
     x := railX + Floor((railWidth - buttonSize) / 2)
     y := contentTop + topGap
     for index, control in buttons {
+        ; Rail actions are never workspace-specific. Reassert visibility before
+        ; positioning so a stale child-window state cannot leave one slot (most
+        ; visibly the settings gear) blank after rapid view swaps.
+        control.Visible := true
         control.Move(x, y, buttonSize, buttonSize)
         y += buttonSize
         if separatorAfter.Has(index) {
             separator := ToolbarSeparators[separatorAfter[index]]
+            separator.Visible := true
             y += separatorGap
             separator.Move(railX, y, railWidth, separatorHeight)
             DllCall("user32\InvalidateRect", "ptr", separator.Hwnd,
@@ -2647,9 +3119,9 @@ ResizeFolderDropControls(width) {
         return
     panelHwnd := DllCall("user32\GetParent",
         "ptr", FolderDropAddSourceButton.Hwnd, "ptr")
-    sideWidth := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_WIDTH, panelHwnd)
-    sideGap := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_GAP, panelHwnd)
-    edgeGap := PanelPixelsToGui(PANEL_SIDE_TOOLBAR_EDGE_GAP, panelHwnd)
+    sideWidth := PanelScale(PANEL_SIDE_TOOLBAR_WIDTH)
+    sideGap := PanelScale(PANEL_SIDE_TOOLBAR_GAP)
+    edgeGap := PanelScale(PANEL_SIDE_TOOLBAR_EDGE_GAP)
     contentWidth := width - PanelScale(12) - sideWidth - sideGap - edgeGap
     contentWidth := Max(PanelScale(160), contentWidth)
     if FolderDropUiMode = "FoldersSplit" && IsObject(FolderDropPinnedZone) {
@@ -2964,6 +3436,22 @@ UpdateWindowModeButton() {
         SetPanelIconButtonTooltip(WindowModeButton,
             enabled ? "窗口置顶：开（点击关闭）" : "窗口置顶：关（点击开启）")
     }
+}
+
+EnsureActiveWorkspaceViewMode() {
+    global FileView, ViewMode
+    if !IsObject(FileView) || !FileView.Hwnd
+        return false
+    expectedView := IsTextWorkspace() ? 4 : (ViewMode = "List" ? 1 : 0)
+    currentView := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x108F, "ptr", 0, "ptr", 0, "ptr") ; LVM_GETVIEW
+    if currentView = expectedView
+        return true
+    ; Rare self-healing fallback only. Cached layout signatures prevent a
+    ; settings change from entering the fast branch with stale row geometry.
+    ApplyViewMode()
+    return DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x108F, "ptr", 0, "ptr", 0, "ptr") = expectedView
 }
 
 ApplyViewMode() {

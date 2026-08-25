@@ -1,5 +1,6 @@
 *.log
 *.tmp
+*.tmp-*
 *.bak
 *.exe
 *.obj
@@ -12,4 +13,5 @@ cache/
 build_logs/
 release/
 config.ini
+data/
 dev_doc/

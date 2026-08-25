@@ -331,6 +331,7 @@ ConfigLayoutNeedsNormalization() {
 }
 
 EnsureWorkspaceTypeDefaults(doc, originalVersion := "") {
+    global MAIN_HOTKEY_LAST_WORKSPACE
     order := ParseStableIdOrder(doc.GetValue("Workspaces", "Order", ""))
     firstFileId := ""
     firstTextId := ""
@@ -355,6 +356,11 @@ EnsureWorkspaceTypeDefaults(doc, originalVersion := "") {
         || (oldVersion < 25 && doubleTarget = "" && firstTextId != "")
         doc.SetValue("General", "DoubleHotkeyWorkspaceId",
             firstTextId, 1)
+
+    if !ConfigDocumentContainsKey(doc, "General", "MainHotkeyWorkspaceMode")
+        doc.SetValue("General", "MainHotkeyWorkspaceMode",
+            ConfigDefaultValue("General", "MainHotkeyWorkspaceMode",
+                MAIN_HOTKEY_LAST_WORKSPACE), 1)
 
     lastFileId := Trim(doc.GetValue(
         "General", "LastFileWorkspaceId", ""))
@@ -569,10 +575,25 @@ EnsureNoiseFilterConfigComments(doc) {
         "; HideHidden：是否排除具有 Hidden 属性的文件。",
         "; HideSystem：是否排除具有 System 属性的文件。",
         "; HideTemporaryAttribute：是否排除具有 Temporary 属性的文件。",
-        "; HideIncompleteDownloads：是否排除 *.crdownload、*.part、*.download。",
+        "; HideIncompleteDownloads：是否排除浏览器、迅雷、aria2 与 BT 客户端的未完成下载。",
         "; CustomPatternCount：下方 CustomPatternNNN 自定义文件名规则的数量。",
         "; 以上选项只影响 PopDrop 显示，不会删除、移动或修改真实文件。"
     ], 1)
+    defaults := [
+        {Key: "Enabled", Value: ConfigDefaultValue("NoiseFilter", "Enabled", "1")},
+        {Key: "HideHidden", Value: ConfigDefaultValue("NoiseFilter", "HideHidden", "1")},
+        {Key: "HideSystem", Value: ConfigDefaultValue("NoiseFilter", "HideSystem", "1")},
+        {Key: "HideTemporaryAttribute", Value: ConfigDefaultValue(
+            "NoiseFilter", "HideTemporaryAttribute", "1")},
+        {Key: "HideIncompleteDownloads", Value: ConfigDefaultValue(
+            "NoiseFilter", "HideIncompleteDownloads", "1")},
+        {Key: "CustomPatternCount", Value: ConfigDefaultValue(
+            "NoiseFilter", "CustomPatternCount", "0")}
+    ]
+    for entry in defaults {
+        if !ConfigDocumentContainsKey(doc, "NoiseFilter", entry.Key)
+            doc.SetValue("NoiseFilter", entry.Key, entry.Value, 1)
+    }
 }
 
 EnsureConfigEncoding() {
@@ -602,7 +623,7 @@ EnsureConfigEncoding() {
 
 LoadSettings(*) {
     global ConfigPath, ConfiguredHotkey, DoubleHotkeyWorkspaceId
-    global LastFileWorkspaceId
+    global LastFileWorkspaceId, MainHotkeyWorkspaceMode
     global MaxFilesPerFolder
     global IncludeSubfolders, ThumbnailSize, ThumbnailHorizontalGap, ThumbnailVerticalGap
     global FileViewGroupTopSpacing, FileViewGroupBottomSpacing
@@ -640,7 +661,10 @@ LoadSettings(*) {
     ; workspace switch is still waiting for its coalesced persistence timer.
     if !FlushPendingActiveWorkspacePersistence(true)
         throw Error("无法在重新加载设置前保存当前工作区。")
-    FlushPendingScanCacheWrite()
+    FlushDeferredWorkspaceSnapshotWrites(true)
+    ; The current active snapshot is authoritative if an older deferred entry
+    ; for the same workspace exists.
+    FlushPendingScanCacheWrite(true)
     previousWorkspaceId := ActiveWorkspaceId
     previousFingerprint := CurrentConfigFingerprint
     previousResult := CurrentScanResult
@@ -658,6 +682,17 @@ LoadSettings(*) {
         ConfigPath, "General", "DoubleHotkeyWorkspaceId", ""))
     LastFileWorkspaceId := Trim(IniRead(
         ConfigPath, "General", "LastFileWorkspaceId", ""))
+    rawMainHotkeyWorkspaceMode := Trim(IniRead(ConfigPath, "General",
+        "MainHotkeyWorkspaceMode", "LastWorkspace"))
+    MainHotkeyWorkspaceMode := ParseMainHotkeyWorkspaceMode(
+        rawMainHotkeyWorkspaceMode)
+    if rawMainHotkeyWorkspaceMode != ""
+        && !IsRecognizedMainHotkeyWorkspaceMode(
+            rawMainHotkeyWorkspaceMode) {
+        settingErrors.Push("[General] 中 MainHotkeyWorkspaceMode 值无效："
+            . rawMainHotkeyWorkspaceMode
+            . "。已使用 LastWorkspace。允许的值：LastWorkspace, DefaultWorkspace。")
+    }
 
     ; 缺失、空值和未知值都必须保持旧版的双击行为。
     GlobalOpenFileMode := ParseGlobalOpenFileMode(
@@ -978,6 +1013,26 @@ ReadActiveWorkspaceId(workspaces) {
             return workspace.Id
     }
     return workspaces[1].Id
+}
+
+ParseMainHotkeyWorkspaceMode(value) {
+    global MAIN_HOTKEY_LAST_WORKSPACE, MAIN_HOTKEY_DEFAULT_WORKSPACE
+    return StrLower(Trim(value)) = StrLower(MAIN_HOTKEY_DEFAULT_WORKSPACE)
+        ? MAIN_HOTKEY_DEFAULT_WORKSPACE : MAIN_HOTKEY_LAST_WORKSPACE
+}
+
+IsRecognizedMainHotkeyWorkspaceMode(value) {
+    global MAIN_HOTKEY_LAST_WORKSPACE, MAIN_HOTKEY_DEFAULT_WORKSPACE
+    folded := StrLower(Trim(value))
+    return folded = StrLower(MAIN_HOTKEY_LAST_WORKSPACE)
+        || folded = StrLower(MAIN_HOTKEY_DEFAULT_WORKSPACE)
+}
+
+ResolveDefaultWorkspaceId(workspaceList := 0) {
+    global Workspaces
+    if !IsObject(workspaceList)
+        workspaceList := Workspaces
+    return workspaceList.Length ? workspaceList[1].Id : ""
 }
 
 FindWorkspace(workspaceId, workspaceList := 0) {
@@ -1645,8 +1700,8 @@ LoadNoiseFilterConfig() {
         Enabled: ReadConfigBoolean("NoiseFilter", "Enabled", true),
         HideHidden: ReadConfigBoolean("NoiseFilter", "HideHidden", true),
         HideSystem: ReadConfigBoolean("NoiseFilter", "HideSystem", true),
-        HideTemporary: ReadConfigBoolean("NoiseFilter", "HideTemporaryAttribute", false),
-        HideIncompleteDownloads: ReadConfigBoolean("NoiseFilter", "HideIncompleteDownloads", false),
+        HideTemporary: ReadConfigBoolean("NoiseFilter", "HideTemporaryAttribute", true),
+        HideIncompleteDownloads: ReadConfigBoolean("NoiseFilter", "HideIncompleteDownloads", true),
         CustomPatterns: compiled.Patterns,
         CustomPatternTexts: compiled.Texts,
         PatternErrors: compiled.Errors

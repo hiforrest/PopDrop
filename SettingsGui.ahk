@@ -282,7 +282,7 @@ SettingsNavigationSelected(c, tree, item) {
 
 LoadSettingsIntoDraft() {
     global GlobalOpenFileMode, ConfiguredHotkey, DoubleHotkeyWorkspaceId
-    global LastFileWorkspaceId
+    global LastFileWorkspaceId, MainHotkeyWorkspaceMode
     global WindowMode, EscapeHidesPanel
     global DefaultContextMenu
     global ShowRecentSidebar, RecentFileCount, MaxFilesPerFolder, SortMode
@@ -346,6 +346,7 @@ LoadSettingsIntoDraft() {
             Hotkey: ConfiguredHotkey,
             StartupEnabled: ReadStartupEnabled(),
             DoubleHotkeyWorkspaceId: DoubleHotkeyWorkspaceId,
+            MainHotkeyWorkspaceMode: MainHotkeyWorkspaceMode,
             LastFileWorkspaceId: LastFileWorkspaceId,
             WindowMode: WindowMode,
             EscapeHidesPanel: EscapeHidesPanel,
@@ -563,51 +564,57 @@ BuildGeneralSettingsPage(c, tabs) {
         . "文件夹仍然需要双击打开。"
         . "`n可在「当前工作区」页中为每个来源单独配置打开方式。")
 
-    g.AddGroupBox("x200 y165 w818 h82", "快捷键 · 应用于所有工作区")
+    g.AddGroupBox("x200 y165 w818 h104", "快捷键 · 应用于所有工作区")
     g.AddText("x220 y196 w150", "呼出/隐藏 PopDrop：")
     c.Hotkey := g.AddHotkey("x375 yp-4 w220 h26")
     g.AddText("x615 yp+4 w86", "默认文本区：")
     c.DoubleHotkeyWorkspace := AddUiDropDownList(
         g, "x700 yp-4 w280", ["关闭"])
-    g.AddText("x220 y224 w760 h18 c555555",
-        "面板隐藏时：单击进入最近文件区，快速双击进入默认文本区；面板显示时：主快捷键只关闭。")
+    g.AddText("x220 y231 w150", "单击唤出目标：")
+    c.MainHotkeyWorkspaceMode := AddUiDropDownList(g,
+        "x375 yp-4 w300 Choose1",
+        ["打开上次关闭时工作区", "总是打开默认工作区"])
+    g.AddText("x695 yp+4 w285 h18 c555555",
+        "快速双击进入默认文本区；显示时只关闭。")
 
-    g.AddGroupBox("x200 y257 w818 h104", "窗口 · 应用于所有工作区")
-    g.AddText("x220 y288 w150", "窗口显示方式：")
+    g.AddGroupBox("x200 y279 w818 h104", "窗口 · 应用于所有工作区")
+    g.AddText("x220 y310 w150", "窗口显示方式：")
     c.WindowMode := AddUiDropDownList(g, "x375 yp-4 w260 Choose1",
         ["始终置顶", "临时置顶（失去焦点后隐藏）", "普通窗口"])
-    c.EscapeHide := g.AddCheckBox("x220 y326",
+    c.EscapeHide := g.AddCheckBox("x220 y348",
         "按 Esc 隐藏 PopDrop")
 
-    g.AddGroupBox("x200 y371 w818 h126", "右键菜单 · 应用于所有工作区")
+    g.AddGroupBox("x200 y393 w818 h116", "右键菜单 · 应用于所有工作区")
     c.ContextMenuPopDrop := g.AddRadio(
-        "x220 y400 Group", "PopDrop 快捷菜单（推荐）")
+        "x220 y420 Group", "PopDrop 快捷菜单（推荐）")
     c.ContextMenuSystem := g.AddRadio(
         "x500 yp", "Windows 系统菜单")
     c.ContextMenuDescription := g.AddText(
-        "x220 y434 w770 h48 c555555", "")
+        "x220 y454 w770 h44 c555555", "")
 
-    g.AddGroupBox("x200 y507 w818 h126", "下载 · 应用于所有工作区")
-    c.EnableUrlFallback := g.AddCheckBox("x220 y536",
+    g.AddGroupBox("x200 y519 w818 h126", "下载 · 应用于所有工作区")
+    c.EnableUrlFallback := g.AddCheckBox("x220 y548",
         "允许公开 HTTPS 文件 URL 作为最后兜底")
     c.AllowHttp := g.AddCheckBox("x580 yp",
         "允许不加密 HTTP（不推荐）")
-    g.AddText("x220 y576 w118", "后台最大并发：")
+    g.AddText("x220 y588 w118", "后台最大并发：")
     c.TransferMax := AddUiEdit(g, "x340 yp-4 w62 Number")
     g.AddText("x410 yp+4 w100 c666666", "（1–6）")
     c.TransferNotify := g.AddCheckBox("x580 yp",
         "面板隐藏时显示批次完成通知")
 
-    g.AddGroupBox("x200 y647 w818 h90", "开机启动")
-    c.StartupEnabled := g.AddCheckBox("x220 y676",
+    g.AddGroupBox("x200 y655 w818 h82", "开机启动")
+    c.StartupEnabled := g.AddCheckBox("x220 y682",
         "登录 Windows 后自动启动 PopDrop")
-    g.AddText("x500 y680 w480 h36 c666666",
+    g.AddText("x500 y686 w480 h36 c666666",
         "通过当前用户的启动文件夹创建快捷方式；关闭后会自动移除。")
 
     c.GlobalDouble.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.GlobalSingle.OnEvent("Click", GeneralControlChanged.Bind(c))
     c.Hotkey.OnEvent("Change", GeneralControlChanged.Bind(c))
     c.DoubleHotkeyWorkspace.OnEvent(
+        "Change", GeneralControlChanged.Bind(c))
+    c.MainHotkeyWorkspaceMode.OnEvent(
         "Change", GeneralControlChanged.Bind(c))
     c.WindowMode.OnEvent("Change", GeneralControlChanged.Bind(c))
     c.EscapeHide.OnEvent("Click", GeneralControlChanged.Bind(c))
@@ -1624,7 +1631,7 @@ BuildAboutSettingsPage(c, tabs) {
     global APP_VERSION
     tabs.UseTab(7)
     g := c.Gui
-    g.AddGroupBox("x200 y29 w818 h500", "关于 PopDrop")
+    g.AddGroupBox("x200 y29 w818 h520", "关于 PopDrop")
 
     title := g.AddText("x232 y68 w520 h42", "PopDrop")
     title.SetFont("s22 Bold", "Microsoft YaHei UI")
@@ -1649,8 +1656,8 @@ BuildAboutSettingsPage(c, tabs) {
 
     g.AddText("x235 y389 w180 h24", "打赏")
     g.AddText("x235 y421 w650 h44",
-        "如果你喜欢 PopDrop，或者觉得它用起来还挺顺手，欢迎把这份好心情也传递给我！")
-    donate := AddUiButton(g, "x235 y457 w130", "请我喝杯饮料 🥤")
+        "如果你喜欢 PopDrop，或者它帮你提高了效率，欢迎把这份好心情也传递给我！")
+    donate := AddUiButton(g, "x235 y477 w130", "打赏链接")
     donate.OnEvent("Click", OpenAboutUrl.Bind(
         "https://fs.to/support-popdrop"))
 }
@@ -1706,6 +1713,7 @@ LoadContentUpdateControls(c) {
 LoadGeneralControls(c) {
     global OPEN_MODE_SINGLE
     global CONTEXT_MENU_SYSTEM
+    global MAIN_HOTKEY_DEFAULT_WORKSPACE
     c.Loading := true
     try {
         d := c.Draft.General
@@ -1713,6 +1721,9 @@ LoadGeneralControls(c) {
         c.GlobalSingle.Value := d.OpenFileMode = OPEN_MODE_SINGLE
         c.Hotkey.Value := d.Hotkey
         RefreshDoubleHotkeyWorkspaceChoices(c)
+        c.MainHotkeyWorkspaceMode.Choose(
+            d.MainHotkeyWorkspaceMode = MAIN_HOTKEY_DEFAULT_WORKSPACE
+                ? 2 : 1)
         c.WindowMode.Choose(WindowModeToIndex(d.WindowMode))
         c.EscapeHide.Value := d.EscapeHidesPanel
         c.ContextMenuPopDrop.Value :=
@@ -1784,6 +1795,7 @@ GeneralControlChanged(c, *) {
     global OPEN_MODE_SINGLE, OPEN_MODE_DOUBLE
     global WINDOW_MODE_ALWAYS_ON_TOP, WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL
     global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
+    global MAIN_HOTKEY_LAST_WORKSPACE, MAIN_HOTKEY_DEFAULT_WORKSPACE
     if c.Loading
         return
     d := c.Draft.General
@@ -1795,6 +1807,8 @@ GeneralControlChanged(c, *) {
             && index <= c.DoubleHotkeyWorkspaceIds.Length
             ? c.DoubleHotkeyWorkspaceIds[index] : ""
     }
+    d.MainHotkeyWorkspaceMode := c.MainHotkeyWorkspaceMode.Value = 2
+        ? MAIN_HOTKEY_DEFAULT_WORKSPACE : MAIN_HOTKEY_LAST_WORKSPACE
     d.WindowMode := [WINDOW_MODE_ALWAYS_ON_TOP,
         WINDOW_MODE_TEMPORARY, WINDOW_MODE_NORMAL][Max(1, c.WindowMode.Value)]
     d.EscapeHidesPanel := !!c.EscapeHide.Value
@@ -2664,7 +2678,7 @@ OpenNoiseFilterManager(c, *) {
     hideTemporary.Value := n.HideTemporary
     hideDownloads.Value := n.HideIncompleteDownloads
     child.AddText("x34 y116 w545 c666666",
-        "未完成下载规则：*.crdownload、*.part、*.download（默认关闭）。")
+        "覆盖浏览器、迅雷、aria2 与常见 BT 客户端的临时后缀（默认开启）。")
     child.AddGroupBox("xm y166 w600 h310", "自定义忽略规则")
     child.AddText("x34 y194 w548 c555555",
         "每行一条，只匹配文件名；* 匹配任意数量字符，? 匹配一个字符，不区分大小写。")
@@ -3717,7 +3731,7 @@ SettingsDraftSignature(draft) {
     parts := []
     g := draft.General
     parts.Push(g.OpenFileMode, g.DefaultContextMenu, g.Hotkey,
-        g.DoubleHotkeyWorkspaceId, g.WindowMode,
+        g.DoubleHotkeyWorkspaceId, g.MainHotkeyWorkspaceMode, g.WindowMode,
         g.EscapeHidesPanel ? "1" : "0",
         g.UiScaleMode,
         g.WindowWidth "", g.WindowHeight "",
@@ -3907,6 +3921,9 @@ ValidateSettingsDraft(c) {
     }
     if Trim(d.General.Hotkey) = ""
         errors.Push("呼出/隐藏快捷键不能为空。")
+    if !IsRecognizedMainHotkeyWorkspaceMode(
+        d.General.MainHotkeyWorkspaceMode)
+        errors.Push("主快捷键单击唤出目标无效。")
     if !IsIntegerText(d.General.MaxFilesPerFolder, 1, 100)
         errors.Push("每个来源最多显示数量必须是 1–100 的整数。")
     if !IsIntegerText(d.General.RecentFileCount, 1, 100)
@@ -4084,7 +4101,7 @@ ValidateSettingsDraft(c) {
             fileWorkspaceCount += 1
     }
     if !fileWorkspaceCount
-        errors.Push("至少需要保留一个文件工作区，供主快捷键进入文件模式。")
+        errors.Push("至少需要保留一个文件工作区，用于文件操作兼容回退。")
 
     appPaths := Map()
     for app in d.Applications {
@@ -4354,6 +4371,8 @@ WriteSettingsDraft(draft, tempPath) {
     doc.SetValue("General", "StartupEnabled", g.StartupEnabled ? "1" : "0", 1)
     doc.SetValue("General", "DoubleHotkeyWorkspaceId",
         g.DoubleHotkeyWorkspaceId, 1)
+    doc.SetValue("General", "MainHotkeyWorkspaceMode",
+        ParseMainHotkeyWorkspaceMode(g.MainHotkeyWorkspaceMode), 1)
     doc.SetValue("General", "LastFileWorkspaceId",
         ResolveFileWorkspaceId(
             g.LastFileWorkspaceId, draft.Workspaces,

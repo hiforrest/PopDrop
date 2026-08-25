@@ -24,6 +24,10 @@
 3. 仅在原图超限、解码器不可用或非图片格式时，最后使用
    `SIIGBF_THUMBNAILONLY | SIIGBF_INCACHEONLY` 返回的 Windows 已有真实缩略图。
 
+主 ListView 的缩略图增强也复用同一协议，但使用独立进程与独立命名对象，不会占用悬浮预览
+会话。缓存未命中时先发低优先级缓存命令，再回读受限 BGRA 像素；AHK 只负责加入 ImageList，
+不在可见界面线程调用 Shell，也不生成 BMP 中间文件。
+
 文本/Markdown/CSV 使用最多 512 KiB 的有界读取和 GDI 静态绘制；长逻辑行先按当前
 字体显式切分为视觉行，再逐行单行绘制。PDF 优先复用系统已有缩略图，首次生成时
 优先调用同目录的非 V8/XFA `pdfium.dll` 按需读取并渲染第一页；DLL 不存在或加载
@@ -37,7 +41,9 @@ DOCX 在 Helper 内调用 Windows IFilter 提取开头语义文本，
 不超限时才进入回退路径。预览进程由主程序放入约 512 MiB 的 Job Object；
 图片请求 3 秒、文档请求 12 秒达到硬期限后会被真正终止并惰性重启。
 
-清晰图片缓存仅在面板隐藏期由低优先级 Helper 串行生成。无 Alpha 使用质量约
+悬浮预览只为本次实际悬浮的项目在面板隐藏期生成清晰缓存；ListView 缩略图则可在面板可见时
+通过独立 Helper 会话低优先级串行生成同格式缓存，使类型图标逐项替换为真实缩略图。两条路径
+均不在 GUI 线程解码或调用 Shell。无 Alpha 使用质量约
 82 的 JPEG；有 Alpha 使用真彩压缩 PNG。本版本没有引入调色板量化依赖：
 编码超过 2 MiB 时按 1024、768、512 逐级缩小，仍超限便不落盘。缓存文件使用
 SHA-256 名称，清理只接受 `preview-cache-v1` 下符合格式且非重解析点的普通文件。
@@ -75,8 +81,8 @@ powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
 - `native\bin\x64\PopDropPreview.exe`
 - `native\bin\x86\PopDropPreview.exe`
 
-源码包中的 Helper 二进制仅作为历史构建产物。发布 v2.0 前必须在 Windows SDK / MSVC
-环境运行本目录的 `build.ps1`，确保 `HelperVersion=2.0`；PDFium 安装可在构建前后进行。
+源码包中的 Helper 二进制仅作为历史构建产物。发布 v2.0.1 前必须在 Windows SDK / MSVC
+环境运行本目录的 `build.ps1`，确保 `HelperVersion=2.0.1`；PDFium 安装可在构建前后进行。
 
 AHK 源码和编译版都根据自身位数选择 `native\bin\<架构>` 中对应文件；发布包还需将
 同架构的 `pdfium.dll`（若启用）放在该目录。Helper 协议版本写在请求或共享内存头中；

@@ -1380,7 +1380,7 @@ RunNoiseFilterSelfTests() {
         && HasDangerousIgnorePattern(["*.*"]), "过宽规则警告")
 
     noise := {Enabled: true, HideHidden: true, HideSystem: true,
-        HideTemporary: false, HideIncompleteDownloads: false,
+        HideTemporary: true, HideIncompleteDownloads: true,
         CustomPatterns: [], SourceCustomPatterns: []}
     names := Map()
     for name in ["客户.accdb", "客户.laccdb", "孤立.laccdb",
@@ -1414,19 +1414,23 @@ RunNoiseFilterSelfTests() {
         "HA", noise, names).Include, "Hidden 属性过滤")
     AssertSelfTest(!ShouldIncludeEntry("C:\x\系统.txt", "系统.txt",
         "SA", noise, names).Include, "System 属性过滤")
-    AssertSelfTest(ShouldIncludeEntry("C:\x\临时.txt", "临时.txt",
-        "TA", noise, names).Include, "Temporary 属性默认显示")
+    AssertSelfTest(!ShouldIncludeEntry("C:\x\临时.txt", "临时.txt",
+        "TA", noise, names).Include, "Temporary 属性默认隐藏")
     AssertSelfTest(ShouldIncludeEntry("C:\x\属性未知.txt", "属性未知.txt",
         "", noise, names).Include, "属性失败时显示")
-    for download in ["a.crdownload", "a.part", "a.download"]
-        AssertSelfTest(ShouldIncludeEntry("C:\x\" download, download,
-            "A", noise, names).Include, "未完成下载默认显示")
+    for download in ["a.crdownload", "a.part", "a.download",
+        "a.opdownload", "a.partial", "a.aria2", "a.td", "a.td.cfg",
+        "a.xltd", "a.bt", "a.bc!", "a.!ut", "a.!qB"]
+        AssertSelfTest(!ShouldIncludeEntry("C:\x\" download, download,
+            "A", noise, names).Include, "未完成下载默认隐藏：" download)
+    AssertSelfTest(ShouldIncludeEntry("C:\x\正常.torrent", "正常.torrent",
+        "A", noise, names).Include, "torrent 元数据不是未完成下载")
     pinned := BuildPathSet(["C:\x\~$固定.docx"])
     AssertSelfTest(ShouldIncludeEntry("C:\x\~$固定.docx", "~$固定.docx",
         "HS", noise, names, pinned).Include, "固定项目优先")
 
     GlobalNoiseFilter := {Enabled: true, HideHidden: true, HideSystem: true,
-        HideTemporary: false, HideIncompleteDownloads: false,
+        HideTemporary: true, HideIncompleteDownloads: true,
         CustomPatterns: [], CustomPatternTexts: [], PatternErrors: []}
     AssertSelfTest(ResolveNoiseFilterForSource(NOISE_FILTER_INHERIT, []).Enabled,
         "全局开启加来源继承")

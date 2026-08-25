@@ -104,12 +104,12 @@ Write-OK "#Requires check passed: $firstLine"
 # 4. Check Ahk2Exe directives
 Write-Step "Checking Ahk2Exe directives"
 $ahkContent = Get-Content -LiteralPath $AhkScriptPath -Raw
-if ($ahkContent -notmatch ';@Ahk2Exe-SetVersion\s+1\.1\.2\.0'
-    -or $ahkContent -notmatch 'APP_VERSION\s*:=\s*"2\.0"') {
-    Write-Err "Source version is not PopDrop v2.0"
+if ($ahkContent -notmatch ';@Ahk2Exe-SetVersion\s+2\.0\.1\.0'
+    -or $ahkContent -notmatch 'APP_VERSION\s*:=\s*"2\.0\.1"') {
+    Write-Err "Source version is not PopDrop v2.0.1"
     exit 15
 }
-Write-OK "Source version check passed: PopDrop v2.0"
+Write-OK "Source version check passed: PopDrop v2.0.1"
 if ($ahkContent -notmatch ';@Ahk2Exe-SetMainIcon') {
     Write-Warn "No ;@Ahk2Exe-SetMainIcon directive found"
 }
@@ -240,7 +240,9 @@ Write-OK "Old EXE is not running"
 
 # 10. Check all #Include files
 Write-Step "Checking #Include files"
-$includeMatches = [regex]::Matches($ahkContent, '#Include\s+(.+\.ahk)')
+$includeMatches = [regex]::Matches(
+    $ahkContent, '#Include\s+(.+\.(?:ahk|inc))',
+    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
 foreach ($match in $includeMatches) {
     $includePath = $match.Groups[1].Value.Trim()
     $resolvedPath = Join-Path $ProjectRoot $includePath
