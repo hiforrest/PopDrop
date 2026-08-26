@@ -779,7 +779,7 @@ CanOpenSourceFolder(descriptor) {
 }
 
 SaveDialogGroupTaskText() {
-    return "另存为定位到此"
+    return "选择窗口定位到此"
 }
 
 SetListGroupTask(hwnd, groupId, taskText) {
@@ -804,7 +804,7 @@ PrepareSaveDialogTaskLinksBeforePanelShow() {
     global SaveDialogTaskLinksVisible, PanelRenderSignature
     if !SaveDialogTaskLinksVisible
         return false
-    if PanelInvocationSaveDialog()
+    if PanelInvocationSelectionDialog()
         return false
 
     ; This runs only while PopDrop is hidden. Clear the historical contextual
@@ -824,7 +824,7 @@ QueueSaveDialogTaskLinkRemovalRebuild() {
     global PanelRenderSignature
     ; Some common-control builds retain a previously-created group task link
     ; even after LVM_SETGROUPINFO tries to clear pszTask. Reuse the already
-    ; proven normal panel rebuild path exactly once on Save -> normal context.
+    ; proven normal panel rebuild path exactly once on picker -> normal context.
     PanelRenderSignature := ""
     SetTimer(RebuildPanelAfterSaveTaskLinkRemoval, -1)
     return true
@@ -834,7 +834,7 @@ RebuildPanelAfterSaveTaskLinkRemoval() {
     global PanelVisible, SaveDialogTaskLinksVisible
     if !PanelVisible || SaveDialogTaskLinksVisible
         return false
-    if PanelInvocationSaveDialog()
+    if PanelInvocationSelectionDialog()
         return false
     try return PopulatePanel()
     catch
@@ -846,8 +846,8 @@ UpdateSaveDialogGroupTaskLinks() {
     if !IsObject(FileView) || !FileView.Hwnd
         return false
 
-    saveDialog := PanelInvocationSaveDialog()
-    shouldShow := !!saveDialog
+    selectionDialog := PanelInvocationSelectionDialog()
+    shouldShow := !!selectionDialog
     wasVisible := SaveDialogTaskLinksVisible
 
     if shouldShow {
@@ -870,7 +870,7 @@ UpdateSaveDialogGroupTaskLinks() {
     SaveDialogTaskLinksVisible := false
     SetTimer(WatchSaveDialogGroupTaskLinks, 0)
 
-    ; Ordinary non-Save use remains a no-op. Rebuild only when links were
+    ; Ordinary non-picker use remains a no-op. Rebuild only when links were
     ; actually visible in the immediately preceding context.
     if wasVisible {
         QueueSaveDialogTaskLinkRemovalRebuild()
@@ -890,7 +890,7 @@ WatchSaveDialogGroupTaskLinks() {
 
     ; Preserve the invocation while PopDrop owns foreground. If the user moves
     ; to another external window without hiding PopDrop, that window becomes
-    ; the new context and the save-only links are synchronized immediately.
+    ; the new context and the picker-only links are synchronized immediately.
     foreground := DllCall("user32\GetForegroundWindow", "ptr")
     if foreground && (!IsObject(Panel) || foreground != Panel.Hwnd) {
         PanelInvocationWindow := foreground
@@ -898,8 +898,8 @@ WatchSaveDialogGroupTaskLinks() {
         return
     }
 
-    ; Also remove links if the original Save dialog was closed in the meantime.
-    if !PanelInvocationSaveDialog()
+    ; Also remove links if the original picker was closed in the meantime.
+    if !PanelInvocationSelectionDialog()
         UpdateSaveDialogGroupTaskLinks()
 }
 
@@ -922,8 +922,8 @@ HandleFileViewGroupTaskLink(lParam) {
     if !IsSourceManagementDescriptor(descriptor)
         return 0
 
-    saveDialog := PanelInvocationSaveDialog()
-    if !saveDialog {
+    selectionDialog := PanelInvocationSelectionDialog()
+    if !selectionDialog {
         ; The dialog may have closed while PopDrop stayed visible. Remove stale
         ; links immediately rather than leaving a dead action in the header.
         UpdateSaveDialogGroupTaskLinks()
@@ -931,7 +931,7 @@ HandleFileViewGroupTaskLink(lParam) {
     }
 
     LocateSaveDialogToSourceFolder(
-        CloneSourceManagementDescriptor(descriptor), saveDialog)
+        CloneSourceManagementDescriptor(descriptor), selectionDialog)
     return 0
 }
 
@@ -963,7 +963,7 @@ MeasureWindowTextWidth(hwnd, text) {
 }
 
 IsSaveDialogGroupTaskPoint(hwnd, groupId, x, y) {
-    if !PanelInvocationSaveDialog()
+    if !PanelInvocationSelectionDialog()
         return false
     rect := GetListGroupHeaderRectRobust(hwnd, groupId)
     if !IsObject(rect)
@@ -1019,13 +1019,189 @@ DialogTextHasSaveMeaning(text) {
         . "salva|opslaan|zapisz|сохран|저장)")
 }
 
-IsWindowsCommonSaveDialog(hwnd) {
+DialogTextHasSelectionMeaning(text) {
+    text := NormalizeDialogActionText(text)
+    if text = ""
+        return false
+    if DialogTextHasSaveMeaning(text)
+        return true
+    return RegExMatch(text,
+        "i)(打开|開く|open|öffnen|ouvrir|abrir|aprir|otwórz|"
+        . "откры|열기|选择|選擇|選択|choose|select|auswähl|"
+        . "sélection|seleccion|selecione|seleziona|kiezen|wybierz|"
+        . "выб|선택|浏览.*文件夹|browse.*folder|choisir.*dossier|"
+        . "seleccionar.*carpeta|выб.*папк|폴더.*선택|フォルダー.*選択)")
+}
+
+DialogTextHasFolderBrowseMeaning(text) {
+    text := NormalizeDialogActionText(text)
+    if text = ""
+        return false
+    return RegExMatch(text,
+        "i)(浏览.*文件夹|選擇.*資料夾|选择.*文件夹|"
+        . "browse\s+for\s+(?:a\s+)?folder|"
+        . "(?:select|choose)\s+(?:a\s+)?folder|"
+        . "ordner.*auswähl|choisir.*dossier|"
+        . "seleccionar.*carpeta|selecione.*pasta|"
+        . "seleziona.*cartella|wybierz.*folder|выб.*папк|"
+        . "폴더.*선택|フォルダー.*選択)")
+}
+
+DialogWindowClassSet(hwnd) {
+    classes := Map()
+    pending := [hwnd]
+    inspected := 0
+    while pending.Length {
+        parentHwnd := pending.Pop()
+        childHwnd := 0
+        Loop {
+            childHwnd := DllCall("user32\FindWindowExW",
+                "ptr", parentHwnd, "ptr", childHwnd,
+                "ptr", 0, "ptr", 0, "ptr")
+            if !childHwnd
+                break
+            childClass := StrLower(WindowClassByHwnd(childHwnd))
+            if childClass != ""
+                classes[childClass] := true
+            pending.Push(childHwnd)
+            inspected += 1
+            ; A standard Shell picker has a small, finite child tree. Keep a
+            ; hard bound so a malformed/custom window cannot stall F2.
+            if inspected >= 1024
+                return classes
+        }
+    }
+    return classes
+}
+
+DialogClassSetHasAny(classes, classNames) {
+    for className in classNames {
+        if classes.Has(StrLower(className))
+            return true
+    }
+    return false
+}
+
+FindUniqueVisibleDialogDescendantByClasses(hwnd, classNames) {
+    pending := [hwnd]
+    inspected := 0
+    foundHwnd := 0
+    while pending.Length {
+        parentHwnd := pending.Pop()
+        childHwnd := 0
+        Loop {
+            childHwnd := DllCall("user32\FindWindowExW",
+                "ptr", parentHwnd, "ptr", childHwnd,
+                "ptr", 0, "ptr", 0, "ptr")
+            if !childHwnd
+                break
+            childClass := StrLower(WindowClassByHwnd(childHwnd))
+            for className in classNames {
+                if childClass = StrLower(className)
+                    && DllCall("user32\IsWindowVisible",
+                        "ptr", childHwnd, "int")
+                    && DllCall("user32\IsWindowEnabled",
+                        "ptr", childHwnd, "int") {
+                    ; A custom form with multiple eligible edits is
+                    ; ambiguous: never guess which control owns the path.
+                    if foundHwnd && foundHwnd != childHwnd
+                        return 0
+                    foundHwnd := childHwnd
+                    break
+                }
+            }
+            pending.Push(childHwnd)
+            inspected += 1
+            if inspected >= 1024
+                return 0
+        }
+    }
+    return foundHwnd
+}
+
+IsCustomTreeFolderSelectionDialog(hwnd) {
     global Panel
     if !hwnd || !DllCall("user32\IsWindow", "ptr", hwnd, "int")
         return false
     if IsObject(Panel) && hwnd = Panel.Hwnd
         return false
-    if WindowClassByHwnd(hwnd) != "#32770"
+
+    classes := DialogWindowClassSet(hwnd)
+    hasTree := DialogClassSetHasAny(classes,
+        ["TFolderTreeView", "SysTreeView32"])
+    pathEdit := FindUniqueVisibleDialogDescendantByClasses(hwnd,
+        ["TNewEdit", "TEdit", "Edit"])
+    if !hasTree || !pathEdit
+        return false
+
+    ; Inno Setup's own folder picker is a VCL TSelectFolderForm, not the
+    ; Windows #32770 / SHBrowseForFolder dialog it visually resembles. The
+    ; exact class plus its tree/path-edit structure is a locale-independent
+    ; gate. Other custom windows must additionally carry explicit folder-
+    ; selection wording in their title.
+    if StrLower(WindowClassByHwnd(hwnd)) = "tselectfolderform"
+        return true
+    return DialogTextHasFolderBrowseMeaning(WindowTextByHwnd(hwnd))
+}
+
+IsClassicBrowseForFolderDialog(hwnd) {
+    if !hwnd || WindowClassByHwnd(hwnd) != "#32770"
+        return false
+    classes := DialogWindowClassSet(hwnd)
+    return classes.Has("systreeview32")
+        && !classes.Has("directuihwnd")
+        && !classes.Has("shelldll_defview")
+        && !classes.Has("syslistview32")
+}
+
+IsWindowsShellSelectionDialog(hwnd) {
+    global Panel
+    if !hwnd || !DllCall("user32\IsWindow", "ptr", hwnd, "int")
+        return false
+    if IsObject(Panel) && hwnd = Panel.Hwnd
+        return false
+    windowClass := StrLower(WindowClassByHwnd(hwnd))
+    if windowClass = "tselectfolderform"
+        return IsCustomTreeFolderSelectionDialog(hwnd)
+    if windowClass != "#32770" {
+        ; Only scan descendants of nonstandard forms whose title explicitly
+        ; describes folder selection. This keeps ordinary F2 handling cheap
+        ; while retaining a conservative fallback for other custom pickers.
+        if !DialogTextHasFolderBrowseMeaning(WindowTextByHwnd(hwnd))
+            return false
+        return IsCustomTreeFolderSelectionDialog(hwnd)
+    }
+
+    ; All supported pickers expose the primary Open/Save/Select action as
+    ; IDOK. Requiring it excludes message boxes and most ordinary settings
+    ; dialogs before examining their child-window structure.
+    actionHwnd := DllCall("user32\GetDlgItem", "ptr", hwnd,
+        "int", 1, "ptr")
+    if !actionHwnd
+        return false
+
+    classes := DialogWindowClassSet(hwnd)
+    if classes.Has("directuihwnd")
+        || classes.Has("shelldll_defview")
+        || classes.Has("duiviewwndclassname")
+        return true
+    if classes.Has("comboboxex32") && classes.Has("syslistview32")
+        return true
+
+    ; The pre-Vista SHBrowseForFolder dialog is tree-only and does not have
+    ; an address bar. Its selection wording is used as a second gate because
+    ; many unrelated property sheets also contain a SysTreeView32.
+    if classes.Has("systreeview32") {
+        actionText := WindowTextByHwnd(actionHwnd)
+        title := WindowTextByHwnd(hwnd)
+        return DialogTextHasSelectionMeaning(actionText)
+            || DialogTextHasSelectionMeaning(title)
+    }
+    return false
+}
+
+IsWindowsCommonSaveDialog(hwnd) {
+    if !IsWindowsShellSelectionDialog(hwnd)
         return false
 
     actionHwnd := DllCall("user32\GetDlgItem", "ptr", hwnd,
@@ -1040,10 +1216,10 @@ IsWindowsCommonSaveDialog(hwnd) {
             "i)(打开|open|öffnen|ouvrir|abrir)")
 }
 
-PanelInvocationSaveDialog() {
+PanelInvocationSelectionDialog() {
     global PanelInvocationWindow
     hwnd := PanelInvocationWindow
-    return IsWindowsCommonSaveDialog(hwnd) ? hwnd : 0
+    return IsWindowsShellSelectionDialog(hwnd) ? hwnd : 0
 }
 
 CommonFileDialogFolderPath(hwnd) {
@@ -1100,12 +1276,64 @@ SendFolderPathToCommonSaveDialog(hwnd, path, addressShortcut) {
     return true
 }
 
+SendFolderPathToClassicBrowseDialog(hwnd, path) {
+    static BFFM_SETSELECTIONW := 0x467
+    if !IsClassicBrowseForFolderDialog(hwnd)
+        return false
+    if !ActivateExternalDialogSafely(hwnd)
+        return false
+    if DllCall("user32\GetForegroundWindow", "ptr") != hwnd
+        return false
+
+    ; SHBrowseForFolder has no editable address bar. Select the absolute path
+    ; through its documented Unicode message without changing the clipboard
+    ; or confirming the dialog on the user's behalf.
+    DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", BFFM_SETSELECTIONW, "uptr", 1,
+        "ptr", StrPtr(path), "ptr")
+    Sleep(80)
+    return DllCall("user32\GetForegroundWindow", "ptr") = hwnd
+        && IsWindowsShellSelectionDialog(hwnd)
+}
+
+SendFolderPathToCustomTreeDialog(hwnd, path) {
+    static WM_SETTEXT := 0x000C
+    if !IsCustomTreeFolderSelectionDialog(hwnd)
+        return false
+    pathEdit := FindUniqueVisibleDialogDescendantByClasses(hwnd,
+        ["TNewEdit", "TEdit", "Edit"])
+    if !pathEdit || !ActivateExternalDialogSafely(hwnd)
+        return false
+    if DllCall("user32\GetForegroundWindow", "ptr") != hwnd
+        return false
+
+    ; Set only the structurally verified folder-path edit. WM_SETTEXT causes
+    ; VCL/Win32 edit change handling without sending Enter, clicking OK or
+    ; touching the clipboard. The user remains responsible for confirmation.
+    DllCall("user32\SendMessageW", "ptr", pathEdit,
+        "uint", WM_SETTEXT, "uptr", 0, "ptr", StrPtr(path), "ptr")
+    Sleep(50)
+    if DllCall("user32\GetForegroundWindow", "ptr") != hwnd
+        return false
+    if !IsCustomTreeFolderSelectionDialog(hwnd)
+        return false
+    current := WindowTextByHwnd(pathEdit)
+    try return current != "" && PathsEqual(NormalizePath(current), path)
+    catch
+        return false
+}
+
 NavigateCommonSaveDialogToFolder(hwnd, path) {
     path := NormalizePath(path)
     if path = "" || !DirExist(path)
         return false
-    if !IsWindowsCommonSaveDialog(hwnd)
+    if !IsWindowsShellSelectionDialog(hwnd)
         return false
+
+    if IsCustomTreeFolderSelectionDialog(hwnd)
+        return SendFolderPathToCustomTreeDialog(hwnd, path)
+    if IsClassicBrowseForFolderDialog(hwnd)
+        return SendFolderPathToClassicBrowseDialog(hwnd, path)
 
     current := CommonFileDialogFolderPath(hwnd)
     if current != "" && PathsEqual(current, path) {
@@ -1133,24 +1361,24 @@ LocateSaveDialogToSourceFolder(descriptor, dialogHwnd, *) {
     live := FindRuntimeSourceDescriptor(
         descriptor.WorkspaceId, descriptor.SourceId)
     if !IsObject(live) {
-        SetUserStatus("该来源已经不存在，无法定位保存窗口")
+        SetUserStatus("该来源已经不存在，无法定位选择窗口")
         return false
     }
     if !DirExist(live.Path) {
         SetUserStatus("来源文件夹不存在或当前无法访问")
         return false
     }
-    if !IsWindowsCommonSaveDialog(dialogHwnd) {
-        SetUserStatus("原“另存为/保存”窗口已经关闭或发生变化")
+    if !IsWindowsShellSelectionDialog(dialogHwnd) {
+        SetUserStatus("原文件/文件夹选择窗口已经关闭或发生变化")
         return false
     }
 
     if NavigateCommonSaveDialogToFolder(dialogHwnd, live.Path) {
-        SetUserStatus("已将保存窗口定位到「" live.Name "」")
+        SetUserStatus("已将选择窗口定位到「" live.Name "」")
         return true
     }
 
-    SetUserStatus("未能将保存窗口定位到该来源")
+    SetUserStatus("未能将选择窗口定位到该来源")
     return false
 }
 
@@ -1165,10 +1393,10 @@ ShowSourceGroupContextMenu(
     ; shadow the built-in Menu class even on the right-hand side.
     sourceMenu := Menu()
 
-    saveDialog := PanelInvocationSaveDialog()
-    if saveDialog {
-        sourceMenu.Add("另存为定位到此",
-            LocateSaveDialogToSourceFolder.Bind(descriptor, saveDialog))
+    selectionDialog := PanelInvocationSelectionDialog()
+    if selectionDialog {
+        sourceMenu.Add(SaveDialogGroupTaskText(),
+            LocateSaveDialogToSourceFolder.Bind(descriptor, selectionDialog))
         sourceMenu.Add()
     }
 

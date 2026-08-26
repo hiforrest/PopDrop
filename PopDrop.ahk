@@ -8,7 +8,7 @@
 ;@Ahk2Exe-AddResource assets\pin.ico, 557
 ;@Ahk2Exe-AddResource assets\empty-folder.ico, 558
 ;@Ahk2Exe-AddResource assets\unknown-file.ico, 559
-;@Ahk2Exe-SetVersion 2.0.1.0
+;@Ahk2Exe-SetVersion 2.0.10.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -20,7 +20,7 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global SORT_SMART := "Smart"
-global APP_VERSION := "2.0.1"
+global APP_VERSION := "2.0.10"
 global CONFIG_VERSION := "30"
 global CONTENT_UPDATE_FAST := "Fast"
 global CONTENT_UPDATE_ACCURACY := "Accuracy"
@@ -206,6 +206,10 @@ global TextBlockCardHeight := 68
 global ThumbnailImageList := 0
 global ThumbnailImageListEdge := 0
 global ThumbnailIconCache := Map()
+; Main-panel width is expressed in logical GUI pixels. 330 keeps a useful
+; file region beside the fixed 32-DIP action rail for side-docked layouts.
+global PANEL_MIN_WIDTH := 330
+global PANEL_RECENT_SIDEBAR_MIN_CONTENT_WIDTH := 482
 global WindowWidth := 766
 global WindowHeight := 576
 global ViewMode := "Thumbnail"
@@ -239,15 +243,22 @@ global PANEL_TAB_PADDING_X_PX := 22
 global PANEL_TAB_PADDING_Y_PX := 0 ;无效
 ; Visible selected-tab extension below the native item rectangle. The crop
 ; routine reserves the same number of physical pixels, so this value now
-; changes the actual button height instead of being clipped by the Tab3 HWND.
+; changes the actual button height instead of being clipped by the Tab HWND.
 ; The owner painter fills the extension; the native page pane stays hidden.
 global PANEL_TAB_BOTTOM_MARGIN_PX := 8
+; Unselected tabs stop one physical pixel above the selected tab. This keeps
+; the native hierarchy without leaving the previous multi-pixel empty band.
+global PANEL_TAB_UNSELECTED_BOTTOM_INSET_PX := 1
 global PANEL_TAB_TEXT_VERTICAL_EXTRA_PX := 3
 global PANEL_TAB_TEXT_Y_OFFSET_PX := 4
 global WorkspaceTabPaintSubclassCallback := 0
-; Optional physical-pixel gap after the complete Tab3 button. r40 transfers
+; Optional physical-pixel gap after the complete Tab button. r40 transfers
 ; r39's four empty pixels into the selected tab itself, so no extra gap remains.
 global PANEL_CONTENT_TOP_OFFSET_PX := 0
+; Let the content's single flat top edge cover the tab-item bottom frame.
+; This is a physical-pixel target so 100% through 200% DPI all overlap by
+; exactly two device pixels instead of scaling the overlap as a visual gap.
+global PANEL_CONTENT_TAB_OVERLAP_PX := 2
 global PANEL_SIDE_BUTTON_SIZE := 32
 global PANEL_SIDE_TOOLBAR_WIDTH := 32
 global PANEL_SIDE_TOOLBAR_GAP := 1
@@ -292,6 +303,9 @@ global WorkspaceSwitchRecoveryActive := false
 global LastWorkspaceTabMessageLagMs := -1
 global LastWorkspaceTabQueuedTick := 0
 global LastWorkspaceTabQueuedId := ""
+; Retain the bounded diagnostics for future investigations, but do not queue
+; or write workspace-performance.log during normal releases.
+global WORKSPACE_PERFORMANCE_LOG_ENABLED := false
 global WorkspacePerformanceLogQueue := []
 global WorkspacePerformanceLogScheduled := false
 ; A hot workspace already owns a fully laid-out native ListView. Its first
@@ -546,9 +560,9 @@ global TextBlockReturnWindow := 0
 global TextBlockReturnFocus := 0
 ; Top-level foreground window captured immediately before a hidden PopDrop
 ; panel is summoned. Used by integrations that need to return to the caller
-; (for example, locating a Windows Save/Save As dialog to a source folder).
+; (for example, locating a Windows file/folder picker to a source folder).
 global PanelInvocationWindow := 0
-; Active only while contextual Save/Save As group task links are visible.
+; Active only while contextual file/folder-picker group task links are visible.
 global SaveDialogTaskLinksVisible := false
 global TextBlockSendInProgress := false
 global CudaTextDragCapture := 0

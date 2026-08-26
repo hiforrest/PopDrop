@@ -94,10 +94,11 @@ Windows 异步绘制。
 等待面板隐藏。切换代数会取消已不属于当前 Tab 的任务。
 扫描快照写盘和非活动工作区扫描仅在面板隐藏后运行，避免“首帧之后的延迟任务”阻塞下一次点击。
 
-若实机仍出现超过约 32 ms 的慢切换，程序会把阶段耗时暂存在内存，并在面板隐藏后写入
-`workspace-performance.log`。`messageLagMs` 表示 Tab 通知在消息队列中的等待，`dispatchMs`
-表示通知到提交的等待，`rememberMs` / `bindMs` / `viewMs` 分别对应旧视图保存、工作区绑定和
-视图呈现；`hot=1` 表示真正命中了保留的原生视图。
+慢切换阶段诊断实现仍保留，但 r41 起默认关闭，不再排队或写入
+`workspace-performance.log`。如未来需要重新采样，可把 `PopDrop.ahk` 中
+`WORKSPACE_PERFORMANCE_LOG_ENABLED` 改为 `true`；`messageLagMs` 表示 Tab 通知在消息队列
+中的等待，`dispatchMs` 表示通知到提交的等待，`rememberMs` / `bindMs` / `viewMs` 分别对应
+旧视图保存、工作区绑定和视图呈现，`hot=1` 表示真正命中了保留的原生视图。
 
 ## 可见期维护隔离
 

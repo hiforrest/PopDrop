@@ -16,11 +16,13 @@ BuildPanel() {
     global PANEL_TAB_PADDING_X_PX, PANEL_TAB_PADDING_Y_PX
     global PANEL_SIDE_BUTTON_SIZE, PANEL_SIDE_TOOLBAR_WIDTH
     global PANEL_SIDE_SEPARATOR_HEIGHT
+    global PANEL_MIN_WIDTH
     global FolderDropAddSourceButton, FolderDropPinnedZone
     global ToolbarSeparators
 
     PanelUiScaleFactor := UiScaleFactor
-    Panel := Gui("+Resize +MinSize" PanelScale(660) "x" PanelScale(380),
+    Panel := Gui("+Resize +MinSize" PanelScale(PANEL_MIN_WIDTH)
+        "x" PanelScale(380),
         "PopDrop v" APP_VERSION)
     Panel.MarginX := PanelScale(12)
     ; The toolbar is a fixed 42-DIP band. Keep the tuned control row one DIP
@@ -28,10 +30,13 @@ BuildPanel() {
     Panel.MarginY := PanelScale(7)
     Panel.SetFont("s" Round(9 * UiScaleFactor), "Microsoft YaHei UI")
 
-    ; Navigation owns the top row. The native tab strip preserves keyboard
-    ; focus and Windows theming; at most eight workspaces are materialized.
+    ; Navigation owns the top row. No controls belong to these navigation
+    ; pages: workspace contents are independent sibling HWNDs switched by the
+    ; application. Use a plain Tab deliberately. AddTab3 creates a separate
+    ; themed ahk_dlg page host which AutoHotkey positions above the tab strip;
+    ; on Windows 10 at 96 DPI its top two pixels cover every tab item.
     tabHeight := PanelPixelsToGui(PANEL_TAB_HEIGHT_PX, Panel.Hwnd)
-    WorkspaceTabs := Panel.AddTab3(
+    WorkspaceTabs := Panel.AddTab(
         "xm ym w" PanelScale(620) " h" tabHeight " -Wrap", [""])
     ; AHK's sNN uses points, not pixels. 14 px at 96 DPI equals 10.5 pt.
     tabPointSize := PANEL_TAB_FONT_PX * 72.0 / 96.0
@@ -140,7 +145,7 @@ BuildPanel() {
     RecentView.OnEvent("ContextMenu", RecentContextMenu)
     RecentView.OnEvent("ItemSelect", RecentItemSelect)
 
-    ; The native Tab3 border is theme-dependent and does not reach the action
+    ; The native Tab border is theme-dependent and does not reach the action
     ; rail. Draw one explicit divider over the ListView top edge instead.
     ; Lighter divider per review: #b9b9b9. It overlays the selected tab
     ; bottom edge and the file area top border.
@@ -170,7 +175,11 @@ CreatePanelFileView(visible := true) {
     global Panel, DropTargetObjects
     ; Multi-select is the native ListView default. In icon view this enables
     ; Ctrl-click, Shift range selection and marquee selection on blank space.
-    options := "xm y42 w716 h492 Icon +0x100"
+    ; Replace ListView's default two-pixel WS_EX_CLIENTEDGE with one flat
+    ; border. Its top row is shared with WorkspaceBottomRule and the tab-item
+    ; bottom, leaving exactly one visible separator instead of a dark/white
+    ; sunken pair. Cached workspace views all use this same constructor.
+    options := "xm y42 w716 h492 Icon +0x100 -E0x200 +Border"
     if !visible
         options .= " Hidden"
     view := Panel.AddListView(ScalePanelGuiOptions(options),
@@ -681,7 +690,10 @@ RecordWorkspaceSwitchFailure(workspaceId, err, recovered) {
 }
 
 QueueWorkspacePerformanceTrace(kind, detail) {
+    global WORKSPACE_PERFORMANCE_LOG_ENABLED
     global WorkspacePerformanceLogQueue, WorkspacePerformanceLogScheduled
+    if !WORKSPACE_PERFORMANCE_LOG_ENABLED
+        return false
     line := FormatTime(A_Now, "yyyy-MM-dd HH:mm:ss")
         . "`t" kind "`t" detail "`r`n"
     WorkspacePerformanceLogQueue.Push(line)
@@ -691,12 +703,18 @@ QueueWorkspacePerformanceTrace(kind, detail) {
         WorkspacePerformanceLogScheduled := true
         SetTimer(FlushWorkspacePerformanceTrace, -400)
     }
+    return true
 }
 
 FlushWorkspacePerformanceTrace(force := false) {
+    global WORKSPACE_PERFORMANCE_LOG_ENABLED
     global WorkspacePerformanceLogQueue, WorkspacePerformanceLogScheduled
     global DataRootDir, PanelVisible
     WorkspacePerformanceLogScheduled := false
+    if !WORKSPACE_PERFORMANCE_LOG_ENABLED {
+        WorkspacePerformanceLogQueue := []
+        return false
+    }
     if !WorkspacePerformanceLogQueue.Length
         return
     if PanelVisible && !force {
@@ -1097,7 +1115,7 @@ ActivateWorkspaceFileView() {
         && (state.RenderedScanComplete || WorkspaceSwitchRecoveryActive)
         && layoutMatches
         && HasProp(state, "SaveTaskLinksVisible")
-        && state.SaveTaskLinksVisible = !!PanelInvocationSaveDialog()
+        && state.SaveTaskLinksVisible = !!PanelInvocationSelectionDialog()
         && state.SearchQuery = TextBlockSearchQuery
     if presentable && !ScanResultLoaded && IsObject(state.ScanResult) {
         ; The rendered rows were built from this exact scan object. Restoring
@@ -2575,16 +2593,20 @@ ResizePanel(guiObj, minMax, width, height) {
     global PANEL_TOOLBAR_HEIGHT, PANEL_FOOTER_HEIGHT
     global PANEL_SIDE_TOOLBAR_WIDTH, PANEL_SIDE_TOOLBAR_GAP
     global PANEL_SIDE_TOOLBAR_EDGE_GAP, PANEL_CONTENT_TOP_OFFSET_PX
+    global PANEL_RECENT_SIDEBAR_MIN_CONTENT_WIDTH
     if minMax = -1
         return
     PreviewSuppress("resize", true)
     PanelLayoutWidth := width
-    ResizeFolderDropControls(width)
+    ; Finalize the native Tab crop before measuring it for the drag overlay.
+    ; The overlay must follow the real HWND geometry, including the owner-
+    ; painted bottom extension and per-monitor DPI rounding.
     LayoutWorkspaceNavigation(width)
-    ; Start content at the real visible bottom edge of the cropped Tab3.
-    ; This removes the parent-background strip between the tab and ListView.
-    ; Keep the tuned tab header fully visible by moving the content band
-    ; down as a unit. This shifts the divider and file region together.
+    ResizeFolderDropControls(width)
+    ; Start content two physical pixels inside the cropped navigation Tab.
+    ; The explicit rule, flat ListView border and tab-item bottom therefore
+    ; occupy one row. The optional offset still moves the complete content
+    ; band as a unit when a future theme needs manual tuning.
     contentTop := GetWorkspaceContentTop()
         + PanelPixelsToGui(PANEL_CONTENT_TOP_OFFSET_PX, guiObj.Hwnd)
     footerHeight := PanelScale(PANEL_FOOTER_HEIGHT)
@@ -2603,19 +2625,29 @@ ResizePanel(guiObj, minMax, width, height) {
     searchVisible := IsTextWorkspace()
         && IsObject(TextBlockSearchEdit) && TextBlockSearchEdit.Visible
     searchHeight := searchVisible ? PanelScale(26) : 0
-    ; Text mode lets the search frame own the same top row as the explicit
-    ; workspace divider. File mode keeps a one-device-pixel hand-off from the
-    ; divider to the ListView. Using DIPs here created separate white/grey
-    ; rows at 96 DPI while higher-DPI rounding happened to hide them.
-    contentTopGap := searchVisible ? 0
-        : PanelPixelsToGui(1, guiObj.Hwnd)
+    ; Text and file modes share the explicit divider's exact physical row.
+    ; A mode-specific gap would separate the ListView's top edge from the
+    ; divider and recreate the stacked grey/white rows at 96 DPI.
+    contentTopGap := 0
+    ; The search frame and the flat ListView each own a one-pixel border.
+    ; Without overlap those adjacent rows look like a two-pixel black rule.
+    ; Share the frame's bottom device pixel with the ListView's top border.
+    searchBottomOverlap := searchVisible
+        ? PanelPixelsToGui(1, guiObj.Hwnd) : 0
     fileContentTop := contentTop + searchHeight + contentTopGap
+        - searchBottomOverlap
     fileContentHeight := Max(PanelScale(100),
-        contentHeight - searchHeight - contentTopGap)
+        contentHeight - searchHeight - contentTopGap
+            + searchBottomOverlap)
 
     LayoutSideToolbar(width, contentTop, contentHeight)
     fileRight := outerMargin + contentWidth
-    if ShowRecentSidebar {
+    ; The recent sidebar needs 280 + 12 + 190 logical pixels. Preserve the
+    ; user's preference but hide only its layout when a side-docked panel is
+    ; narrower; widening the panel restores it automatically.
+    layoutRecentSidebar := ShowRecentSidebar
+        && contentWidth >= PanelScale(PANEL_RECENT_SIDEBAR_MIN_CONTENT_WIDTH)
+    if layoutRecentSidebar {
         sidebarWidth := Min(PanelScale(280),
             Max(PanelScale(190), Floor(contentWidth * 0.28)))
         contentGap := PanelScale(12)
@@ -2676,12 +2708,15 @@ LayoutTextBlockSearchBand(x, y, width, height) {
     dividerX := x + width - scopeWidth
     ; The static frame is the only owner of the search border. Gui.AddEdit
     ; normally adds WS_EX_CLIENTEDGE even with -Border, so construction also
-    ; removes E0x200. Keep the Edit and checkbox one *device pixel* inside the
-    ; frame: this preserves its single outline at every monitor DPI without
-    ; reintroducing the old multi-DIP empty strip.
+    ; removes E0x200. Keep the Edit and checkbox one device pixel inside the
+    ; side/bottom edges and two device pixels below the top edge. Native Edit
+    ; and CheckBox backgrounds can otherwise paint one pixel above their
+    ; nominal client area and cover the frame's top stroke at some DPI values.
     borderInset := PanelPixelsToGui(1, TextBlockSearchFrame.Hwnd)
-    innerY := y + borderInset
-    innerHeight := Max(PanelScale(18), height - borderInset * 2)
+    topInset := PanelPixelsToGui(2, TextBlockSearchFrame.Hwnd)
+    innerY := y + topInset
+    innerHeight := Max(PanelScale(18),
+        height - topInset - borderInset)
     editX := x + borderInset
     editWidth := Max(PanelScale(72), dividerX - editX)
     TextBlockSearchFrame.Move(x, y, width, height)
@@ -2748,6 +2783,13 @@ WorkspaceTabItemSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
         if DrawWorkspaceTabItems(hwnd)
             return 0
     }
+    if msg = 0x0318 { ; WM_PRINTCLIENT
+        ; Some parent redraw paths ask a child to print into an existing DC
+        ; instead of sending WM_PAINT. Never let that fallback resurrect the
+        ; Windows 10 themed page highlight that this owner painter removes.
+        if wParam && PaintWorkspaceTabItems(hwnd, wParam)
+            return 0
+    }
     if msg = 0x0014 ; WM_ERASEBKGND
         return 1
     if msg = 0x0082 { ; WM_NCDESTROY
@@ -2761,15 +2803,22 @@ WorkspaceTabItemSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
 }
 
 DrawWorkspaceTabItems(hwnd) {
-    global PANEL_TAB_BOTTOM_MARGIN_PX
-    itemCount := DllCall("user32\SendMessageW", "ptr", hwnd,
-        "uint", 0x1304, "ptr", 0, "ptr", 0, "ptr") ; TCM_GETITEMCOUNT
-
     paint := Buffer(A_PtrSize = 8 ? 72 : 64, 0)
     hdc := DllCall("user32\BeginPaint", "ptr", hwnd,
         "ptr", paint.Ptr, "ptr")
     if !hdc
         return false
+
+    try return PaintWorkspaceTabItems(hwnd, hdc)
+    finally DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
+}
+
+PaintWorkspaceTabItems(hwnd, hdc) {
+    if !hwnd || !hdc
+        return false
+
+    itemCount := DllCall("user32\SendMessageW", "ptr", hwnd,
+        "uint", 0x1304, "ptr", 0, "ptr", 0, "ptr") ; TCM_GETITEMCOUNT
 
     clientRect := Buffer(16, 0)
     DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", clientRect.Ptr)
@@ -2779,7 +2828,6 @@ DrawWorkspaceTabItems(hwnd) {
         "ptr", clientRect.Ptr, "ptr", backgroundBrush)
 
     if itemCount <= 0 {
-        DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
         return true
     }
     theme := DllCall("uxtheme\OpenThemeData",
@@ -2816,13 +2864,13 @@ DrawWorkspaceTabItems(hwnd) {
         DllCall("gdi32\SetTextColor", "ptr", hdc, "uint", oldTextColor)
         if theme
             DllCall("uxtheme\CloseThemeData", "ptr", theme)
-        DllCall("user32\EndPaint", "ptr", hwnd, "ptr", paint.Ptr)
     }
     return true
 }
 
 DrawWorkspaceTabItem(hwnd, hdc, theme, itemIndex, selected) {
     global PANEL_TAB_BOTTOM_MARGIN_PX
+    global PANEL_TAB_UNSELECTED_BOTTOM_INSET_PX
     global PANEL_TAB_TEXT_VERTICAL_EXTRA_PX, PANEL_TAB_TEXT_Y_OFFSET_PX
 
     itemRect := Buffer(16, 0)
@@ -2840,33 +2888,38 @@ DrawWorkspaceTabItem(hwnd, hdc, theme, itemIndex, selected) {
     right := NumGet(itemRect, 8, "int")
     bottom := NumGet(itemRect, 12, "int")
 
-    ; Expand the selected BUTTON itself downward. FitWorkspaceTabsToHeader()
-    ; reserves the same pixels in the child HWND, so this paint is no longer
-    ; clipped at the native TCM_GETITEMRECT boundary.
+    ; FitWorkspaceTabsToHeader() reserves the full selected-tab extension in
+    ; the child HWND. Normal tabs use the same extension minus a one-pixel
+    ; inset, removing the visible gap while preserving selection hierarchy.
     selectedExpandX := selected ? 2 : 0
 	selectedExpandTop := selected ? 2 : 0
-	selectedExpandBottom := selected
-	    ? Max(0, PANEL_TAB_BOTTOM_MARGIN_PX) : 0
+    bottomInset := selected ? 0
+        : Max(0, PANEL_TAB_UNSELECTED_BOTTOM_INSET_PX)
+    visibleBottomExtension := Max(0,
+        PANEL_TAB_BOTTOM_MARGIN_PX - bottomInset)
 
 	paintRect := Buffer(16, 0)
 	NumPut("int", left - selectedExpandX, paintRect, 0)
 	NumPut("int", top - selectedExpandTop, paintRect, 4)
 	NumPut("int", right + selectedExpandX, paintRect, 8)
-	NumPut("int", bottom + selectedExpandBottom, paintRect, 12)
+	NumPut("int", bottom + visibleBottomExtension, paintRect, 12)
+
+    ; Do not stretch TABP_TABITEM over the artificial bottom extension.
+    ; Windows 10 embeds a two-pixel white page highlight in that themed
+    ; bitmap; stretching every item made the highlight join into the exact
+    ; full-width stripe reported at 96 DPI. Paint a stable system-colour
+    ; surface and a one-device-pixel frame instead. The selected tab remains
+    ; COLOR_WINDOW, normal tabs and the unused row remain COLOR_BTNFACE.
+    fillBrush := DllCall("user32\GetSysColorBrush",
+        "int", selected ? 5 : 15, "ptr") ; COLOR_WINDOW / COLOR_BTNFACE
+    DllCall("user32\FillRect", "ptr", hdc,
+        "ptr", paintRect.Ptr, "ptr", fillBrush)
+    frameBrush := DllCall("user32\GetSysColorBrush",
+        "int", 16, "ptr") ; COLOR_BTNSHADOW
+    DllCall("user32\FrameRect", "ptr", hdc,
+        "ptr", paintRect.Ptr, "ptr", frameBrush)
 
     stateId := selected ? 3 : 1 ; TIS_SELECTED / TIS_NORMAL
-    if theme {
-        DllCall("uxtheme\DrawThemeBackground",
-            "ptr", theme, "ptr", hdc,
-            "int", 1, "int", stateId,
-            "ptr", paintRect.Ptr, "ptr", 0, "int")
-    } else {
-        brushIndex := selected ? 5 : 15
-        brush := DllCall("user32\GetSysColorBrush",
-            "int", brushIndex, "ptr")
-        DllCall("user32\FillRect", "ptr", hdc,
-            "ptr", paintRect.Ptr, "ptr", brush)
-    }
 
     ; Give the label MORE vertical room than the native item, rather than
     ; subtracting top/bottom padding from it. This is the opposite of v5.7.
@@ -3020,10 +3073,89 @@ FitWorkspaceTabsToHeader() {
     DllCall("user32\SetWindowPos", "ptr", WorkspaceTabs.Hwnd, "ptr", 0,
         "int", 0, "int", 0, "int", controlWidth,
         "int", targetHeight, "uint", 0x0016, "int")
+
+    ; A rectangular HWND still gives the Windows 10 Tab theme ownership of
+    ; the complete bottom extension. It can therefore repaint a white page
+    ; strip to the right of the last real item even though WM_PAINT normally
+    ; fills that area with COLOR_BTNFACE. Restrict the child window itself:
+    ; the full-width region ends at the native item bottom, while the extra
+    ; height exists only underneath actual tab buttons. The system then has
+    ; no drawable surface on which the stray page strip can reappear.
+    if !ApplyWorkspaceTabVisibleRegion(WorkspaceTabs.Hwnd,
+        controlWidth, maxItemBottom > 0 ? maxItemBottom : targetHeight,
+        targetHeight) {
+        ; Allocation failure must not leave a stale region from a previous
+        ; width. Fall back to the fully repainted rectangular header.
+        DllCall("user32\SetWindowRgn", "ptr", WorkspaceTabs.Hwnd,
+            "ptr", 0, "int", 1, "int")
+    }
+}
+
+ApplyWorkspaceTabVisibleRegion(hwnd, controlWidth, headerBottom,
+    targetHeight) {
+    global PANEL_TAB_BOTTOM_MARGIN_PX
+    if !hwnd || controlWidth <= 0 || headerBottom <= 0 || targetHeight <= 0
+        return false
+
+    headerBottom := Min(headerBottom, targetHeight)
+    visibleRegion := DllCall("gdi32\CreateRectRgn",
+        "int", 0, "int", 0,
+        "int", controlWidth, "int", headerBottom, "ptr")
+    if !visibleRegion
+        return false
+
+    regionTransferred := false
+    try {
+        itemCount := DllCall("user32\SendMessageW", "ptr", hwnd,
+            "uint", 0x1304, "ptr", 0, "ptr", 0, "ptr")
+            ; TCM_GETITEMCOUNT
+        itemRect := Buffer(16, 0)
+        Loop itemCount {
+            if !DllCall("user32\SendMessageW", "ptr", hwnd,
+                "uint", 0x130A, "ptr", A_Index - 1,
+                "ptr", itemRect.Ptr, "ptr") ; TCM_GETITEMRECT
+                continue
+
+            ; Selected items expand two pixels horizontally. Reserving the
+            ; same allowance for every item keeps this region independent of
+            ; selection changes; the normal painter leaves its intended
+            ; one-pixel bottom inset in the panel background colour.
+            left := Max(0, NumGet(itemRect, 0, "int") - 2)
+            right := Min(controlWidth,
+                NumGet(itemRect, 8, "int") + 2)
+            itemBottom := Min(targetHeight,
+                NumGet(itemRect, 12, "int")
+                    + Max(0, PANEL_TAB_BOTTOM_MARGIN_PX))
+            if right <= left || itemBottom <= headerBottom
+                continue
+
+            itemRegion := DllCall("gdi32\CreateRectRgn",
+                "int", left, "int", headerBottom,
+                "int", right, "int", itemBottom, "ptr")
+            if !itemRegion
+                continue
+            try DllCall("gdi32\CombineRgn",
+                "ptr", visibleRegion, "ptr", visibleRegion,
+                "ptr", itemRegion, "int", 2, "int") ; RGN_OR
+            finally DllCall("gdi32\DeleteObject", "ptr", itemRegion, "int")
+        }
+
+        ; On success Windows owns visibleRegion. Do not delete it locally.
+        if DllCall("user32\SetWindowRgn", "ptr", hwnd,
+            "ptr", visibleRegion, "int", 1, "int") {
+            regionTransferred := true
+            return true
+        }
+    } finally {
+        if !regionTransferred
+            DllCall("gdi32\DeleteObject", "ptr", visibleRegion, "int")
+    }
+    return false
 }
 
 GetWorkspaceContentTop() {
     global Panel, WorkspaceTabs, PANEL_TOOLBAR_HEIGHT
+    global PANEL_CONTENT_TAB_OVERLAP_PX
     fallback := PanelScale(PANEL_TOOLBAR_HEIGHT)
     if !IsObject(Panel) || !IsObject(WorkspaceTabs)
         || !Panel.Hwnd || !WorkspaceTabs.Hwnd
@@ -3044,9 +3176,11 @@ GetWorkspaceContentTop() {
     if bottomPx <= 0
         return fallback
 
-    ; RECT.bottom is exclusive. One physical pixel of overlap makes the
-    ; Tab3 bottom border and ListView top border occupy the same row.
-    return PanelPixelsToGui(Max(0, bottomPx - 1), Panel.Hwnd)
+    ; RECT.bottom is exclusive. Two physical pixels move the content from
+    ; below the tab-item frame onto it. The one-pixel flat ListView border and
+    ; WorkspaceBottomRule then cover that frame on one shared device row.
+    overlapPx := Max(0, PANEL_CONTENT_TAB_OVERLAP_PX)
+    return PanelPixelsToGui(Max(0, bottomPx - overlapPx), Panel.Hwnd)
 }
 
 LayoutSideToolbar(width, contentTop, contentHeight) {
@@ -3124,18 +3258,46 @@ ResizeFolderDropControls(width) {
     edgeGap := PanelScale(PANEL_SIDE_TOOLBAR_EDGE_GAP)
     contentWidth := width - PanelScale(12) - sideWidth - sideGap - edgeGap
     contentWidth := Max(PanelScale(160), contentWidth)
+    overlayY := 0
+    overlayHeight := PanelScale(30)
+    GetWorkspaceTabOverlayBounds(panelHwnd, &overlayY, &overlayHeight)
     if FolderDropUiMode = "FoldersSplit" && IsObject(FolderDropPinnedZone) {
         splitGap := PanelPixelsToGui(4, panelHwnd)
         leftWidth := Floor((contentWidth - splitGap) * 0.7)
         rightWidth := contentWidth - splitGap - leftWidth
-        FolderDropAddSourceButton.Move(PanelScale(12), 0,
-            leftWidth, PanelScale(30))
+        FolderDropAddSourceButton.Move(PanelScale(12), overlayY,
+            leftWidth, overlayHeight)
         FolderDropPinnedZone.Move(PanelScale(12) + leftWidth + splitGap,
-            0, rightWidth, PanelScale(30))
+            overlayY, rightWidth, overlayHeight)
     } else {
-        FolderDropAddSourceButton.Move(PanelScale(12), 0,
-            contentWidth, PanelScale(30))
+        FolderDropAddSourceButton.Move(PanelScale(12), overlayY,
+            contentWidth, overlayHeight)
     }
+}
+
+GetWorkspaceTabOverlayBounds(panelHwnd, &overlayY, &overlayHeight) {
+    global WorkspaceTabs
+    if !panelHwnd || !IsObject(WorkspaceTabs) || !WorkspaceTabs.Hwnd
+        return false
+
+    rect := Buffer(16, 0)
+    if !DllCall("user32\GetWindowRect", "ptr", WorkspaceTabs.Hwnd,
+        "ptr", rect.Ptr, "int")
+        return false
+
+    ; RECT is two POINTs. Map physical screen pixels into the panel client,
+    ; then convert once to Gui coordinates. MapWindowPoints can validly return
+    ; zero, so its return value is not a failure signal.
+    DllCall("user32\MapWindowPoints", "ptr", 0, "ptr", panelHwnd,
+        "ptr", rect.Ptr, "uint", 2)
+    topPx := NumGet(rect, 4, "int")
+    bottomPx := NumGet(rect, 12, "int")
+    if bottomPx <= topPx
+        return false
+
+    overlayY := PanelPixelsToGui(topPx, panelHwnd)
+    overlayHeight := PanelPixelsToGui(bottomPx - topPx, panelHwnd)
+    return true
 }
 
 ShowFolderDropMode(mode := "Folders", itemCount := 1,
@@ -3171,7 +3333,7 @@ ShowFolderDropMode(mode := "Folders", itemCount := 1,
     FolderDropAddSourceButton.Visible := true
     if IsObject(FolderDropPinnedZone)
         FolderDropPinnedZone.Visible := mode = "FoldersSplit"
-    ; Never hide the native Tab3: the ListView pages and their registered OLE
+    ; Never hide the native Tab: the cached ListViews and their registered OLE
     ; targets depend on it remaining visible. Overlay this sibling above the
     ; navigation controls instead, leaving every content drop target alive.
     DllCall("user32\SetWindowPos", "ptr",

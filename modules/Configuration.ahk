@@ -632,6 +632,7 @@ LoadSettings(*) {
     global ActiveWorkspaceId, ActiveWorkspaceName, ActiveWorkspaceType
     global LastValidWorkspaceId
     global WindowWidth, WindowHeight, RecentFileCount
+    global PANEL_MIN_WIDTH
     global ThumbnailPolicy, CachePathSetting, CacheDir, CacheFilePath, CacheWritable
     global CurrentConfigFingerprint, CurrentScanResult, ScanResultLoaded
     global CurrentScanComplete, CurrentScanRevision
@@ -775,7 +776,7 @@ LoadSettings(*) {
         WindowHeight := 576
     ; Restore a useful, toolbar-driven width instead of reopening at a
     ; previously maximized desktop width. The window remains freely resizable.
-    WindowWidth := Max(660, Min(WindowWidth, 980))
+    WindowWidth := Max(PANEL_MIN_WIDTH, Min(WindowWidth, 980))
     WindowHeight := Max(380, Min(WindowHeight, 2000))
 
     configuredView := StrLower(Trim(IniRead(ConfigPath, "General", "ViewMode", "Thumbnail")))

@@ -1559,6 +1559,7 @@ BuildDisplaySettingsPage(c, tabs) {
 }
 
 BuildInterfaceSettingsPage(c, tabs) {
+    global PANEL_MIN_WIDTH
     tabs.UseTab(4)
     g := c.Gui
     g.AddGroupBox("x200 y29 w818 h145", "界面缩放 · 应用于所有工作区")
@@ -1604,12 +1605,12 @@ BuildInterfaceSettingsPage(c, tabs) {
     g.AddGroupBox("x200 y596 w818 h120", "窗口尺寸 · 主面板")
     g.AddText("x224 y630 w92", "窗口宽度：")
     c.WindowWidth := AddUiEdit(g, "x320 yp-4 w82 Number")
-    g.AddText("x414 yp+4 w100 c666666", "660–980")
+    g.AddText("x414 yp+4 w100 c666666", PANEL_MIN_WIDTH "–980")
     g.AddText("x540 yp w92", "窗口高度：")
     c.WindowHeight := AddUiEdit(g, "x636 yp-4 w82 Number")
     g.AddText("x730 yp+4 w120 c666666", "380–2000")
     g.AddText("x224 y674 w744 c666666",
-        "保存后用于主面板下次显示；窗口仍可手动拖动调整。")
+        "保存后用于主面板下次显示；窄窗会临时隐藏近期栏，拉宽后自动恢复。")
 
     c.UiScale.OnEvent("Change", InterfaceControlChanged.Bind(c))
     c.ThumbnailPolicy.OnEvent("Change", InterfaceControlChanged.Bind(c))
@@ -1631,7 +1632,7 @@ BuildAboutSettingsPage(c, tabs) {
     global APP_VERSION
     tabs.UseTab(7)
     g := c.Gui
-    g.AddGroupBox("x200 y29 w818 h520", "关于 PopDrop")
+    g.AddGroupBox("x200 y29 w818 h500", "关于 PopDrop")
 
     title := g.AddText("x232 y68 w520 h42", "PopDrop")
     title.SetFont("s22 Bold", "Microsoft YaHei UI")
@@ -1657,7 +1658,7 @@ BuildAboutSettingsPage(c, tabs) {
     g.AddText("x235 y389 w180 h24", "打赏")
     g.AddText("x235 y421 w650 h44",
         "如果你喜欢 PopDrop，或者它帮你提高了效率，欢迎把这份好心情也传递给我！")
-    donate := AddUiButton(g, "x235 y477 w130", "打赏链接")
+    donate := AddUiButton(g, "x235 y457 w130", "打赏链接")
     donate.OnEvent("Click", OpenAboutUrl.Bind(
         "https://fs.to/support-popdrop"))
 }
@@ -3856,6 +3857,7 @@ DestroySettingsGui(c) {
 }
 
 ValidateSettingsDraft(c) {
+    global PANEL_MIN_WIDTH
     global MODE_FILES, MODE_LAUNCHER
     global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
@@ -3933,8 +3935,8 @@ ValidateSettingsDraft(c) {
     if !ValueInArray(d.General.UiScaleMode,
         ["100", "125", "150", "175", "200"])
         errors.Push("界面缩放设置无效。")
-    if !IsIntegerText(d.General.WindowWidth, 660, 980)
-        errors.Push("窗口宽度必须是 660–980 的整数。")
+    if !IsIntegerText(d.General.WindowWidth, PANEL_MIN_WIDTH, 980)
+        errors.Push("窗口宽度必须是 " PANEL_MIN_WIDTH "–980 的整数。")
     if !IsIntegerText(d.General.WindowHeight, 380, 2000)
         errors.Push("窗口高度必须是 380–2000 的整数。")
     if !ValueInArray(d.General.ThumbnailPolicy, ["Fast", "Full"])
