@@ -11,7 +11,7 @@ OpenFileViewItem(list, row) {
         return
     PreviewHide("open", true)
     path := ItemPaths[row]
-    modifiers := GetPointerModifierMask()
+    modifiers := ResolveFileViewDoubleClickModifierMask(list, row, path)
     if IsTextWorkspace() && IsTextBlockPath(path) {
         ; Double-click sends the clicked block. Holding Ctrl alone selects
         ; the existing prepend path; other modifier combinations remain inert
@@ -21,7 +21,7 @@ OpenFileViewItem(list, row) {
             ; modified click. The send owns only this row, so commit that state
             ; before HidePanel preserves the hot view for the next summon.
             CollapseListSelectionToRow(list, row, true)
-            PrependTextBlocks([path])
+            QueuePointerPrependTextBlock(list, path)
         } else if modifiers = 0
             QuickSendTextBlocks([path])
         return
@@ -39,6 +39,63 @@ OpenFileViewItem(list, row) {
     if effectiveMode = OPEN_MODE_SINGLE
         return
     OpenItemWithDefaultApplication(path)
+}
+
+QueuePointerPrependTextBlock(list, path) {
+    global PendingPointerPrepend, PointerPrependSerial, ActiveWorkspaceId
+    serial := ++PointerPrependSerial
+    PendingPointerPrepend := {
+        Serial: serial,
+        Path: path,
+        ViewHwnd: list.Hwnd,
+        WorkspaceId: ActiveWorkspaceId,
+        Started: A_TickCount
+    }
+    ; NM_DBLCLK is raised while the second mouse press is still physically
+    ; down. Wait for that release so it cannot land in the external editor;
+    ; Ctrl is allowed to remain held because prepend uses Ctrl+Home/Ctrl+V.
+    SetTimer(CommitPointerPrependTextBlock.Bind(serial), -1)
+    return true
+}
+
+CommitPointerPrependTextBlock(serial) {
+    global PendingPointerPrepend, Panel, FileView, ActiveWorkspaceId
+    if !IsObject(PendingPointerPrepend)
+        || PendingPointerPrepend.Serial != serial
+        return false
+    if !IsObject(Panel) || !Panel.Hwnd
+        || !DllCall("user32\IsWindowVisible", "ptr", Panel.Hwnd, "int") {
+        PendingPointerPrepend := 0
+        return false
+    }
+    if PendingPointerPrepend.WorkspaceId != ActiveWorkspaceId
+        || !IsObject(FileView)
+        || PendingPointerPrepend.ViewHwnd != FileView.Hwnd {
+        PendingPointerPrepend := 0
+        return false
+    }
+    ; Bit 0 is Ctrl and is intentionally allowed. Shift/Alt/Win would change
+    ; the target application's shortcut semantics, so only those keep waiting.
+    if GetKeyState("LButton", "P")
+        || (GetPointerModifierMask() & 0x0E) != 0 {
+        if ElapsedTickMilliseconds(
+            PendingPointerPrepend.Started, A_TickCount) >= 10000 {
+            PendingPointerPrepend := 0
+            SetUserStatus("鼠标或其他修饰键未释放，已取消本次前置发送")
+            return false
+        }
+        ; A short one-shot timer keeps the GUI/message loop responsive. A new
+        ; Ctrl+double-click supersedes this serial instead of being blocked by
+        ; a stale in-progress flag.
+        SetTimer(CommitPointerPrependTextBlock.Bind(serial), -15)
+        return false
+    }
+
+    request := PendingPointerPrepend
+    PendingPointerPrepend := 0
+    if !IsTextWorkspace() || !IsTextBlockPath(request.Path)
+        return false
+    return PrependTextBlocks([request.Path])
 }
 
 OpenRecentItem(list, row) {

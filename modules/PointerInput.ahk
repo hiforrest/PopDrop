@@ -45,7 +45,11 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
         }
     }
     row := HitTestListRow(hwnd, x, y)
-    modifiers := GetPointerModifierMask()
+    ; The mouse message carries the Ctrl/Shift state captured by Windows when
+    ; this exact press was queued. Preserve it for WM_LBUTTONDBLCLK so a quick
+    ; key release before the later ListView notification cannot turn a prepend
+    ; gesture into an ordinary quick send.
+    modifiers := GetPointerModifierMaskForMouseMessage(wParam)
     path := row && pathMap.Has(row) ? pathMap[row] : ""
     selectedSnapshot := []
     mainDragSnapshot := 0
@@ -72,6 +76,7 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
         X: x,
         Y: y,
         DownTick: A_TickCount,
+        DoubleClick: msg = 0x0203,
         Selection: selectedSnapshot,
         Modifiers: modifiers,
         OpenRegion: row && path != "",
@@ -459,6 +464,29 @@ GetPointerModifierMask() {
     if GetKeyState("LWin", "P") || GetKeyState("RWin", "P")
         mask |= 0x08
     return mask
+}
+
+GetPointerModifierMaskForMouseMessage(wParam) {
+    mask := GetPointerModifierMask()
+    if wParam & 0x0008 ; MK_CONTROL
+        mask |= 0x01
+    if wParam & 0x0004 ; MK_SHIFT
+        mask |= 0x02
+    return mask
+}
+
+ResolveFileViewDoubleClickModifierMask(list, row, path) {
+    global FilePointerGesture
+    if IsObject(FilePointerGesture)
+        && FilePointerGesture.Active
+        && FilePointerGesture.DoubleClick
+        && FilePointerGesture.Hwnd = list.Hwnd
+        && FilePointerGesture.Row = row
+        && PathsEqual(FilePointerGesture.Path, path)
+        return FilePointerGesture.Modifiers
+    ; Defensive fallback for a control that emits NM_DBLCLK without exposing
+    ; WM_LBUTTONDBLCLK to the message hook. This preserves prior behavior.
+    return GetPointerModifierMask()
 }
 
 GetDisplayedItemActivationKey(hwnd, row, path) {

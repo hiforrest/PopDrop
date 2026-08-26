@@ -8,7 +8,7 @@
 ;@Ahk2Exe-AddResource assets\pin.ico, 557
 ;@Ahk2Exe-AddResource assets\empty-folder.ico, 558
 ;@Ahk2Exe-AddResource assets\unknown-file.ico, 559
-;@Ahk2Exe-SetVersion 2.0.10.0
+;@Ahk2Exe-SetVersion 2.0.12.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -20,7 +20,7 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global SORT_SMART := "Smart"
-global APP_VERSION := "2.0.10"
+global APP_VERSION := "2.0.12"
 global CONFIG_VERSION := "30"
 global CONTENT_UPDATE_FAST := "Fast"
 global CONTENT_UPDATE_ACCURACY := "Accuracy"
@@ -565,6 +565,11 @@ global PanelInvocationWindow := 0
 ; Active only while contextual file/folder-picker group task links are visible.
 global SaveDialogTaskLinksVisible := false
 global TextBlockSendInProgress := false
+; Ctrl+double-click is completed after the second mouse press is released.
+; Ctrl itself may remain physically held; the serial makes every delayed
+; request replaceable and prevents an expired timer reviving an older send.
+global PendingPointerPrepend := 0
+global PointerPrependSerial := 0
 global CudaTextDragCapture := 0
 
 #Include ConfigDocument.ahk
@@ -635,6 +640,7 @@ InstallPanelHotkeys()
 InitCudaTextIntegration()
 OnMessage(0x004A, QuickPreviewCopyData) ; WM_COPYDATA (Seer)
 OnMessage(0x0201, FileViewLeftButtonDown) ; WM_LBUTTONDOWN
+OnMessage(0x0203, FileViewLeftButtonDown) ; WM_LBUTTONDBLCLK
 OnMessage(0x0200, FileViewMouseMove)      ; WM_MOUSEMOVE
 OnMessage(0x0202, FileViewLeftButtonUp)   ; WM_LBUTTONUP
 OnMessage(0x0204, FileViewRightButtonDown) ; WM_RBUTTONDOWN
