@@ -46,7 +46,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr wchar_t kPartSuffix[] = L".popdrop-part";
-constexpr wchar_t kHelperVersion[] = L"2.0.12";
+constexpr wchar_t kHelperVersion[] = L"2.1.0";
 constexpr DWORD kChunkSize = 1024 * 1024;
 constexpr DWORD kStateThrottleMs = 125;
 constexpr DWORD kAdoptSourceTimeoutMs = 30 * 60 * 1000;
