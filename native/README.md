@@ -82,8 +82,8 @@ powershell -ExecutionPolicy Bypass -File .\native\install-pdfium.ps1
 - `native\bin\x86\PopDropPreview.exe`
 
 源码包中的 Helper 二进制仅作为历史构建产物；当前随包的 x86/x64 Transfer 二进制嵌入版本为
-0.9.0，不能作为 v2.1.6 正式 Helper。发布 v2.1.6 前必须在 Windows SDK / MSVC 环境运行本目录的
-`build.ps1`，确保 `HelperVersion=2.1.6`；PDFium 安装可在构建前后进行。主程序额外接受经确认协议未变化的 2.1.5、2.1.4、2.1.3、2.1.1、2.0 与 1.1.2 Helper，不会把 0.9.0 或其他未知版本当作兼容版本。
+0.9.0，不能作为 v2.1.7 正式 Helper。发布 v2.1.7 前必须在 Windows SDK / MSVC 环境运行本目录的
+`build.ps1`，确保 `HelperVersion=2.1.7`；PDFium 安装可在构建前后进行。主程序额外接受经确认协议未变化的 2.1.6、2.1.5、2.1.4、2.1.3、2.1.1、2.0 与 1.1.2 Helper，不会把 0.9.0 或其他未知版本当作兼容版本。
 
 AHK 源码和编译版都根据自身位数选择 `native\bin\<架构>` 中对应文件；发布包还需将
 同架构的 `pdfium.dll`（若启用）放在该目录。Helper 协议版本写在请求或共享内存头中；

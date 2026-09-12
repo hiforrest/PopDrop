@@ -10,7 +10,7 @@
 
 [下载最新版](https://github.com/hiforrest/PopDrop/releases/latest) · [使用指南](USAGE.md) · [更新日志](CHANGELOG.md)
 
-当前源码版本：**v2.1.6**（配置版本 31）
+当前源码版本：**v2.1.7**（配置版本 31）
 
 </div>
 

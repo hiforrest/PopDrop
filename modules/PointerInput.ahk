@@ -116,27 +116,32 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     ManualSourceReorderActive := false
     ManualSourceReorderPath := ""
     ManualSourceReorderSourceId := ""
+    pressedContext := row && ItemOpenContexts.Has(row)
+        ? ItemOpenContexts[row] : 0
     ; 只根据按下行的显示上下文识别排序手势。相同路径也可能同时出现在
     ; Files 来源中，不能仅凭它存在于 PinnedPaths 就把来源项目当成固定项。
     if isMainView && DragPaths.Length = 1 && row
-        && ItemOpenContexts.Has(row)
-        && ItemOpenContexts[row].Area = "Pinned"
+        && IsObject(pressedContext)
+        && pressedContext.Area = "Pinned"
         && PathsEqual(DragPaths[1], path)
         PinnedReorderPath := DragPaths[1]
     if isMainView && DragPaths.Length = 1 && row
-        && ItemOpenContexts.Has(row)
-        && ItemOpenContexts[row].Area = "Source"
-        && HasProp(ItemOpenContexts[row], "FolderPinned")
-        && ItemOpenContexts[row].FolderPinned
+        && IsObject(pressedContext)
+        && pressedContext.Area = "Source"
+        && HasProp(pressedContext, "SourceId")
+        && HasProp(pressedContext, "FolderPinned")
+        && pressedContext.FolderPinned
         && PathsEqual(DragPaths[1], path) {
         TextSourceReorderPath := path
-        TextSourceReorderSourceId := ItemOpenContexts[row].SourceId
+        TextSourceReorderSourceId := pressedContext.SourceId
     }
     if isMainView && DragPaths.Length = 1 && row
-        && IsManualSourceReorderRow(row, ItemOpenContexts[row].SourceId)
+        && IsObject(pressedContext)
+        && HasProp(pressedContext, "SourceId")
+        && IsManualSourceReorderRow(row, pressedContext.SourceId)
         && PathsEqual(DragPaths[1], path) {
         ManualSourceReorderPath := path
-        ManualSourceReorderSourceId := ItemOpenContexts[row].SourceId
+        ManualSourceReorderSourceId := pressedContext.SourceId
     }
 
     ; 原生 ListView 会在按下已选项时先收敛多选。消息返回后恢复快照，

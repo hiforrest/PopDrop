@@ -636,9 +636,10 @@ CreateTransferId(prefix) {
 
 IsCompatibleTransferHelperVersion(helperVersion) {
     global APP_VERSION
-    ; v2.1.6 fixes an AHK-side startup parse error and keeps the transfer
+    ; v2.1.7 fixes an AHK-side pointer-context error and keeps the transfer
     ; protocol unchanged. Accept prior protocol-compatible release helpers.
-    return helperVersion = APP_VERSION || helperVersion = "2.1.5"
+    return helperVersion = APP_VERSION || helperVersion = "2.1.6"
+        || helperVersion = "2.1.5"
         || helperVersion = "2.1.4"
         || helperVersion = "2.1.3"
         || helperVersion = "2.1.1"
