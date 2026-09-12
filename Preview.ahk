@@ -1482,15 +1482,14 @@ PreviewBuildStatusCanvas(width, height, dpi, line1, line2, animated) {
 
 PreviewDrawFallbackIcon(targetDc, width, dpi) {
     global PreviewSession
-    info := Buffer(A_PtrSize = 8 ? 696 : 692, 0)
-    icon := 0
-    flags := 0x000000100 ; SHGFI_ICON + default large icon
-    if DllCall("shell32\SHGetFileInfoW", "wstr", PreviewSession.Path,
-        "uint", 0, "ptr", info.Ptr, "uint", info.Size, "uint", flags)
-        icon := NumGet(info, 0, "ptr")
+    size := Min(196, Max(96, Floor(width * 0.55)))
+    ; Keep fallback previews on the same high-resolution Shell icon path as
+    ; ListView tiles. The previous SHGFI_ICON call usually returned a 32 px
+    ; HICON which DrawIconEx then magnified to 96-196 px.
+    icon := LoadHighResolutionShellLookupIcon(
+        PreviewSession.Path, 0, false, true, size)
     if !icon
         return
-    size := Min(196, Max(96, Floor(width * 0.55)))
     iconY := DllCall("kernel32\MulDiv", "int", 82, "int", dpi, "int", 96)
     DllCall("user32\DrawIconEx", "ptr", targetDc,
         "int", Floor((width - size) / 2), "int", iconY,

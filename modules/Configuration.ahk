@@ -1283,7 +1283,7 @@ MigrateOpenFileModeConfig(folders) {
 
 ValidateConfig(workspaceType := "Files") {
     global ConfigPath, ConfigErrors, FolderSettings
-    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_SMART
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_SMART, SORT_MANUAL
     global MODE_FILES, MODE_LAUNCHER
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
@@ -1490,6 +1490,8 @@ ValidateConfig(workspaceType := "Files") {
                     else if rawSortV = StrLower(SORT_SMART)
                         && ParseWorkspaceType(workspaceType) = WORKSPACE_TYPE_TEXT
                         folderSortMode := SORT_SMART
+                    else if rawSortV = StrLower(SORT_MANUAL)
+                        folderSortMode := SORT_MANUAL
                     else if rawSortV = "inherit"
                         folderSortMode := tempGlobalSortMode
                     else
@@ -1584,7 +1586,7 @@ ValidateConfig(workspaceType := "Files") {
             folderDisplayScope := SCOPE_RECURSIVE_FILES
             folderFilter := {Mode: "Include", Extensions: [".md", ".txt"]}
             if !ValueInArray(folderSortMode,
-                [SORT_SMART, SORT_MODIFIED_DESC, SORT_NAME_ASC])
+                [SORT_SMART, SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_MANUAL])
                 folderSortMode := SORT_SMART
             folderStripOrderPrefix := 0
             folderHideExtensions := 1
@@ -1600,6 +1602,8 @@ ValidateConfig(workspaceType := "Files") {
             MaxFilesPerFolder: folderMax,
             MaxFilesPerFolderInherited: folderMaxInherited,
             SortMode: folderSortMode,
+            ManualOrder: LoadConfiguredSourcePaths(
+                "SourceManualOrder:" sourceId, f.Path),
             Filter: folderFilter,
             StripOrderPrefix: folderStripOrderPrefix,
             HideExtensions: folderHideExtensions,

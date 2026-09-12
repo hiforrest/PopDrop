@@ -319,12 +319,12 @@ Path=%USERPROFILE%\Downloads
 项。扫描异常退出或超过 120 秒会自动重试一次；仍失败时可点击“刷新”强制替换旧任务。
 
 对应配置键为 `ContentUpdateMode=Fast` 或 `ContentUpdateMode=Accuracy`；建议通过设置页面修改。
-| `ThumbnailPolicy` | `Full`（默认）首帧先读取 Shell 缓存或显示类型图标，再逐项增强未缓存缩略图；`Fast` 只使用已有缓存和类型图标。 |
+| `ThumbnailPolicy` | `Full`（默认）首帧先显示高分辨率 Shell 图标（快捷方式/EXE 使用逐文件真实图标），再逐项增强未缓存缩略图；`Fast` 不现场生成内容缩略图，但仍保留清晰的真实文件图标。 |
 | `WindowMode` | 窗口显示模式：`temporary`（默认，置顶，切换到其他窗口后自动隐藏）、`always_on_top`（始终置顶）、`normal`（普通窗口，不置顶）。 |
 | `OpenFileMode` | 普通文件的鼠标激活方式：`DoubleClick`（默认）或 `SingleClick`。缺失、空值或未知值都回退为双击。 |
 | `DefaultContextMenu` | 默认右键菜单：`PopDrop`（默认、推荐）或 `System`。缺失、空值或未知值都安全回退为 PopDrop 快捷菜单。 |
 | `EscapeHidesPanel` | 按 Esc 时隐藏面板：`1`=隐藏（默认）| `0`=不隐藏。 |
-| `SortMode` | 排序模式：`ModifiedDesc`（修改时间从新到旧，默认）、`NameAsc`（文件名自然升序）。支持文件夹级覆盖。 |
+| `SortMode` | 排序模式：`ModifiedDesc`（修改时间从新到旧，默认）、`NameAsc`（文件名自然升序）或 Files/Launcher 来源可用的 `Manual`（面板内拖拽排序）。支持文件夹级覆盖。 |
 | 快捷键语法 | AutoHotkey v2 格式：`^`=Ctrl，`!`=Alt，`+`=Shift，`#`=Win。例如 `^!Space`=Ctrl+Alt+Space。 |
 
 ### 文件内容预览（v0.10+）

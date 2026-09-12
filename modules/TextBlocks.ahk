@@ -739,7 +739,7 @@ ShouldHideTextSourceForSearch(textWorkspace, query, state, fileCount) {
 }
 
 PrepareTextBlockFiles(files, folder, maxCount := 0) {
-    global TextBlockSearchQuery
+    global TextBlockSearchQuery, SORT_MANUAL
     pinned := []
     ordinary := []
     paths := []
@@ -764,7 +764,10 @@ PrepareTextBlockFiles(files, folder, maxCount := 0) {
     }
     for _, file in matchedByKey
         ordinary.Push(file)
-    SortTextBlockFiles(&ordinary, folder.SortMode)
+    if folder.SortMode = SORT_MANUAL
+        ApplyManualFileOrder(&ordinary, folder.ManualOrder)
+    else
+        SortTextBlockFiles(&ordinary, folder.SortMode)
     if TextBlockSearchQuery = "" && maxCount > 0
         while ordinary.Length > maxCount
             ordinary.Pop()

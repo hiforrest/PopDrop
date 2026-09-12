@@ -62,6 +62,7 @@ Cleanup(*) {
     for callbackPtr in DropTargetCallbacks
         CallbackFree(callbackPtr)
     CleanupWorkspaceFileViews()
+    CleanupShellSystemImageLists()
     if PanelIconHandle
         DllCall("user32\DestroyIcon", "ptr", PanelIconHandle)
     if MainInstanceMutex
@@ -84,4 +85,13 @@ CleanupWorkspaceFileViews() {
     WorkspaceFileViewStates.Clear()
     FileViewGroupMetricBases.Clear()
     ThumbnailImageList := 0
+}
+
+CleanupShellSystemImageLists() {
+    global ShellSystemImageLists
+    for _, imageList in ShellSystemImageLists {
+        if imageList
+            try ObjRelease(imageList)
+    }
+    ShellSystemImageLists.Clear()
 }

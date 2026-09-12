@@ -520,6 +520,8 @@ CloneSettingsSource(source) {
             HasProp(source, "MaxFilesPerFolderInherited")
                 ? source.MaxFilesPerFolderInherited : false,
         SortMode: source.SortMode,
+        ManualOrder: HasProp(source, "ManualOrder")
+            ? source.ManualOrder.Clone() : [],
         Filter: {
             Mode: source.Filter.Mode,
             Extensions: source.Filter.Extensions.Clone()
@@ -678,7 +680,8 @@ BuildSourcesSettingsPage(c, tabs) {
     c.SourceMax := AddUiEdit(g, "x544 yp w72 Number")
     g.AddText("x630 yp+4 w70", "排序：")
     c.SourceSort := AddUiDropDownList(g, "x700 yp-4 w220",
-        ["修改时间（最新在前）", "名称（升序）", "智能优先"])
+        ["修改时间（最新在前）", "名称（升序）", "智能优先",
+         "手动排序（拖拽调整）"])
     g.AddText("x220 y527 w100", "排除噪音文件：")
     c.SourceNoiseMode := AddUiDropDownList(g, "x324 yp-4 w250",
         ["使用共享默认值", "启用", "禁用"])
@@ -1869,7 +1872,7 @@ WindowModeToIndex(mode) {
 }
 
 LoadDisplayControls(c) {
-    global SORT_MODIFIED_DESC
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_MANUAL
     global CurrentScanResult
     c.Loading := true
     try {
@@ -2160,13 +2163,6 @@ GetSourceDraftStatus(source, allSources) {
             && PathsEqual(source.Path, other.Path)
             return "配置错误"
     }
-    for other in allSources {
-        if other.SourceId = source.SourceId
-            continue
-        if IsSameOrDescendantPath(source.Path, other.Path)
-            || IsSameOrDescendantPath(other.Path, source.Path)
-            return DirExist(source.Path) ? "路径重叠" : "不可用/重叠"
-    }
     return DirExist(source.Path) ? "正常" : "路径不可用"
 }
 
@@ -2216,7 +2212,8 @@ LoadSelectedSourceToControls(c) {
             : s.MaxFilesPerFolder = 0 ? 3 : 2)
         c.SourceMax.Value := s.MaxFilesPerFolder
         c.SourceSort.Choose(s.SortMode = SORT_MODIFIED_DESC ? 1
-            : s.SortMode = SORT_NAME_ASC ? 2 : 3)
+            : s.SortMode = SORT_NAME_ASC ? 2
+            : s.SortMode = SORT_MANUAL ? 4 : 3)
         c.SourceNoiseMode.Choose(s.NoiseFilterMode = NOISE_FILTER_ENABLED ? 2
             : s.NoiseFilterMode = NOISE_FILTER_DISABLED ? 3 : 1)
         c.SourceNoiseRuleCount.Text := s.SourceCustomPatternTexts.Length " 条附加规则"
@@ -2323,12 +2320,12 @@ ApplyFilesSourceDefaults(c, source) {
 
 ApplyTextBlockSourceDefaults(source, preserveSort := false) {
     global MODE_FILES, SCOPE_RECURSIVE_FILES, SORT_SMART
-    global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_MANUAL
     source.Mode := MODE_FILES
     source.IncludeSubfolders := true
     source.DisplayScope := SCOPE_RECURSIVE_FILES
     if !preserveSort || !ValueInArray(source.SortMode,
-        [SORT_SMART, SORT_MODIFIED_DESC, SORT_NAME_ASC])
+        [SORT_SMART, SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_MANUAL])
         source.SortMode := SORT_SMART
     source.Filter := {Mode: "Include", Extensions: [".md", ".txt"]}
     source.StripOrderPrefix := 0
@@ -2340,7 +2337,7 @@ CommitCurrentSourceControlsToDraft(c) {
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     global SOURCE_OPEN_MODE_INHERIT, OPEN_MODE_SINGLE, OPEN_MODE_DOUBLE
-    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_SMART
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_SMART, SORT_MANUAL
     global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
     global WORKSPACE_TYPE_TEXT
     if c.Loading
@@ -2364,7 +2361,8 @@ CommitCurrentSourceControlsToDraft(c) {
         ? c.Draft.General.MaxFilesPerFolder
         : c.SourceMaxMode.Value = 3 ? 0 : Trim(c.SourceMax.Value)
     s.SortMode := c.SourceSort.Value = 2 ? SORT_NAME_ASC
-        : c.SourceSort.Value = 3 ? SORT_SMART : SORT_MODIFIED_DESC
+        : c.SourceSort.Value = 3 ? SORT_SMART
+        : c.SourceSort.Value = 4 ? SORT_MANUAL : SORT_MODIFIED_DESC
     noiseModes := [NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED]
     s.NoiseFilterMode := noiseModes[Max(1, c.SourceNoiseMode.Value)]
     workspace := FindDraftWorkspace(c)
@@ -2400,14 +2398,6 @@ AddSourceToDraft(c, *) {
             return
         }
     }
-    overlaps := FindSourceOverlap(c.Draft.Sources, path)
-    if overlaps != "" {
-        answer := SettingsMessage(c,
-            "该来源与“" overlaps "”存在父子路径重叠。仍要添加吗？",
-            "来源路径重叠", "YesNo Icon!")
-        if answer != "Yes"
-            return
-    }
     name := MakeUniqueSourceName(DefaultSourceNameForPath(path),
         c.Draft.Sources)
     id := NewStableId("source")
@@ -2436,6 +2426,7 @@ CreateDefaultSourceDraft(name, path, id, general) {
         MaxFilesPerFolder: general.MaxFilesPerFolder,
         MaxFilesPerFolderInherited: true,
         SortMode: SORT_MODIFIED_DESC,
+        ManualOrder: [],
         Filter: {
             Mode: general.DefaultFilter.Mode,
             Extensions: general.DefaultFilter.Extensions.Clone()
@@ -2502,17 +2493,6 @@ MakeUniqueDraftSourceId(sources, base) {
             return id
         id := base "-" suffix++
     }
-}
-
-FindSourceOverlap(sources, path, ignoredId := "") {
-    for source in sources {
-        if source.SourceId = ignoredId
-            continue
-        if IsSameOrDescendantPath(path, source.Path)
-            || IsSameOrDescendantPath(source.Path, path)
-            return source.Name
-    }
-    return ""
 }
 
 RemoveSourceFromDraft(c, *) {
@@ -3862,7 +3842,7 @@ ValidateSettingsDraft(c) {
     global OPEN_MODE_DOUBLE, OPEN_MODE_SINGLE, SOURCE_OPEN_MODE_INHERIT
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
-    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_SMART
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_SMART, SORT_MANUAL
     global WORKSPACE_TYPE_FILES, WORKSPACE_TYPE_TEXT
     global NOISE_FILTER_INHERIT, NOISE_FILTER_ENABLED, NOISE_FILTER_DISABLED
     global CONTEXT_MENU_POPDROP, CONTEXT_MENU_SYSTEM
@@ -4046,8 +4026,8 @@ ValidateSettingsDraft(c) {
             [FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT])
             errors.Push("来源“" s.Name "”的文件夹排序设置无效。")
         allowedSorts := ParseWorkspaceType(workspace.Type) = WORKSPACE_TYPE_TEXT
-            ? [SORT_SMART, SORT_MODIFIED_DESC, SORT_NAME_ASC]
-            : [SORT_MODIFIED_DESC, SORT_NAME_ASC]
+            ? [SORT_SMART, SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_MANUAL]
+            : [SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_MANUAL]
         if !ValueInArray(s.SortMode, allowedSorts)
             errors.Push("来源“" s.Name "”的排序设置无效。")
         if !(HasProp(s, "MaxFilesPerFolderInherited")
@@ -4069,18 +4049,6 @@ ValidateSettingsDraft(c) {
         for item in sourcePatterns.Errors
             errors.Push(item)
         }
-        Loop workspace.Sources.Length {
-        left := workspace.Sources[A_Index]
-        index := A_Index + 1
-        while index <= workspace.Sources.Length {
-            right := workspace.Sources[index]
-            if IsSameOrDescendantPath(left.Path, right.Path)
-                || IsSameOrDescendantPath(right.Path, left.Path)
-                warnings.Push("来源“" left.Name "”与“" right.Name
-                    "”存在父子路径重叠。")
-            index += 1
-        }
-    }
     }
     if !activeFound
         errors.Push("当前工作区不在工作区列表中。")
@@ -4218,7 +4186,7 @@ SaveSettingsDraftCore(c, closeAfter) {
         return false
     }
     if validation.Warnings.Length {
-        message := "以下项目当前不可用或存在重叠：`n`n"
+        message := "以下项目当前不可用：`n`n"
         for index, item in validation.Warnings
             message .= index ". " item "`n"
         message .= "`n仍要保存吗？"
@@ -4491,6 +4459,9 @@ WriteSettingsDraft(draft, tempPath) {
             WriteSourcePathSection(doc,
                 "SourceAllow:" source.SourceId,
                 source.Path, source.AllowedExcludedPaths)
+            WriteSourcePathSection(doc,
+                "SourceManualOrder:" source.SourceId,
+                source.Path, source.ManualOrder)
         }
         doc.ReplaceKnownKeys("Workspace:" workspace.Id, [
             {Key: "Name", Value: workspace.Name},
@@ -4518,6 +4489,7 @@ WriteSettingsDraft(draft, tempPath) {
             doc.DeleteSection("SourceExclude:" sourceId)
             doc.DeleteSection("SourceAllow:" sourceId)
             doc.DeleteSection("SourceIgnore:" sourceId)
+            doc.DeleteSection("SourceManualOrder:" sourceId)
         }
     }
 

@@ -138,6 +138,7 @@ PopulatePanel() {
                 FolderTimeMode: FOLDER_TIME_MODIFIED,
                 MaxFilesPerFolder: MaxFilesPerFolder,
                 SortMode: SortMode,
+                ManualOrder: [],
                 Filter: {Mode: "All", Extensions: []},
                 StripOrderPrefix: 0,
                 HideExtensions: 0,
@@ -1287,16 +1288,116 @@ CleanupThumbnailCacheWorker() {
     ThumbnailCacheWorkerJob := 0
 }
 
+ShellIconNeedsPathIdentity(extension) {
+    ; These formats can carry an item-specific icon. Querying only a synthetic
+    ; extension (PopDrop.lnk / PopDrop.exe) turns shortcuts and executables into
+    ; the generic blank-page/application glyph instead of the icon Explorer uses.
+    return extension = "lnk" || extension = "url" || extension = "exe"
+        || extension = "ico" || extension = "icl" || extension = "cpl"
+        || extension = "scr"
+}
+
+ShellSystemImageListType(edge) {
+    ; SHIL_SMALL=1 (16), SHIL_LARGE=0 (32), SHIL_EXTRALARGE=2 (48),
+    ; SHIL_JUMBO=4 (256). Prefer a source at least as large as the ListView
+    ; ImageList so ImageList_ReplaceIcon scales down instead of magnifying a
+    ; 32 px HICON into a 96/128/160 px fuzzy tile.
+    if edge <= 16
+        return 1
+    if edge <= 32
+        return 0
+    if edge <= 48
+        return 2
+    return 4
+}
+
+GetShellSystemImageList(listType) {
+    global ShellSystemImageLists
+    if ShellSystemImageLists.Has(listType)
+        return ShellSystemImageLists[listType]
+
+    imageList := 0
+    iidImageList := GuidBuffer("{46EB5926-582E-4017-9FDF-E8998DAA0950}")
+    try hr := DllCall("shell32\SHGetImageList", "int", listType,
+        "ptr", iidImageList.Ptr, "ptr*", &imageList, "int")
+    catch
+        return 0
+    if hr != 0 || !imageList
+        return 0
+    ShellSystemImageLists[listType] := imageList
+    return imageList
+}
+
+GetHighResolutionShellIcon(systemIndex, overlayIndex, edge) {
+    imageList := GetShellSystemImageList(ShellSystemImageListType(edge))
+    if !imageList
+        return 0
+
+    icon := 0
+    drawFlags := 0x1 ; ILD_TRANSPARENT
+    if overlayIndex > 0 && overlayIndex <= 15
+        drawFlags |= overlayIndex << 8 ; INDEXTOOVERLAYMASK
+    try hr := ComCall(10, imageList, "int", systemIndex,
+        "uint", drawFlags, "ptr*", &icon, "int") ; IImageList::GetIcon
+    catch
+        return 0
+    return hr = 0 ? icon : 0
+}
+
+LoadLegacyShellIcon(lookupPath, attributes, useFileAttributes, addOverlays) {
+    infoSize := A_PtrSize = 8 ? 696 : 692
+    info := Buffer(infoSize, 0)
+    flags := 0x100 ; SHGFI_ICON | SHGFI_LARGEICON
+    if useFileAttributes
+        flags |= 0x10 ; SHGFI_USEFILEATTRIBUTES
+    if addOverlays
+        flags |= 0x20 ; SHGFI_ADDOVERLAYS
+    if !DllCall("shell32\SHGetFileInfoW", "wstr", lookupPath,
+        "uint", attributes, "ptr", info.Ptr, "uint", infoSize,
+        "uint", flags, "uptr")
+        return 0
+    return NumGet(info, 0, "ptr")
+}
+
+LoadHighResolutionShellLookupIcon(lookupPath, attributes,
+    useFileAttributes, addOverlays, edge) {
+    infoSize := A_PtrSize = 8 ? 696 : 692
+    info := Buffer(infoSize, 0)
+    flags := 0x4000 ; SHGFI_SYSICONINDEX
+    if useFileAttributes
+        flags |= 0x10 ; SHGFI_USEFILEATTRIBUTES
+    if addOverlays
+        flags |= 0x20 | 0x40 ; SHGFI_ADDOVERLAYS | SHGFI_OVERLAYINDEX
+
+    icon := 0
+    if DllCall("shell32\SHGetFileInfoW", "wstr", lookupPath,
+        "uint", attributes, "ptr", info.Ptr, "uint", infoSize,
+        "uint", flags, "uptr") {
+        rawIndex := NumGet(info, A_PtrSize, "uint")
+        systemIndex := rawIndex & 0x00FFFFFF
+        overlayIndex := addOverlays ? ((rawIndex >> 24) & 0xFF) : 0
+        icon := GetHighResolutionShellIcon(systemIndex, overlayIndex, edge)
+    }
+    if icon
+        return icon
+    return LoadLegacyShellIcon(
+        lookupPath, attributes, useFileAttributes, addOverlays)
+}
+
 AddShellFileIcon(path, isDirectory := -1) {
-    global ThumbnailImageList, ThumbnailIconCache
+    global ThumbnailImageList, ThumbnailImageListEdge, ThumbnailIconCache
     if isDirectory < 0
         isDirectory := !!DirExist(path)
     SplitPath(path, , , &extension)
     extension := StrLower(extension)
-    ; Every file uses a type icon on the synchronous path. Executable,
-    ; shortcut and custom file icons are supplied by the thumbnail worker.
-    pathSpecific := isDirectory
-    iconKey := "__popdrop-shell-icon__|"
+
+    ; Ordinary documents still share one cheap association icon per extension.
+    ; Shell-identity items are different: .lnk/.url may name a custom IconFile
+    ; and every .exe/.ico can have its own artwork, so the actual path must be
+    ; queried. This asks only for the Shell icon index; it does not invoke the
+    ; potentially blocking thumbnail pipeline.
+    pathSpecific := isDirectory || ShellIconNeedsPathIdentity(extension)
+    iconKey := "__popdrop-shell-icon-v2__|"
         . (isDirectory ? "folder|" PathKey(path)
             : pathSpecific ? "path|" PathKey(path)
             : "type|" extension)
@@ -1305,25 +1406,23 @@ AddShellFileIcon(path, isDirectory := -1) {
         if IsObject(cached) && cached.Index
             return cached.Index
     }
-    infoSize := A_PtrSize = 8 ? 696 : 692
-    info := Buffer(infoSize, 0)
+
     lookupPath := path
     attributes := 0
-    flags := 0x100 ; SHGFI_ICON | SHGFI_LARGEICON
+    useFileAttributes := false
     if !pathSpecific {
         lookupPath := "PopDrop." (extension != "" ? extension : "file")
         attributes := 0x80 ; FILE_ATTRIBUTE_NORMAL
-        flags |= 0x10 ; SHGFI_USEFILEATTRIBUTES
+        useFileAttributes := true
     }
-    if !DllCall("shell32\SHGetFileInfoW", "wstr", lookupPath,
-        "uint", attributes,
-        "ptr", info.Ptr, "uint", infoSize, "uint", flags, "uptr")
-        return 0
-    icon := NumGet(info, 0, "ptr")
+
+    icon := LoadHighResolutionShellLookupIcon(lookupPath, attributes,
+        useFileAttributes, pathSpecific, ThumbnailImageListEdge)
     if !icon
         return 0
-    imageIndex := DllCall("comctl32\ImageList_ReplaceIcon", "ptr", ThumbnailImageList,
-        "int", -1, "ptr", icon, "int")
+
+    imageIndex := DllCall("comctl32\ImageList_ReplaceIcon",
+        "ptr", ThumbnailImageList, "int", -1, "ptr", icon, "int")
     DllCall("user32\DestroyIcon", "ptr", icon)
     result := imageIndex >= 0 ? imageIndex + 1 : 0
     if result
@@ -1457,9 +1556,10 @@ IsPotentiallyRemotePath(path) {
 
 GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode,
     globalExcludedNames := [], excludedPaths := [], allowedPaths := [],
-    noiseFilter := 0, pinnedSet := 0, sourceName := "", diagnostics := 0) {
+    noiseFilter := 0, pinnedSet := 0, sourceName := "", diagnostics := 0,
+    manualOrder := []) {
     global SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
-    global FOLDER_TIME_LATEST_CONTENT
+    global FOLDER_TIME_LATEST_CONTENT, SORT_MANUAL
     files := []
     stack := [{Path: folderPath, Root: true}]
     while stack.Length {
@@ -1486,7 +1586,8 @@ GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode
                     }
                     AddSortedCandidate(&files, {Path: entry.Path,
                         Name: entry.Name, Modified: modified,
-                        IsDirectory: true, TimeKind: timeKind}, limit, sortMode)
+                        IsDirectory: true, TimeKind: timeKind},
+                        sortMode = SORT_MANUAL ? 0 : limit, sortMode)
                 }
                 if displayScope = SCOPE_RECURSIVE_FILES && !isReparsePoint
                     stack.Push({Path: entry.Path, Root: false})
@@ -1505,12 +1606,45 @@ GetSortedItems(folderPath, limit, displayScope, sortMode, filter, folderTimeMode
                 continue
             AddSortedCandidate(&files, {Path: entry.Path, Name: entry.Name,
                 Modified: entry.Modified, IsDirectory: false,
-                TimeKind: "File"}, limit, sortMode)
+                TimeKind: "File"}, sortMode = SORT_MANUAL ? 0 : limit, sortMode)
         }
     }
-    if limit = 0
+    if sortMode = SORT_MANUAL {
+        ApplyManualFileOrder(&files, manualOrder)
+        if limit > 0
+            while files.Length > limit
+                files.Pop()
+    } else if limit = 0
         SortFileArray(&files, sortMode)
     return files
+}
+
+ApplyManualFileOrder(&files, manualOrder) {
+    global SORT_NAME_ASC
+    if files.Length <= 1
+        return
+    ; Unknown/new entries are deterministic and follow the explicitly ordered
+    ; prefix. This makes first use predictable without rewriting the config.
+    SortFileArray(&files, SORT_NAME_ASC)
+    byPath := Map()
+    for file in files
+        byPath[PathKey(file.Path)] := file
+    ordered := []
+    for path in manualOrder {
+        key := PathKey(path)
+        if byPath.Has(key) {
+            ordered.Push(byPath[key])
+            byPath.Delete(key)
+        }
+    }
+    for file in files {
+        key := PathKey(file.Path)
+        if byPath.Has(key) {
+            ordered.Push(file)
+            byPath.Delete(key)
+        }
+    }
+    files := ordered
 }
 
 AddSortedCandidate(&files, candidate, limit, sortMode) {
@@ -1725,7 +1859,7 @@ StrCmpLogicalW(a, b) {
 }
 
 CompareFiles(a, b, sortMode) {
-    global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_MANUAL
 
     if sortMode = SORT_NAME_ASC {
         cmp := StrCmpLogicalW(a.Name, b.Name)
@@ -1844,7 +1978,8 @@ RunScanWorkerMode() {
                 folder.Filter, folder.FolderTimeMode,
                 request.GlobalExcludedNames, folder.ExcludedPaths,
                 folder.AllowedExcludedPaths, folder.NoiseFilter,
-                pinnedSet, folder.Name, diagnostics) : []
+                pinnedSet, folder.Name, diagnostics,
+                folder.ManualOrder) : []
             partial := {Version: 5, Generation: request.Generation,
                 Fingerprint: request.Fingerprint,
                 WorkspaceId: request.WorkspaceId, SourceIndex: index,
@@ -1881,11 +2016,11 @@ RunScanWorkerMode() {
 }
 
 ReadWorkerRequest(path) {
-    global SORT_MODIFIED_DESC, SORT_NAME_ASC
+    global SORT_MODIFIED_DESC, SORT_NAME_ASC, SORT_MANUAL
     global SCOPE_FILES_ONLY, SCOPE_FILES_AND_FOLDERS, SCOPE_RECURSIVE_FILES
     global FOLDER_TIME_MODIFIED, FOLDER_TIME_LATEST_CONTENT
     version := Integer(IniRead(path, "Meta", "Version", "0"))
-    if version != 6
+    if version != 7
         throw Error("unsupported request version")
     request := {Generation: IniRead(path, "Meta", "Generation", ""),
         Fingerprint: IniRead(path, "Meta", "Fingerprint", ""),
@@ -1932,6 +2067,18 @@ ReadWorkerRequest(path) {
             folderSort := SORT_MODIFIED_DESC
         else if rawSort = StrLower(SORT_NAME_ASC)
             folderSort := SORT_NAME_ASC
+        else if rawSort = StrLower(SORT_MANUAL)
+            folderSort := SORT_MANUAL
+
+        manualOrder := []
+        manualCount := Integer(
+            IniRead(path, section, "ManualOrderCount", "0"))
+        Loop manualCount {
+            manualPath := NormalizePath(IniRead(path, section,
+                "ManualOrder" Format("{:03}", A_Index), ""))
+            if manualPath != "" && !ArrayContainsPath(manualOrder, manualPath)
+                manualOrder.Push(manualPath)
+        }
 
         rawScope := StrLower(Trim(
             IniRead(path, section, "DisplayScope", "")))
@@ -1995,6 +2142,7 @@ ReadWorkerRequest(path) {
             FolderTimeMode: folderTimeMode,
             MaxFilesPerFolder: folderMax,
             SortMode: folderSort,
+            ManualOrder: manualOrder,
             Filter: filter,
             NoiseFilter: noiseFilter,
             ExcludedPaths: excludedPaths,
@@ -2136,6 +2284,7 @@ ComputeConfigFingerprint(settings, workspaceIdOverride := "",
         raw .= "|scope=" folder.DisplayScope
         raw .= "|foldertime=" folder.FolderTimeMode
         raw .= "|max=" folder.MaxFilesPerFolder "|sort=" folder.SortMode
+        raw .= "|manual=" JoinNormalizedPaths(folder.ManualOrder)
         raw .= "|filter=" folder.Filter.Mode
         raw .= "|ext=" JoinArray(folder.Filter.Extensions, ",")
         raw .= "|excludedPaths=" JoinNormalizedPaths(folder.ExcludedPaths)
@@ -2317,7 +2466,7 @@ WriteScanRequest(path, generation, sourceKeys := 0, includeRecent := false,
     workspaceType := IsObject(context) ? context.WorkspaceType : ActiveWorkspaceType
     pinnedPaths := IsObject(context) ? context.PinnedPaths : PinnedPaths
     try FileDelete(path)
-    IniWrite("6", path, "Meta", "Version")
+    IniWrite("7", path, "Meta", "Version")
     IniWrite(generation, path, "Meta", "Generation")
     IniWrite(fingerprint, path, "Meta", "Fingerprint")
     IniWrite(workspaceId, path, "Meta", "WorkspaceId")
@@ -2348,6 +2497,10 @@ WriteScanRequest(path, generation, sourceKeys := 0, includeRecent := false,
             ? 0 : folder.MaxFilesPerFolder,
             path, section, "MaxFilesPerFolder")
         IniWrite(folder.SortMode, path, section, "SortMode")
+        IniWrite(folder.ManualOrder.Length, path, section, "ManualOrderCount")
+        for manualIndex, manualPath in folder.ManualOrder
+            IniWrite(manualPath, path, section,
+                "ManualOrder" Format("{:03}", manualIndex))
         IniWrite(folder.Filter.Mode, path, section, "FilterMode")
         IniWrite(JoinArray(folder.Filter.Extensions, ","), path, section, "FileExtensions")
         noise := folder.NoiseFilter

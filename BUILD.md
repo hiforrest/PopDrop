@@ -1,7 +1,7 @@
 # PopDrop 构建与验证
 
 PopDrop 主程序使用 AutoHotkey v2；外部内容投放和文件预览 helper 使用 Windows C++。
-当前源码版本为 v2.1.3，配置版本为 30。
+当前源码版本为 v2.1.6，配置版本为 31。
 
 ## 环境
 

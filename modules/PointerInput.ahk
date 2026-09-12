@@ -7,6 +7,8 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     global PinnedReorderActive, PinnedReorderPath
     global TextSourceReorderActive, TextSourceReorderPath
     global TextSourceReorderSourceId
+    global ManualSourceReorderActive, ManualSourceReorderPath
+    global ManualSourceReorderSourceId
     global FilePointerGesture, FilePointerGestureSerial
     global FolderGroupHeaderGesture
     global OPEN_MODE_SINGLE
@@ -111,6 +113,9 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
     TextSourceReorderActive := false
     TextSourceReorderPath := ""
     TextSourceReorderSourceId := ""
+    ManualSourceReorderActive := false
+    ManualSourceReorderPath := ""
+    ManualSourceReorderSourceId := ""
     ; 只根据按下行的显示上下文识别排序手势。相同路径也可能同时出现在
     ; Files 来源中，不能仅凭它存在于 PinnedPaths 就把来源项目当成固定项。
     if isMainView && DragPaths.Length = 1 && row
@@ -126,6 +131,12 @@ FileViewLeftButtonDown(wParam, lParam, msg, hwnd) {
         && PathsEqual(DragPaths[1], path) {
         TextSourceReorderPath := path
         TextSourceReorderSourceId := ItemOpenContexts[row].SourceId
+    }
+    if isMainView && DragPaths.Length = 1 && row
+        && IsManualSourceReorderRow(row, ItemOpenContexts[row].SourceId)
+        && PathsEqual(DragPaths[1], path) {
+        ManualSourceReorderPath := path
+        ManualSourceReorderSourceId := ItemOpenContexts[row].SourceId
     }
 
     ; 原生 ListView 会在按下已选项时先收敛多选。消息返回后恢复快照，
@@ -146,6 +157,8 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
     global PinnedReorderActive, PinnedReorderPath
     global TextSourceReorderActive, TextSourceReorderPath
     global TextSourceReorderSourceId
+    global ManualSourceReorderActive, ManualSourceReorderPath
+    global ManualSourceReorderSourceId
     global FilePointerGesture
 
     PreviewHandleMouseMove(hwnd, lParam)
@@ -180,6 +193,28 @@ FileViewMouseMove(wParam, lParam, msg, hwnd) {
         ? ResolveDropTarget(screenPoint.X, screenPoint.Y) : 0
     if TextSourceReorderPath != ""
         reorderDropTarget := ResolveDropTarget(screenPoint.X, screenPoint.Y)
+    if ManualSourceReorderPath != ""
+        reorderDropTarget := ResolveDropTarget(screenPoint.X, screenPoint.Y)
+    if ManualSourceReorderPath != ""
+        && IsObject(reorderDropTarget)
+        && HasProp(reorderDropTarget, "SourceId")
+        && StrLower(reorderDropTarget.SourceId)
+            = StrLower(ManualSourceReorderSourceId) {
+        if !ManualSourceReorderActive {
+            ManualSourceReorderActive := true
+            PreviewSuppress("manual-source-reorder", false)
+            DllCall("user32\SetCapture", "ptr", hwnd, "ptr")
+            StatusKind := "user"
+            StatusText.Text := "在当前来源内拖到另一个项目可调整顺序。"
+        }
+        return
+    }
+    if ManualSourceReorderActive {
+        ManualSourceReorderActive := false
+        DllCall("user32\ReleaseCapture")
+    }
+    ManualSourceReorderPath := ""
+    ManualSourceReorderSourceId := ""
     if TextSourceReorderPath != ""
         && IsObject(reorderDropTarget)
         && reorderDropTarget.Type = "TextSource"
@@ -257,12 +292,15 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
     global FileView, ItemPaths, PinnedReorderActive, PinnedReorderPath
     global TextSourceReorderActive, TextSourceReorderPath
     global TextSourceReorderSourceId
+    global ManualSourceReorderActive, ManualSourceReorderPath
+    global ManualSourceReorderSourceId
     global DragPaths, DragItemContexts, DragStarted, StatusKind, ViewMode
 
     if CompleteFolderGroupHeaderClick(hwnd, lParam)
         return 0
 
-    if !PinnedReorderActive && !TextSourceReorderActive {
+    if !PinnedReorderActive && !TextSourceReorderActive
+        && !ManualSourceReorderActive {
         ProcessFilePointerUp(hwnd, lParam)
         DragPaths := []
         DragItemContexts := []
@@ -270,35 +308,45 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
         PinnedReorderPath := ""
         TextSourceReorderPath := ""
         TextSourceReorderSourceId := ""
+        ManualSourceReorderPath := ""
+        ManualSourceReorderSourceId := ""
         PreviewRecoverAfterInteraction()
         return
     }
 
     isSourceReorder := TextSourceReorderActive
+    isManualReorder := ManualSourceReorderActive
     PinnedReorderActive := false
     TextSourceReorderActive := false
+    ManualSourceReorderActive := false
     DllCall("user32\ReleaseCapture")
-    sourcePath := isSourceReorder
-        ? TextSourceReorderPath : PinnedReorderPath
-    sourceId := TextSourceReorderSourceId
+    sourcePath := isSourceReorder ? TextSourceReorderPath
+        : isManualReorder ? ManualSourceReorderPath : PinnedReorderPath
+    sourceId := isSourceReorder ? TextSourceReorderSourceId
+        : isManualReorder ? ManualSourceReorderSourceId : ""
     CancelFilePointerGesture()
     PinnedReorderPath := ""
     TextSourceReorderPath := ""
     TextSourceReorderSourceId := ""
+    ManualSourceReorderPath := ""
+    ManualSourceReorderSourceId := ""
     DragPaths := []
     DragItemContexts := []
     DragStarted := false
     PreviewRecoverAfterInteraction()
     StatusKind := "default"
-    SetBackgroundStatus(isSourceReorder
-        ? "文件夹内置顶顺序未更改" : "固定项顺序未更改", 1500)
+    SetBackgroundStatus(isManualReorder ? "手动顺序未更改"
+        : isSourceReorder ? "文件夹内置顶顺序未更改"
+        : "固定项顺序未更改", 1500)
 
     if !IsObject(FileView) || hwnd != FileView.Hwnd
         return
 
     x := SignedMouseCoordinate(lParam & 0xFFFF)
     y := SignedMouseCoordinate((lParam >> 16) & 0xFFFF)
-    targetRow := isSourceReorder
+    targetRow := isManualReorder
+        ? HitTestManualSourceReorderRow(hwnd, x, y, sourceId)
+        : isSourceReorder
         ? HitTestTextSourceReorderRow(hwnd, x, y, sourceId)
         : HitTestPinnedReorderRow(hwnd, x, y)
     if !targetRow || !ItemPaths.Has(targetRow)
@@ -311,7 +359,7 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
     NumPut("int", 0, itemRect, 0) ; LVIR_BOUNDS
     if DllCall("user32\SendMessageW", "ptr", hwnd, "uint", 0x100E,
         "ptr", targetRow - 1, "ptr", itemRect.Ptr, "ptr") {
-        if isSourceReorder || ViewMode = "Thumbnail" {
+        if isSourceReorder || isManualReorder || ViewMode = "Thumbnail" {
             left := NumGet(itemRect, 0, "int")
             right := NumGet(itemRect, 8, "int")
             placeAfter := x >= Floor((left + right) / 2)
@@ -322,14 +370,17 @@ FileViewLeftButtonUp(wParam, lParam, msg, hwnd) {
         }
     }
 
-    saved := isSourceReorder
+    saved := isManualReorder
+        ? ReorderManualSourcePath(sourceId, sourcePath, targetPath, placeAfter)
+        : isSourceReorder
         ? ReorderTextSourcePinnedPath(
             sourceId, sourcePath, targetPath, placeAfter)
         : ReorderPinnedPath(sourcePath, targetPath, placeAfter)
     if saved {
         StatusKind := "default"
-        SetBackgroundStatus(isSourceReorder
-            ? "已保存文件夹内置顶顺序" : "已保存固定项顺序", 3000)
+        SetBackgroundStatus(isManualReorder ? "已保存手动顺序"
+            : isSourceReorder ? "已保存文件夹内置顶顺序"
+            : "已保存固定项顺序", 3000)
     }
 }
 
@@ -739,6 +790,42 @@ IsTextSourcePinnedReorderRow(row, sourceId) {
         && StrLower(context.SourceId) = StrLower(sourceId)
 }
 
+HitTestManualSourceReorderRow(hwnd, x, y, sourceId) {
+    global FileView, ItemOpenContexts
+    if !IsObject(FileView) || hwnd != FileView.Hwnd
+        return 0
+    row := HitTestListRow(hwnd, x, y)
+    if IsManualSourceReorderRow(row, sourceId)
+        return row
+    for candidateRow, context in ItemOpenContexts {
+        if !IsManualSourceReorderRow(candidateRow, sourceId)
+            continue
+        itemRect := GetListItemBounds(hwnd, candidateRow)
+        if IsObject(itemRect)
+            && x >= itemRect.Left && x < itemRect.Right
+            && y >= itemRect.Top && y < itemRect.Bottom
+            return candidateRow
+    }
+    return 0
+}
+
+IsManualSourceReorderRow(row, sourceId) {
+    global ItemOpenContexts, LastValidFolderSettings, SORT_MANUAL
+    if !row || !ItemOpenContexts.Has(row)
+        return false
+    context := ItemOpenContexts[row]
+    if context.Area != "Source" || !HasProp(context, "SourceId")
+        || StrLower(context.SourceId) != StrLower(sourceId)
+        return false
+    if HasProp(context, "FolderPinned") && context.FolderPinned
+        return false
+    for folder in LastValidFolderSettings {
+        if StrLower(folder.SourceId) = StrLower(sourceId)
+            return folder.SortMode = SORT_MANUAL
+    }
+    return false
+}
+
 IsPinnedItemRow(row) {
     global ItemOpenContexts
     return row && ItemOpenContexts.Has(row)
@@ -907,6 +994,80 @@ ReorderPinnedPath(sourcePath, targetPath, placeAfter) {
 
     PopulatePanel()
     return true
+}
+
+ReorderManualSourcePath(sourceId, sourcePath, targetPath, placeAfter) {
+    global LastValidFolderSettings, Workspaces, CurrentScanResult
+    global CurrentConfigFingerprint, CurrentScanRevision
+    global PanelRenderSignature, RecentRenderSignature, CONFIG_VERSION
+
+    folder := 0
+    folderIndex := 0
+    for index, candidate in LastValidFolderSettings {
+        if StrLower(candidate.SourceId) = StrLower(sourceId) {
+            folder := candidate
+            folderIndex := index
+            break
+        }
+    }
+    if !IsObject(folder) || folderIndex > CurrentScanResult.Folders.Length
+        return false
+    scan := CurrentScanResult.Folders[folderIndex]
+    order := HasProp(folder, "ManualOrder") ? folder.ManualOrder.Clone() : []
+    for item in scan.Files {
+        if !ArrayContainsPath(order, item.Path)
+            order.Push(item.Path)
+    }
+    sourceIndex := FindPathIndex(order, sourcePath)
+    targetIndex := FindPathIndex(order, targetPath)
+    if !sourceIndex || !targetIndex || sourceIndex = targetIndex
+        return false
+    original := order.Clone()
+    moved := order.RemoveAt(sourceIndex)
+    targetIndex := FindPathIndex(order, targetPath)
+    order.InsertAt(targetIndex + (placeAfter ? 1 : 0), moved)
+    if PathArraysEqual(original, order)
+        return false
+
+    try AtomicConfigEdit(WriteManualSourceOrder.Bind(
+        sourceId, folder.Path, order))
+    catch as err {
+        ShowPanelMsgBox("无法保存手动顺序：`n" err.Message,
+            "手动排序失败", "Iconx")
+        return false
+    }
+
+    folder.ManualOrder := order.Clone()
+    for workspace in Workspaces {
+        for source in workspace.Sources {
+            if StrLower(source.SourceId) = StrLower(sourceId)
+                source.ManualOrder := order.Clone()
+        }
+    }
+    ; AHK v2 requires a real variable for a ByRef argument; object properties
+    ; such as scan.Files cannot be passed with '&' directly.
+    scanFiles := scan.Files
+    ApplyManualFileOrder(&scanFiles, order)
+    scan.Files := scanFiles
+    CurrentConfigFingerprint := ComputeConfigFingerprint(
+        LastValidFolderSettings)
+    CurrentScanResult.Fingerprint := CurrentConfigFingerprint
+    CurrentScanRevision := NextScanContentRevision()
+    PanelRenderSignature := ""
+    RecentRenderSignature := ""
+    RememberCurrentWorkspaceSnapshot()
+    QueueCurrentScanCacheWrite()
+    PopulatePanel()
+    return true
+}
+
+WriteManualSourceOrder(sourceId, sourceRoot, order, tempPath) {
+    global CONFIG_VERSION
+    doc := OpenPopDropConfig(tempPath)
+    WriteSourcePathSection(doc, "SourceManualOrder:" sourceId,
+        sourceRoot, order)
+    doc.SetValue("General", "ConfigVersion", CONFIG_VERSION, 1)
+    doc.Save()
 }
 
 PathArraysEqual(left, right) {

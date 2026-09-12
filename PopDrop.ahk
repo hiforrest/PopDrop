@@ -8,7 +8,7 @@
 ;@Ahk2Exe-AddResource assets\pin.ico, 557
 ;@Ahk2Exe-AddResource assets\empty-folder.ico, 558
 ;@Ahk2Exe-AddResource assets\unknown-file.ico, 559
-;@Ahk2Exe-SetVersion 2.1.3.0
+;@Ahk2Exe-SetVersion 2.1.6.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -20,8 +20,9 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global SORT_SMART := "Smart"
-global APP_VERSION := "2.1.3"
-global CONFIG_VERSION := "30"
+global SORT_MANUAL := "Manual"
+global APP_VERSION := "2.1.6"
+global CONFIG_VERSION := "31"
 global CONTENT_UPDATE_FAST := "Fast"
 global CONTENT_UPDATE_ACCURACY := "Accuracy"
 global UI_SCALE_100 := "100"
@@ -223,6 +224,7 @@ global TextBlockCardHeight := 68
 global ThumbnailImageList := 0
 global ThumbnailImageListEdge := 0
 global ThumbnailIconCache := Map()
+global ShellSystemImageLists := Map()
 ; Main-panel width is expressed in logical GUI pixels. 330 keeps a useful
 ; file region beside the fixed 32-DIP action rail for side-docked layouts.
 global PANEL_MIN_WIDTH := 330
@@ -377,6 +379,9 @@ global PinnedReorderPath := ""
 global TextSourceReorderActive := false
 global TextSourceReorderPath := ""
 global TextSourceReorderSourceId := ""
+global ManualSourceReorderActive := false
+global ManualSourceReorderPath := ""
+global ManualSourceReorderSourceId := ""
 global DropVTable := 0
 global DropCallbacks := []
 global DataVTable := 0

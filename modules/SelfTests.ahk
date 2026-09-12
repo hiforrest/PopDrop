@@ -18,6 +18,7 @@ RunSelfTests() {
         RunSourceManagementSelfTests()
         RunSourceRemovalConfigSelfTests()
         RunNoiseFilterSelfTests()
+        RunManualSortSelfTests()
         RunWorkspaceSelfTests()
         RunCacheMaintenanceSelfTests()
         RunOpenAppActionSelfTests()
@@ -554,6 +555,25 @@ RunSelfTests() {
             " self-test: FAIL - " err.Message "`n", "*")
         ExitApp(1)
     }
+}
+
+RunManualSortSelfTests() {
+    files := [
+        {Path: "C:\manual\10.txt", Name: "10.txt", Modified: "",
+            IsDirectory: false, TimeKind: "File"},
+        {Path: "C:\manual\2.txt", Name: "2.txt", Modified: "",
+            IsDirectory: false, TimeKind: "File"},
+        {Path: "C:\manual\A.txt", Name: "A.txt", Modified: "",
+            IsDirectory: false, TimeKind: "File"}
+    ]
+    ApplyManualFileOrder(&files,
+        ["C:\manual\A.txt", "C:\manual\10.txt"])
+    AssertSelfTest(PathsEqual(files[1].Path, "C:\manual\A.txt"),
+        "手动排序保留首项")
+    AssertSelfTest(PathsEqual(files[2].Path, "C:\manual\10.txt"),
+        "手动排序保留次项")
+    AssertSelfTest(PathsEqual(files[3].Path, "C:\manual\2.txt"),
+        "未排序新项目稳定追加")
 }
 
 RunWorkspaceSelfTests() {

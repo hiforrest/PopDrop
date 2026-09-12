@@ -636,10 +636,12 @@ CreateTransferId(prefix) {
 
 IsCompatibleTransferHelperVersion(helperVersion) {
     global APP_VERSION
-    ; v2.1.3 changes only AHK foreground-file resolution and keeps the transfer
-    ; protocol. A source package may therefore use a retained v2.1.1
-    ; helper until release binaries are rebuilt on Windows.
-    return helperVersion = APP_VERSION || helperVersion = "2.1.1"
+    ; v2.1.6 fixes an AHK-side startup parse error and keeps the transfer
+    ; protocol unchanged. Accept prior protocol-compatible release helpers.
+    return helperVersion = APP_VERSION || helperVersion = "2.1.5"
+        || helperVersion = "2.1.4"
+        || helperVersion = "2.1.3"
+        || helperVersion = "2.1.1"
         || helperVersion = "2.0"
         || helperVersion = "1.1.2"
 }

@@ -1,7 +1,31 @@
-# PopDrop v2.1.3 预发布交付说明
+# PopDrop v2.1.6 预发布交付说明
+
+v2.1.6 修复 v2.1.5 中 `ApplyManualFileOrder(&scan.Files, order)` 导致的 AHK v2
+启动解析错误，并新增同类语法回归门禁。配置版本仍为 31。
+
+本次交付新增 Files / Launcher 来源内的手动拖拽排序，并允许父文件夹与子文件夹同时作为
+来源。手动顺序按来源保存在 `[SourceManualOrder:<SourceId>]`；配置版本为 31，
+配置自动升至版本 31，
+扫描请求格式升至 7。相同路径的重复来源仍会被拦截。
+
+- Python 回归：228/228 通过，包含新增手动排序全链路与嵌套来源契约。
+- Windows 交付门禁仍需在 Windows 10/11 构建机运行 AHK `--self-test`、MSVC Helper
+  构建和 Ahk2Exe 主程序构建；本包保留兼容的既有 2.1.4 Helper 二进制，并提供 2.1.6
+  Helper 源码供正式构建。
 
 ## 本次修正
 
+- v2.1.4 修复本轮两类图标缺陷。根因一：同步图标路径用 `SHGFI_ICON` 取得常见 32 px HICON，
+  再由 96/128 等大尺寸 ListView ImageList 放大，因而在 1920×1080 等 100% DPI 环境也明显发虚；
+  现改为 `SHGFI_SYSICONINDEX` + `SHGetImageList(SHIL_LARGE/EXTRALARGE/JUMBO)`，按目标边长选择
+  高分辨率系统图标后再缩小。根因二：`.lnk/.url/.exe/.ico` 被与普通文档一样按扩展名缓存，
+  `.lnk` 实际查询的是虚构的 `PopDrop.lnk`，只能返回通用空白页；而后台 Helper 使用
+  `THUMBNAILONLY` 明确禁止图标 fallback，因此不会自行修复。现在这几类按实际路径取 Shell 图标
+  索引并保留 overlay，快捷方式可显示目标或自定义图标。
+- 首帧性能边界保持：普通文件仍按扩展名共享类型图标；逐文件格式只查询 Shell 图标索引，不调用
+  `IShellItemImageFactory`、不触发内容缩略图解码。系统 IImageList 接口按尺寸缓存并在退出时释放；
+  `SHGetImageList` 不可用时保留原 `SHGFI_ICON` 回退。Fast 模式也能得到清晰真实图标，Full 模式
+  在此基础上继续由隔离 Helper 异步替换真实内容缩略图。
 - v2.1.3 将截图实机确认的 WPS 365 集成宿主 `wpsoffice.exe` 纳入 WPS 专用处理链：对象模型
   严格按 KWPS/KET/KWPP 顺序尝试，活动文档继续与目标窗口标题交叉核对，不查询 Microsoft
   Office ProgID；该进程同时进入 WPS 当前用户最近文档注册表回退。命令行、句柄、Windows
@@ -11,12 +35,16 @@
   磁盘、不要求管理员权限，也不启动或创建 WPS 实例。新增静态契约与 AutoHotkey 进程分类/
   ProgID 顺序自测后，完整 Python 回归为 225/225；应用、Ahk2Exe、构建门禁与 Helper 源码版本
   同步升至 2.1.3，配置版本保持 30。
-- 本环境为 Linux，缺少 AutoHotkey、Ahk2Exe、PowerShell 和 MSVC，因此未执行
-  `PopDrop.ahk --self-test`、主程序编译、原生 Helper 构建及 WPS 365 实机识别。正式发布前须在
-  Windows/MSVC 环境重新构建 v2.1.3 Helper，并在 WPS 365 中运行前台文件探针与主程序自测。
+- v2.1.4 完整 Python 回归为 226/226（30319 个 subtests），包含 AHK v2 静态语法门禁；
+  `ScanCache.ahk` 与实际 include 的 `ScanCacheIntegrity.inc` 保持逐字节一致。图标资源也核对过，
+  `app.ico` 与内置状态 ICO 均含高分辨率条目，工具栏 PNG 为 64×64，因此本轮没有通过替换素材
+  掩盖 Shell 取图链路问题。
+- 本环境为 Linux，缺少 AutoHotkey、Ahk2Exe、PowerShell、Windows Shell 实机和 MSVC，因此未执行
+  `PopDrop.ahk --self-test`、主程序编译、原生 Helper 构建、Windows 图标渲染及 WPS 365 实机识别。
+  正式发布前须在 Windows/MSVC 环境重新构建 v2.1.4 Helper，并运行主程序自测与图标回归。
 - 随包 x86/x64 `PopDropTransfer.exe` 是不可伪造的历史构建产物；二进制检查显示其嵌入版本为
-  0.9.0，而不是旧说明所称的 2.1.1。它们不会通过当前握手，不能作为正式发布 Helper。源码仍
-  仅明确兼容协议未变化的 2.1.1 Helper；未修改或二进制打补丁。
+  0.9.0，而不是旧说明所称的 2.1.1。它们不会通过当前握手，不能作为正式发布 Helper。源码明确
+  接受经确认协议未变化的 2.1.3、2.1.1、2.0、1.1.2 Helper；未修改或二进制打补丁。
 
 - v2.1.2 针对 WPS 补充两级可靠回退：读取目标进程命令行中的完整文件参数；仍未命中时，在
   1.2 秒/5000 值硬上限内读取当前用户 `Kingsoft\Office` 最近文档字符串。两种结果均与窗口
