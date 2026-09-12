@@ -6,7 +6,7 @@ $previewSource = Join-Path $PSScriptRoot "PopDropPreview\PopDropPreview.cpp"
 $outRoot = Join-Path $PSScriptRoot "bin"
 
 $transferText = Get-Content -LiteralPath $source -Raw
-if ($transferText -notmatch 'kHelperVersion\[\]\s*=\s*L"2\.1\.6"') {
+if ($transferText -notmatch 'kHelperVersion\[\]\s*=\s*L"2\.1\.7"') {
     throw "PopDropTransfer source version is not 2.1.7."
 }
 
