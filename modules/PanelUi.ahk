@@ -3,7 +3,7 @@
 BuildPanel() {
     global Panel, FileView, RecentLabel, RecentView
     global DisplayButton, WindowModeButton, PinnedDropButton, StatusText
-    global ItemCountText
+    global ItemCountText, PinForegroundFileButton
     global ClipboardPinnedButton, RefreshButton, RemovePinnedButton
     global ExpandAllFoldersButton, CollapseAllFoldersButton
     global SettingsButton, TextBlockSearchFrame, TextBlockSearchEdit
@@ -78,6 +78,12 @@ BuildPanel() {
         "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
             " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
         "assets\toolbar\btn-add.png", "添加固定项", AddPinnedFiles)
+    PinForegroundFileButton := AddPanelIconButton(Panel,
+        "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
+            " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
+        "assets\toolbar\btn-add-active.png",
+        "固定前台文件（将前台程序正在编辑的文件加入固定项）",
+        PinForegroundEditingFile)
     RemovePinnedButton := AddPanelIconButton(Panel,
         "x0 y0 w" PanelScale(PANEL_SIDE_BUTTON_SIZE)
             " h" PanelScale(PANEL_SIDE_BUTTON_SIZE),
@@ -3186,7 +3192,7 @@ GetWorkspaceContentTop() {
 LayoutSideToolbar(width, contentTop, contentHeight) {
     global Panel
     global RefreshButton, ExpandAllFoldersButton, CollapseAllFoldersButton
-    global ClipboardPinnedButton, PinnedDropButton
+    global ClipboardPinnedButton, PinnedDropButton, PinForegroundFileButton
     global RemovePinnedButton, DisplayButton, SettingsButton
     global WindowModeButton, ToolbarSeparators
     global PANEL_SIDE_BUTTON_SIZE, PANEL_SIDE_TOOLBAR_EDGE_GAP
@@ -3204,11 +3210,12 @@ LayoutSideToolbar(width, contentTop, contentHeight) {
     topGap := PanelScale(1)
     buttons := [RefreshButton, ClipboardPinnedButton,
         ExpandAllFoldersButton, CollapseAllFoldersButton, PinnedDropButton,
-        RemovePinnedButton, DisplayButton, SettingsButton,
-        WindowModeButton]
+        PinForegroundFileButton, RemovePinnedButton, DisplayButton,
+        SettingsButton, WindowModeButton]
     ; Reference order and groups:
-    ; refresh | paste | expand + collapse | add + remove | display | settings | pin
-    separatorAfter := Map(1, 1, 2, 2, 4, 3, 6, 4, 7, 5, 8, 6)
+    ; refresh | paste | expand + collapse | add + pin-foreground + remove
+    ;   | display | settings | pin
+    separatorAfter := Map(1, 1, 2, 2, 4, 3, 7, 4, 8, 5, 9, 6)
     separatorCount := separatorAfter.Count
     plainGapCount := buttons.Length - 1 - separatorCount
     fixedHeight := topGap

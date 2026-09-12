@@ -1,7 +1,35 @@
-# PopDrop v2.0.12 预发布交付说明
+# PopDrop v2.1.3 预发布交付说明
 
 ## 本次修正
 
+- v2.1.3 将截图实机确认的 WPS 365 集成宿主 `wpsoffice.exe` 纳入 WPS 专用处理链：对象模型
+  严格按 KWPS/KET/KWPP 顺序尝试，活动文档继续与目标窗口标题交叉核对，不查询 Microsoft
+  Office ProgID；该进程同时进入 WPS 当前用户最近文档注册表回退。命令行、句柄、Windows
+  Recent、UI Automation 和唯一文档句柄回退均保留。未发现足够证据支持其他新版 WPS 进程
+  别名，因此未扩大匹配范围。
+- 候选路径仍须存在且为文件，文件名须匹配标题；同名不同目录时拒绝猜测。实现不扫描整个用户
+  磁盘、不要求管理员权限，也不启动或创建 WPS 实例。新增静态契约与 AutoHotkey 进程分类/
+  ProgID 顺序自测后，完整 Python 回归为 225/225；应用、Ahk2Exe、构建门禁与 Helper 源码版本
+  同步升至 2.1.3，配置版本保持 30。
+- 本环境为 Linux，缺少 AutoHotkey、Ahk2Exe、PowerShell 和 MSVC，因此未执行
+  `PopDrop.ahk --self-test`、主程序编译、原生 Helper 构建及 WPS 365 实机识别。正式发布前须在
+  Windows/MSVC 环境重新构建 v2.1.3 Helper，并在 WPS 365 中运行前台文件探针与主程序自测。
+- 随包 x86/x64 `PopDropTransfer.exe` 是不可伪造的历史构建产物；二进制检查显示其嵌入版本为
+  0.9.0，而不是旧说明所称的 2.1.1。它们不会通过当前握手，不能作为正式发布 Helper。源码仍
+  仅明确兼容协议未变化的 2.1.1 Helper；未修改或二进制打补丁。
+
+- v2.1.2 针对 WPS 补充两级可靠回退：读取目标进程命令行中的完整文件参数；仍未命中时，在
+  1.2 秒/5000 值硬上限内读取当前用户 `Kingsoft\Office` 最近文档字符串。两种结果均与窗口
+  标题中的文件名精确核对；WPS 历史出现同名不同路径时拒绝采用，避免固定错文件。原有 WPS
+  KWPS/KET/KWPP 对象模型、标题完整路径、进程句柄、Windows Recent 和 UI Automation 链路
+  保持为后续证据源。全程无需管理员权限、不扫描磁盘、不启动 PowerShell/WMI 服务。
+- 新增 WPS 中文/空格命令行与装饰 MRU 值的 AutoHotkey 自测，并扩充静态契约；完整 Python
+  回归为 225/225。应用、Ahk2Exe、构建门禁与源码 Helper 版本同步升至 2.1.2，配置版本仍为
+  30。该版本确认 2.1.1 Helper 与未变更的传输协议兼容；正式发布仍应在 Windows 重新构建
+  对应版本 Helper。
+- 本环境无法运行 AutoHotkey 与 MSVC：`PopDrop.ahk --self-test`、Ahk2Exe 编译、Helper 重建及
+  各软件实机识别需在 Windows 上完成。建议先运行 `tools\ForegroundFileProbe.ahk` 对常用软件
+  逐一验证，再编译发布。
 - v2.0.12 将 Ctrl 双击的提交条件调整为：只等待第二次左键抬起，不等待 Ctrl 松开；Shift、Alt、
   Win 等可能改变目标快捷键语义的额外修饰键仍需释放。这样用户持续按住 Ctrl 完成双击后就会
   立即前置发送，同时第二次鼠标抬起仍不会落入目标编辑器。v2.0.11 的消息快照、非阻塞计时器、

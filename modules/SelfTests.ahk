@@ -21,6 +21,7 @@ RunSelfTests() {
         RunWorkspaceSelfTests()
         RunCacheMaintenanceSelfTests()
         RunOpenAppActionSelfTests()
+        RunForegroundFileSelfTests()
         AssertSelfTest(ShouldCaptureTextBlockPaste(
             true, true, "Cards", true),
             "文本卡片区 Ctrl+V 创建固定文本块")
@@ -1635,6 +1636,81 @@ RunConfigDocumentSelfTests() {
             "噪音过滤配置项说明写入且可诊断")
     } finally {
         try FileDelete(testPath)
+    }
+}
+
+RunForegroundFileSelfTests() {
+    AssertSelfTest(ForegroundProcessIsWps("wpsoffice.exe")
+        && ForegroundProcessIsWps("WPSOFFICE.EXE")
+        && !ForegroundProcessIsWps("winword.exe"),
+        "前台文件：WPS 365 集成宿主进程分类")
+    wps365Specs := ForegroundOfficeSpecs("wpsoffice.exe")
+    AssertSelfTest(wps365Specs.Length = 3
+        && wps365Specs[1][1] = "KWPS.Application"
+        && wps365Specs[2][1] = "KET.Application"
+        && wps365Specs[3][1] = "KWPP.Application",
+        "前台文件：WPS 365 依次查询文字、表格、演示对象模型")
+    AssertSelfTest(ForegroundExtractTitleFileName(
+        "● notes.md - project - Visual Studio Code") = "notes.md",
+        "前台文件：VS Code 标题提取文件名")
+    AssertSelfTest(ForegroundExtractTitleFileName(
+        "report.docx [只读] - Word") = "report.docx",
+        "前台文件：Word 只读标题提取文件名")
+    AssertSelfTest(ForegroundExtractTitleFileName(
+        "photo.psd @ 66.7% (RGB/8#)") = "photo.psd",
+        "前台文件：Photoshop 缩放后缀")
+    AssertSelfTest(ForegroundExtractTitleFileName(
+        "AutoCAD 2024 - [drawing1.dwg]") = "drawing1.dwg",
+        "前台文件：方括号包裹的文件名")
+    AssertSelfTest(ForegroundExtractTitleFileName("Google Chrome") = "",
+        "前台文件：无文件名标题")
+    AssertSelfTest(!ForegroundSegmentLooksLikeFileName("Visual Studio Code"),
+        "前台文件：普通标题段不是文件名")
+    AssertSelfTest(ForegroundDecodeFileUrl(
+        "file:///C:/Users/a/%E6%96%87%E6%A1%A3%201.txt")
+        = "C:\Users\a\文档 1.txt",
+        "前台文件：file URL 按 UTF-8 解码")
+    AssertSelfTest(ForegroundDecodeFileUrl("file://server/share/x.pdf")
+        = "\\server\share\x.pdf", "前台文件：UNC file URL")
+    AssertSelfTest(ForegroundNormalizeCandidatePath("C:/dir/a.pdf")
+        = "C:\dir\a.pdf", "前台文件：正斜杠路径规范化")
+    AssertSelfTest(ForegroundStripExtendedPrefix(
+        "\\?\UNC\server\share\a.txt") = "\\server\share\a.txt",
+        "前台文件：去除 UNC 扩展前缀")
+    AssertSelfTest(ForegroundQuoteArgument("C:\a b\") = '"C:\a b\\"',
+        "前台文件：带尾部反斜杠的参数转义")
+    AssertSelfTest(ForegroundQuoteArgument('say "hi"')
+        = '"say \"hi\""', "前台文件：带引号的参数转义")
+    record := ParseForegroundFileResult(SerializeForegroundFileResult(
+        ForegroundFileResultRecord("ok", "C:\a=b.txt", "office-com",
+            "winword.exe", "a=b.txt - Word", "", "office=hit")))
+    AssertSelfTest(record.Path = "C:\a=b.txt" && record.Status = "ok"
+        && record.Trace = "office=hit", "前台文件：结果记录往返")
+
+    foregroundTestRoot := A_Temp "\PopDrop-fg-selftest-" A_TickCount
+    foregroundTestPath := foregroundTestRoot "\WPS 路径 测试.docx"
+    try {
+        DirCreate(foregroundTestRoot)
+        FileAppend("test", foregroundTestPath, "UTF-8-RAW")
+        commandPaths := ForegroundFilePathsFromCommandLine(
+            ForegroundQuoteArgument("C:\Program Files\WPS Office\wps.exe")
+            . " " ForegroundQuoteArgument(foregroundTestPath))
+        AssertSelfTest(commandPaths.Length = 1
+            && commandPaths[1] = foregroundTestPath,
+            "前台文件：WPS 命令行保留带空格中文路径")
+
+        recentCandidates := []
+        recentSeen := Map()
+        recentSegments := ForegroundTitleSegments(
+            "WPS 路径 测试.docx - WPS Office")
+        ForegroundCollectWpsRecentValuePaths(
+            "time=1;path=" foregroundTestPath ";pin=0",
+            recentSegments, recentCandidates, recentSeen)
+        AssertSelfTest(recentCandidates.Length = 1
+            && recentCandidates[1] = foregroundTestPath,
+            "前台文件：WPS MRU 装饰值提取完整路径")
+    } finally {
+        try DirDelete(foregroundTestRoot, 1)
     }
 }
 

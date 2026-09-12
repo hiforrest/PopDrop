@@ -636,10 +636,11 @@ CreateTransferId(prefix) {
 
 IsCompatibleTransferHelperVersion(helperVersion) {
     global APP_VERSION
-    ; v2.0.1 keeps the v2.0/v1.1.2 transfer protocol. Source-mode testing may
-    ; therefore use either prior compatible helper until the Windows release
-    ; binaries are rebuilt from this package.
-    return helperVersion = APP_VERSION || helperVersion = "2.0"
+    ; v2.1.3 changes only AHK foreground-file resolution and keeps the transfer
+    ; protocol. A source package may therefore use a retained v2.1.1
+    ; helper until release binaries are rebuilt on Windows.
+    return helperVersion = APP_VERSION || helperVersion = "2.1.1"
+        || helperVersion = "2.0"
         || helperVersion = "1.1.2"
 }
 

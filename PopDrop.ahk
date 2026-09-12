@@ -8,7 +8,7 @@
 ;@Ahk2Exe-AddResource assets\pin.ico, 557
 ;@Ahk2Exe-AddResource assets\empty-folder.ico, 558
 ;@Ahk2Exe-AddResource assets\unknown-file.ico, 559
-;@Ahk2Exe-SetVersion 2.1.0.0
+;@Ahk2Exe-SetVersion 2.1.3.0
 ;@Ahk2Exe-SetName PopDrop
 
 ; Worker processes must be routed before any GUI, hotkey, tray or COM setup.
@@ -20,7 +20,7 @@
 global SORT_MODIFIED_DESC := "ModifiedDesc"
 global SORT_NAME_ASC := "NameAsc"
 global SORT_SMART := "Smart"
-global APP_VERSION := "2.1.0"
+global APP_VERSION := "2.1.3"
 global CONFIG_VERSION := "30"
 global CONTENT_UPDATE_FAST := "Fast"
 global CONTENT_UPDATE_ACCURACY := "Accuracy"
@@ -117,6 +117,22 @@ if A_Args.Length && A_Args[1] = "--scan-worker" {
     ExitApp
 }
 
+if A_Args.Length >= 3 && A_Args[1] = "--foreground-file-worker" {
+    ; 固定前台文件：在独立进程中识别前台程序正在编辑的文档，COM/UIA 调用
+    ; 卡住也不会冻结主界面。worker 写出结果文件后退出。
+    try WinHide("ahk_id " A_ScriptHwnd)
+    RunForegroundFileWorkerMode(A_Args[2], A_Args[3])
+    ExitApp
+}
+
+if A_Args.Length >= 3 && A_Args[1] = "--foreground-handle-worker" {
+    ; 由上面的 worker 再拉起：枚举目标进程已打开的文件句柄。个别句柄查询可能
+    ; 在内核中阻塞，因此隔离到单独进程，由父进程限时等待并可终止。
+    try WinHide("ahk_id " A_ScriptHwnd)
+    RunForegroundHandleWorkerMode(A_Args[2], A_Args[3])
+    ExitApp
+}
+
 ; 只有主界面进程拥有托盘图标。必须在 worker 分流之后再打开，
 ; 才能消除启动和刷新时短命 worker 图标的一闪而过。
 A_IconHidden := false
@@ -156,6 +172,7 @@ global DisplayButton := 0
 global DisplayMenu := 0
 global WindowModeButton := 0
 global PinnedDropButton := 0
+global PinForegroundFileButton := 0
 global ClipboardPinnedButton := 0
 global RefreshButton := 0
 global ExpandAllFoldersButton := 0
@@ -562,6 +579,9 @@ global TextBlockReturnFocus := 0
 ; panel is summoned. Used by integrations that need to return to the caller
 ; (for example, locating a Windows file/folder picker to a source folder).
 global PanelInvocationWindow := 0
+; 固定前台文件：进行中的识别任务与结果文件序号。
+global ForegroundFileJob := 0
+global ForegroundFileGeneration := 0
 ; Active only while contextual file/folder-picker group task links are visible.
 global SaveDialogTaskLinksVisible := false
 global TextBlockSendInProgress := false
@@ -685,6 +705,8 @@ OnMessage(0x004E, FileViewNotify)         ; WM_NOTIFY (group header click)
 #Include modules\ItemActions.ahk
 #Include modules\ContextMenus.ahk
 #Include modules\PointerInput.ahk
+#Include modules\ForegroundFileResolver.ahk
+#Include modules\ForegroundFile.ahk
 #Include modules\FileOperations.ahk
 #Include modules\DropTarget.ahk
 #Include modules\ShellDrag.ahk
