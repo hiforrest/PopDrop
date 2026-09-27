@@ -1660,7 +1660,7 @@ BuildAboutSettingsPage(c, tabs) {
 
     g.AddText("x235 y389 w180 h24", "打赏")
     g.AddText("x235 y421 w650 h44",
-        "如果你喜欢 PopDrop，或者它帮你提高了效率，欢迎把这份好心情也传递给我！")
+        "如果你喜欢 PopDrop，或者它帮你提高了效率，欢迎投喂 🥤")
     donate := AddUiButton(g, "x235 y457 w130", "打赏链接")
     donate.OnEvent("Click", OpenAboutUrl.Bind(
         "https://fs.to/support-popdrop"))

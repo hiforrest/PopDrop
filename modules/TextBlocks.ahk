@@ -1092,19 +1092,30 @@ TextBlockSearchTitleOnlyChanged(control, *) {
     SetTextBlockSearchTitleOnly(control.Value = 1, true)
 }
 
-SetTextBlockSearchTitleOnly(titleOnly, restoreSearchFocus := true) {
+SetTextBlockSearchTitleOnly(titleOnly, restoreSearchFocus := true,
+    persist := true) {
     global TextBlockSearchTitleOnly, TextBlockSearchEdit
     global TextBlockSearchTitleOnlyCheck, TextBlockSelectFirstPending
     titleOnly := !!titleOnly
+    previous := TextBlockSearchTitleOnly
+    if titleOnly != previous && persist {
+        try AtomicConfigSetValue("General", "TextBlockSearchTitleOnly",
+            titleOnly ? "1" : "0")
+        catch {
+            if IsObject(TextBlockSearchTitleOnlyCheck)
+                TextBlockSearchTitleOnlyCheck.Value := previous ? 1 : 0
+            throw
+        }
+    }
     if IsObject(TextBlockSearchTitleOnlyCheck)
         TextBlockSearchTitleOnlyCheck.Value := titleOnly ? 1 : 0
-    if titleOnly != TextBlockSearchTitleOnly {
+    if titleOnly != previous {
         TextBlockSearchTitleOnly := titleOnly
         TextBlockSelectFirstPending := true
         InvalidateCachedTextBlockSearchViews()
         PopulatePanel()
     }
-    ; The checkbox is a temporary modifier for the Edit. Return the caret and
+    ; The checkbox is a persistent search-scope option for the Edit. Return the caret and
     ; any existing selection immediately so typing can continue uninterrupted.
     if restoreSearchFocus && IsTextWorkspace()
         && IsObject(TextBlockSearchEdit) {
@@ -1142,9 +1153,9 @@ ToggleTextBlockTitleOnly(*) {
 
 InvalidateCachedTextBlockSearchViews() {
     global WorkspaceFileViewStates
-    ; “仅标题” belongs to the current visible panel session, not to an
-    ; individual workspace. Cached inactive views may have been rendered with
-    ; the previous scope, so mark them stale without restoring scope from them.
+    ; “仅标题” is a persistent global search scope, not per-workspace state.
+    ; Cached inactive text views may have been rendered with the previous scope,
+    ; so mark them stale and let the next activation use the persisted value.
     for _, state in WorkspaceFileViewStates {
         if HasProp(state, "RenderSignature")
             state.RenderSignature := ""
@@ -1172,11 +1183,9 @@ ResetTextBlockSearchSession(refresh := true, *) {
     global TextBlockSearchTitleOnly, TextBlockSearchTitleOnlyCheck
     global TextBlockSelectFirstPending, WorkspaceFileViewStates
     queryChanged := ClearTextBlockSearch(false)
-    scopeChanged := TextBlockSearchTitleOnly
-    TextBlockSearchTitleOnly := false
     TextBlockSelectFirstPending := true
     if IsObject(TextBlockSearchTitleOnlyCheck)
-        TextBlockSearchTitleOnlyCheck.Value := 0
+        TextBlockSearchTitleOnlyCheck.Value := TextBlockSearchTitleOnly ? 1 : 0
     ; Inactive hot views belong to the same visible session. Invalidate every
     ; cached query so reopening cannot resurrect a search from another text
     ; workspace that happened not to be active when the panel was hidden.
@@ -1187,9 +1196,9 @@ ResetTextBlockSearchSession(refresh := true, *) {
             state.RenderSignature := ""
         }
     }
-    if refresh && (queryChanged || scopeChanged)
+    if refresh && queryChanged
         PopulatePanel()
-    return queryChanged || scopeChanged
+    return queryChanged
 }
 
 FocusTextBlockSearch(*) {

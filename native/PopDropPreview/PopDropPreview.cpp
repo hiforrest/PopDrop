@@ -640,22 +640,46 @@ bool DecodeWicFile(const std::wstring& path, UINT maxWidth, UINT maxHeight,
             if (SafeMultiply(nativeWidth, 4, kMaxPixelBytes, bytes)
                 && SafeMultiply(bytes, nativeHeight,
                     kMaxPixelBytes, bytes)) {
-                image.width = nativeWidth;
-                image.height = nativeHeight;
-                image.stride = nativeWidth * 4;
-                image.pixels.resize(static_cast<size_t>(bytes));
+                const UINT nativeStride = nativeWidth * 4;
+                std::vector<BYTE> nativePixels(static_cast<size_t>(bytes));
                 if (SUCCEEDED(nativeTransform->CopyPixels(nullptr,
                         nativeWidth, nativeHeight, &format, orientation,
-                        image.stride, static_cast<UINT>(image.pixels.size()),
-                        image.pixels.data()))) {
-                    image.hasAlpha = false;
-                    for (size_t i = 3; i < image.pixels.size(); i += 4) {
-                        if (image.pixels[i] != 255) {
-                            image.hasAlpha = true;
-                            break;
+                        nativeStride, static_cast<UINT>(nativePixels.size()),
+                        nativePixels.data()))) {
+                    if (nativeWidth <= maxWidth && nativeHeight <= maxHeight) {
+                        image.width = nativeWidth;
+                        image.height = nativeHeight;
+                        image.stride = nativeStride;
+                        image.pixels = std::move(nativePixels);
+                        image.hasAlpha = false;
+                        for (size_t i = 3; i < image.pixels.size(); i += 4) {
+                            if (image.pixels[i] != 255) {
+                                image.hasAlpha = true;
+                                break;
+                            }
                         }
+                        return true;
                     }
-                    return true;
+
+                    // JPEG source transforms may return the nearest native DCT
+                    // size, e.g. 128 px for a 96 px request. Scale that already
+                    // bounded decode to the exact fit before publishing it.
+                    ComPtr<IWICBitmap> nativeBitmap;
+                    if (SUCCEEDED(factory->CreateBitmapFromMemory(
+                            nativeWidth, nativeHeight,
+                            GUID_WICPixelFormat32bppPBGRA, nativeStride,
+                            static_cast<UINT>(nativePixels.size()),
+                            nativePixels.data(), nativeBitmap.put()))) {
+                        ComPtr<IWICBitmapScaler> exactScaler;
+                        if (SUCCEEDED(factory->CreateBitmapScaler(
+                                exactScaler.put()))
+                            && SUCCEEDED(exactScaler->Initialize(
+                                nativeBitmap.get(), targetWidth, targetHeight,
+                                WICBitmapInterpolationModeFant))
+                            && CopyWicSource(exactScaler.get(), targetWidth,
+                                targetHeight, image))
+                            return true;
+                    }
                 }
             }
         }

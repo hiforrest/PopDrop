@@ -608,9 +608,17 @@ ReleaseMarshaledDataFile(path) {
 }
 
 ResolveTransferHelper() {
-    helperPath := A_ScriptDir "\native\bin\"
-        . (A_PtrSize = 8 ? "x64" : "x86") "\PopDropTransfer.exe"
-    return FileExist(helperPath) ? helperPath : ""
+    architecture := A_PtrSize = 8 ? "x64" : "x86"
+    packagedPath := A_ScriptDir "\PopDropTransfer.exe"
+    sourcePath := A_ScriptDir "\native\bin\" architecture
+        . "\PopDropTransfer.exe"
+    ; Release packages place native helpers beside PopDrop.exe, while source
+    ; checkouts keep architecture-specific binaries under native\bin.
+    if A_IsCompiled && FileExist(packagedPath)
+        return packagedPath
+    if FileExist(sourcePath)
+        return sourcePath
+    return FileExist(packagedPath) ? packagedPath : ""
 }
 
 EnsureTransferRuntimeDirectory() {
@@ -636,9 +644,11 @@ CreateTransferId(prefix) {
 
 IsCompatibleTransferHelperVersion(helperVersion) {
     global APP_VERSION
-    ; v2.1.7 fixes an AHK-side pointer-context error and keeps the transfer
+    ; v2.1.9 changes AHK/UI/preview behavior only and keeps the transfer
     ; protocol unchanged. Accept prior protocol-compatible release helpers.
-    return helperVersion = APP_VERSION || helperVersion = "2.1.6"
+    return helperVersion = APP_VERSION || helperVersion = "2.1.8"
+        || helperVersion = "2.1.7"
+        || helperVersion = "2.1.6"
         || helperVersion = "2.1.5"
         || helperVersion = "2.1.4"
         || helperVersion = "2.1.3"

@@ -415,6 +415,9 @@ EnsureRefreshConfigDefaults(doc) {
 }
 
 EnsureInterfaceConfigDefaults(doc) {
+    if !IsObject(GetDocumentEntry(doc, "General", "FileListTitleColumnWidth"))
+        doc.SetValue("General", "FileListTitleColumnWidth",
+            ConfigDefaultValue("General", "FileListTitleColumnWidth", "360"), 1)
     for item in [
         {Key: "FileViewGroupTopSpacing", Default: "4"},
         {Key: "FileViewGroupBottomSpacing", Default: "6"}
@@ -504,7 +507,9 @@ EnsureTextBlockConfigDefaults(doc) {
         {Key: "TextBlockCardWidth", Value:
             ConfigDefaultValue("General", "TextBlockCardWidth", "212")},
         {Key: "TextBlockCardHeight", Value:
-            ConfigDefaultValue("General", "TextBlockCardHeight", "68")}
+            ConfigDefaultValue("General", "TextBlockCardHeight", "68")},
+        {Key: "TextBlockSearchTitleOnly", Value:
+            ConfigDefaultValue("General", "TextBlockSearchTitleOnly", "0")}
     ]
     for entry in defaults {
         if !IsObject(GetDocumentEntry(doc, "General", entry.Key))
@@ -628,6 +633,7 @@ LoadSettings(*) {
     global IncludeSubfolders, ThumbnailSize, ThumbnailHorizontalGap, ThumbnailVerticalGap
     global FileViewGroupTopSpacing, FileViewGroupBottomSpacing
     global ThumbnailTextLines, TextBlockCardWidth, TextBlockCardHeight
+    global FileListTitleColumnWidth, TextBlockSearchTitleOnly
     global FolderSettings, PinnedPaths, Workspaces, TextSourcePinnedPaths
     global ActiveWorkspaceId, ActiveWorkspaceName, ActiveWorkspaceType
     global LastValidWorkspaceId
@@ -767,6 +773,13 @@ LoadSettings(*) {
     catch
         TextBlockCardHeight := 68
     TextBlockCardHeight := Max(48, Min(TextBlockCardHeight, 320))
+    try FileListTitleColumnWidth := Integer(IniRead(
+        ConfigPath, "General", "FileListTitleColumnWidth", "360"))
+    catch
+        FileListTitleColumnWidth := 360
+    FileListTitleColumnWidth := Max(64, Min(FileListTitleColumnWidth, 4096))
+    TextBlockSearchTitleOnly := IniRead(
+        ConfigPath, "General", "TextBlockSearchTitleOnly", "0") = "1"
 
     try WindowWidth := Integer(IniRead(ConfigPath, "General", "WindowWidth", "766"))
     catch

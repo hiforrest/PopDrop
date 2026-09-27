@@ -1,4 +1,20 @@
-# PopDrop v2.1.7 预发布交付说明
+# PopDrop v2.1.9 预发布交付说明
+
+v2.1.9 针对 v2.1.8 的 Windows 人工验收结果继续修复，配置版本保持 31：
+
+- 列表模式“文件”列继续复用 v2.1.8 已保存的宽度，恢复改为直接发送 Win32
+  `LVM_SETCOLUMNWIDTH`；它与拖拽后读取宽度的 `LVM_GETCOLUMNWIDTH` 使用相同原生像素语义，
+  避免通过 `ListView.ModifyCol` 恢复时再次施加 GUI DPI 缩放。
+- JPG/JPEG 等原生直解缩略图仍优先于 Shell-only 项，但同一优先级改为保持扫描 FIFO，避免
+  列表顶部 JPG 被后续 WebP/Markdown 持续压到队尾。
+- ListView 缩略图导入端不再拒绝大于 ImageList 边长的合法 PBGRA 响应，而是按比例缩小；
+  Native WIC 源码也会将 JPEG `GetClosestSize` 返回的较大最近尺寸再次缩放到请求范围。
+- 文本块“仅标题”已由 Windows 人工验收通过，本版保持 v2.1.8 行为不变。
+- 应用与 Transfer Helper 源码版本升至 2.1.9；配置格式仍为 31，传输/预览 IPC 协议不变。
+- Linux 审查环境执行跨平台 Python 回归；Windows AHK 自测、Ahk2Exe、MSVC Helper 重建和
+  真机 UI/缩略图烟测仍需在 Windows 构建机完成。
+
+## v2.1.7 历史交付说明
 
 v2.1.7 修复固定项指针手势进入手动来源排序判断时，读取不存在的
 `SourceId` 属性而弹窗的问题，并新增对应回归门禁。配置版本仍为 31。

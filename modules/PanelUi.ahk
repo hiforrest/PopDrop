@@ -7,7 +7,7 @@ BuildPanel() {
     global ClipboardPinnedButton, RefreshButton, RemovePinnedButton
     global ExpandAllFoldersButton, CollapseAllFoldersButton
     global SettingsButton, TextBlockSearchFrame, TextBlockSearchEdit
-    global TextBlockSearchTitleOnlyCheck
+    global TextBlockSearchTitleOnlyCheck, TextBlockSearchTitleOnly
     global TransferStatusText
     global APP_VERSION, WorkspaceTabs, WorkspaceMoreButton
     global WorkspaceBottomRule
@@ -126,6 +126,7 @@ BuildPanel() {
     TextBlockSearchTitleOnlyCheck := Panel.AddCheckBox(
         ScalePanelGuiOptions(
             "x644 y43 w76 h24 Hidden +0x04000000"), "仅标题")
+    TextBlockSearchTitleOnlyCheck.Value := TextBlockSearchTitleOnly ? 1 : 0
     TextBlockSearchTitleOnlyCheck.OnEvent("Click",
         TextBlockSearchTitleOnlyChanged)
     ; Pre-create the smart drop surfaces. They cover only the top navigation
@@ -194,6 +195,7 @@ CreatePanelFileView(visible := true) {
     view.OnEvent("DoubleClick", OpenFileViewItem)
     view.OnEvent("ContextMenu", FileViewContextMenu)
     view.OnEvent("ItemSelect", FileViewItemSelect)
+    InstallFileViewColumnResizeTracking(view)
     ; Preserve the existing buffered/transparent ListView rendering. Group
     ; header clicks are handled by PointerInput because common controls do not
     ; expose the previously assumed LVN_GROUPHEADERCLICK notification.
@@ -370,7 +372,7 @@ SelectWorkspaceFromMoreMenu(workspaceId, *) {
 
 UpdateWorkspaceTypeUi() {
     global TextBlockSearchFrame, TextBlockSearchEdit
-    global TextBlockSearchTitleOnlyCheck
+    global TextBlockSearchTitleOnlyCheck, TextBlockSearchTitleOnly
     global RefreshButton, PinnedDropButton
     global ClipboardPinnedButton, RemovePinnedButton, TextBlockSearchQuery
     global WorkspaceTabs, WorkspaceMoreButton, WorkspaceOverflowIds
@@ -385,8 +387,11 @@ UpdateWorkspaceTypeUi() {
             TextBlockSearchEdit.Value := ""
         }
     }
-    if IsObject(TextBlockSearchTitleOnlyCheck)
+    if IsObject(TextBlockSearchTitleOnlyCheck) {
         TextBlockSearchTitleOnlyCheck.Visible := textMode
+        if textMode
+            TextBlockSearchTitleOnlyCheck.Value := TextBlockSearchTitleOnly ? 1 : 0
+    }
     ApplyWorkspaceSearchNativeState(textMode)
     if IsObject(ClipboardPinnedButton) {
         ClipboardPinnedButton.Visible := true
@@ -404,7 +409,7 @@ UpdateWorkspaceTypeUi() {
 
 EnforceWorkspaceSearchVisibility() {
     global TextBlockSearchFrame, TextBlockSearchEdit
-    global TextBlockSearchTitleOnlyCheck
+    global TextBlockSearchTitleOnlyCheck, TextBlockSearchTitleOnly
     global TextBlockSearchQuery
     global TextBlockSelectFirstPending
     if !IsObject(TextBlockSearchEdit)
@@ -414,8 +419,11 @@ EnforceWorkspaceSearchVisibility() {
     if IsObject(TextBlockSearchFrame)
         TextBlockSearchFrame.Visible := textMode
     TextBlockSearchEdit.Visible := textMode
-    if IsObject(TextBlockSearchTitleOnlyCheck)
+    if IsObject(TextBlockSearchTitleOnlyCheck) {
         TextBlockSearchTitleOnlyCheck.Visible := textMode
+        if textMode
+            TextBlockSearchTitleOnlyCheck.Value := TextBlockSearchTitleOnly ? 1 : 0
+    }
     ApplyWorkspaceSearchNativeState(textMode)
     if !textMode {
         if TextBlockSearchQuery != ""
@@ -3623,8 +3631,91 @@ EnsureActiveWorkspaceViewMode() {
         "uint", 0x108F, "ptr", 0, "ptr", 0, "ptr") = expectedView
 }
 
-ApplyViewMode() {
+InstallFileViewColumnResizeTracking(view) {
+    global FileListHeaderSubclassCallback
+    if !IsObject(view) || !view.Hwnd
+        return false
+    if !FileListHeaderSubclassCallback
+        FileListHeaderSubclassCallback := CallbackCreate(
+            FileListHeaderSubclass, "", 6)
+    return !!DllCall("comctl32\SetWindowSubclass",
+        "ptr", view.Hwnd, "ptr", FileListHeaderSubclassCallback,
+        "uptr", 0x50444C43, "uptr", view.Hwnd, "int")
+}
+
+FileListHeaderSubclass(hwnd, msg, wParam, lParam, subclassId, refData) {
+    global FileListHeaderSubclassCallback
+    if msg = 0x004E && lParam { ; WM_NOTIFY from the ListView's header child
+        hwndFrom := NumGet(lParam + 0, "ptr")
+        code := NumGet(lParam + 0, A_PtrSize * 2, "int")
+        if code = -307 || code = -327 { ; HDN_ENDTRACKA / HDN_ENDTRACKW
+            headerHwnd := DllCall("user32\SendMessageW", "ptr", hwnd,
+                "uint", 0x101F, "ptr", 0, "ptr", 0, "ptr") ; LVM_GETHEADER
+            if headerHwnd && hwndFrom = headerHwnd
+                QueueFileListTitleColumnWidthPersistence(hwnd)
+        }
+    } else if msg = 0x0082 { ; WM_NCDESTROY
+        if FileListHeaderSubclassCallback
+            DllCall("comctl32\RemoveWindowSubclass",
+                "ptr", hwnd, "ptr", FileListHeaderSubclassCallback,
+                "uptr", subclassId, "int")
+    }
+    return DllCall("comctl32\DefSubclassProc",
+        "ptr", hwnd, "uint", msg, "ptr", wParam, "ptr", lParam, "ptr")
+}
+
+QueueFileListTitleColumnWidthPersistence(listHwnd) {
     global FileView, ViewMode
+    if ViewMode != "List" || IsTextWorkspace()
+        return false
+    if !IsObject(FileView) || !FileView.Hwnd || FileView.Hwnd != listHwnd
+        return false
+    ; HDN_ENDTRACK arrives while the header is still unwinding its drag
+    ; notification. Persist on the next message turn so LVM_GETCOLUMNWIDTH
+    ; observes the final committed width and config I/O never runs in WndProc.
+    SetTimer(PersistFileListTitleColumnWidth, -1)
+    return true
+}
+
+PersistFileListTitleColumnWidth(*) {
+    global FileView, ViewMode, FileListTitleColumnWidth, PanelUiScaleFactor
+    if ViewMode != "List" || IsTextWorkspace()
+        return false
+    if !IsObject(FileView) || !FileView.Hwnd
+        return false
+    widthPx := DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x101D, "ptr", 0, "ptr", 0, "ptr") ; LVM_GETCOLUMNWIDTH
+    if widthPx <= 0
+        return false
+    ; LVM_GETCOLUMNWIDTH returns native pixels. Remove only PopDrop's own UI
+    ; scale while persisting. Restore uses LVM_SETCOLUMNWIDTH directly, so the
+    ; value does not pass through Gui.ListView.ModifyCol's GUI DPI scaling a
+    ; second time. Existing v2.1.8 persisted widths therefore remain valid.
+    uiScale := PanelUiScaleFactor > 0 ? PanelUiScaleFactor : 1.0
+    logicalWidth := Round(widthPx / uiScale)
+    logicalWidth := Max(64, Min(logicalWidth, 4096))
+    if logicalWidth = FileListTitleColumnWidth
+        return false
+    try AtomicConfigSetValue("General", "FileListTitleColumnWidth", logicalWidth)
+    catch
+        return false
+    FileListTitleColumnWidth := logicalWidth
+    return true
+}
+
+SetFileListTitleColumnWidth(width) {
+    global FileView
+    if !IsObject(FileView) || !FileView.Hwnd
+        return false
+    widthPx := Max(1, PanelScale(width))
+    ; LVM_SETCOLUMNWIDTH consumes native pixels, exactly matching the value
+    ; observed through LVM_GETCOLUMNWIDTH after a manual Header drag.
+    return !!DllCall("user32\SendMessageW", "ptr", FileView.Hwnd,
+        "uint", 0x101E, "ptr", 0, "ptr", widthPx, "ptr")
+}
+
+ApplyViewMode() {
+    global FileView, ViewMode, FileListTitleColumnWidth
     if IsTextWorkspace() {
         ApplyTextBlockCardView()
         return
@@ -3632,7 +3723,7 @@ ApplyViewMode() {
     if ViewMode = "List" {
         DllCall("user32\SendMessageW", "ptr", FileView.Hwnd, "uint", 0x108E,
             "ptr", 1, "ptr", 0, "ptr") ; LVM_SETVIEW, LV_VIEW_DETAILS
-        FileView.ModifyCol(1, PanelScale(360))
+        SetFileListTitleColumnWidth(FileListTitleColumnWidth)
         FileView.ModifyCol(2, PanelScale(132))
         ApplyFileViewLabels(false)
     } else {

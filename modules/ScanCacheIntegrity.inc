@@ -550,8 +550,42 @@ QueueThumbnailEnhancement(path, row, cacheKey := "") {
     ; Keep only URL-like pseudo paths out of the native file protocol.
     if RegExMatch(path, "i)^(?:https?|ftp|webdav)://")
         return
-    ThumbnailEnhanceQueue.Push({Path: path, Row: row, CacheKey: cacheKey,
-        Generation: ThumbnailEnhanceGeneration})
+    directPreview := IsDirectThumbnailPreviewPath(path)
+    task := {Path: path, Row: row, CacheKey: cacheKey,
+        Generation: ThumbnailEnhanceGeneration, DirectPreview: directPreview}
+    if directPreview
+        InsertDirectThumbnailTaskInOrder(task)
+    else
+        ThumbnailEnhanceQueue.Push(task)
+}
+
+InsertDirectThumbnailTaskInOrder(task) {
+    global ThumbnailEnhanceQueue
+    ; Keep direct decoders ahead of potentially slow Shell-only work without
+    ; reversing scan order. InsertAt(1) made top-of-view JPGs wait behind every
+    ; later WebP/Markdown item, so their type icon could remain visible long
+    ; after lower rows had already received real thumbnails.
+    insertAt := ThumbnailEnhanceQueue.Length + 1
+    for index, pending in ThumbnailEnhanceQueue {
+        if !HasProp(pending, "DirectPreview") || !pending.DirectPreview {
+            insertAt := index
+            break
+        }
+    }
+    ThumbnailEnhanceQueue.InsertAt(insertAt, task)
+}
+
+IsDirectThumbnailPreviewPath(path) {
+    SplitPath(path, , , &extension)
+    extension := StrLower(extension)
+    ; WIC images and text/Markdown render entirely inside PopDropPreview and do
+    ; not need a potentially slow Shell thumbnail provider. Prioritize them so
+    ; ordinary JPG/JPEG and MD files become real thumbnails promptly.
+    return extension = "jpg" || extension = "jpeg" || extension = "jpe"
+        || extension = "png" || extension = "webp" || extension = "bmp"
+        || extension = "gif" || extension = "tif" || extension = "tiff"
+        || extension = "heic" || extension = "heif" || extension = "avif"
+        || extension = "md" || extension = "markdown" || extension = "txt"
 }
 
 EnhanceNextThumbnail() {
@@ -763,9 +797,8 @@ EnsureNativeThumbnailPreviewHelper() {
     }
     NumPut("uint", 0x56504450, ThumbnailNativePreviewMapView, 0)
     NumPut("uint", 5, ThumbnailNativePreviewMapView, 4)
-    helperPath := A_ScriptDir "\native\bin\"
-        . (A_PtrSize = 8 ? "x64" : "x86") "\PopDropPreview.exe"
-    if !FileExist(helperPath) {
+    helperPath := ResolvePreviewHelper()
+    if helperPath = "" {
         CleanupNativeThumbnailPreviewHelper(false)
         return false
     }
@@ -982,41 +1015,116 @@ InvalidateNativeListRow(hwnd, row) {
 
 AddNativeThumbnailPixels(pixels, width, height, stride, imageList, edge) {
     if !IsObject(pixels) || !imageList || edge < 1
-        || width < 1 || height < 1 || width > edge || height > edge
+        || width < 1 || height < 1 || stride < width * 4
         return 0
-    info := Buffer(40, 0)
-    NumPut("uint", 40, info, 0)
-    NumPut("int", edge, info, 4)
-    NumPut("int", -edge, info, 8)
-    NumPut("ushort", 1, info, 12)
-    NumPut("ushort", 32, info, 14)
+    scale := Min(1.0, edge / width, edge / height)
+    drawWidth := Max(1, Min(edge, Round(width * scale)))
+    drawHeight := Max(1, Min(edge, Round(height * scale)))
+    offsetX := Floor((edge - drawWidth) / 2)
+    offsetY := Floor((edge - drawHeight) / 2)
+
+    targetInfo := Buffer(40, 0)
+    NumPut("uint", 40, targetInfo, 0)
+    NumPut("int", edge, targetInfo, 4)
+    NumPut("int", -edge, targetInfo, 8)
+    NumPut("ushort", 1, targetInfo, 12)
+    NumPut("ushort", 32, targetInfo, 14)
     screenDc := DllCall("user32\GetDC", "ptr", 0, "ptr")
-    bits := 0
-    bitmap := DllCall("gdi32\CreateDIBSection", "ptr", screenDc,
-        "ptr", info.Ptr, "uint", 0, "ptr*", &bits,
-        "ptr", 0, "uint", 0, "ptr")
-    DllCall("user32\ReleaseDC", "ptr", 0, "ptr", screenDc)
-    if !bitmap || !bits {
-        if bitmap
-            DllCall("gdi32\DeleteObject", "ptr", bitmap)
+    if !screenDc
         return 0
+    targetBits := 0
+    targetBitmap := 0
+    sourceBitmap := 0
+    targetDc := 0
+    sourceDc := 0
+    oldTarget := 0
+    oldSource := 0
+    try {
+        targetBitmap := DllCall("gdi32\CreateDIBSection", "ptr", screenDc,
+            "ptr", targetInfo.Ptr, "uint", 0, "ptr*", &targetBits,
+            "ptr", 0, "uint", 0, "ptr")
+        if !targetBitmap || !targetBits
+            return 0
+        targetStride := edge * 4
+        DllCall("ntdll\RtlZeroMemory", "ptr", targetBits,
+            "uptr", targetStride * edge)
+
+        if drawWidth = width && drawHeight = height {
+            rowBytes := width * 4
+            Loop height
+                DllCall("ntdll\RtlMoveMemory",
+                    "ptr", targetBits + (offsetY + A_Index - 1) * targetStride
+                        + offsetX * 4,
+                    "ptr", pixels.Ptr + (A_Index - 1) * stride,
+                    "uptr", rowBytes)
+        } else {
+            sourceInfo := Buffer(40, 0)
+            NumPut("uint", 40, sourceInfo, 0)
+            NumPut("int", width, sourceInfo, 4)
+            NumPut("int", -height, sourceInfo, 8)
+            NumPut("ushort", 1, sourceInfo, 12)
+            NumPut("ushort", 32, sourceInfo, 14)
+            sourceBits := 0
+            sourceBitmap := DllCall("gdi32\CreateDIBSection",
+                "ptr", screenDc, "ptr", sourceInfo.Ptr, "uint", 0,
+                "ptr*", &sourceBits, "ptr", 0, "uint", 0, "ptr")
+            if !sourceBitmap || !sourceBits
+                return 0
+            sourceStride := width * 4
+            Loop height
+                DllCall("ntdll\RtlMoveMemory",
+                    "ptr", sourceBits + (A_Index - 1) * sourceStride,
+                    "ptr", pixels.Ptr + (A_Index - 1) * stride,
+                    "uptr", sourceStride)
+            targetDc := DllCall("gdi32\CreateCompatibleDC",
+                "ptr", screenDc, "ptr")
+            sourceDc := DllCall("gdi32\CreateCompatibleDC",
+                "ptr", screenDc, "ptr")
+            if !targetDc || !sourceDc
+                return 0
+            oldTarget := DllCall("gdi32\SelectObject",
+                "ptr", targetDc, "ptr", targetBitmap, "ptr")
+            oldSource := DllCall("gdi32\SelectObject",
+                "ptr", sourceDc, "ptr", sourceBitmap, "ptr")
+            if !oldTarget || !oldSource
+                return 0
+            blend := Buffer(4, 0)
+            NumPut("uchar", 255, blend, 2) ; SourceConstantAlpha
+            NumPut("uchar", 1, blend, 3) ; AC_SRC_ALPHA
+            if !DllCall("msimg32\AlphaBlend",
+                "ptr", targetDc, "int", offsetX, "int", offsetY,
+                "int", drawWidth, "int", drawHeight,
+                "ptr", sourceDc, "int", 0, "int", 0,
+                "int", width, "int", height,
+                "uint", NumGet(blend, 0, "uint"), "int")
+                return 0
+            DllCall("gdi32\SelectObject",
+                "ptr", sourceDc, "ptr", oldSource, "ptr")
+            oldSource := 0
+            DllCall("gdi32\SelectObject",
+                "ptr", targetDc, "ptr", oldTarget, "ptr")
+            oldTarget := 0
+        }
+        imageIndex := DllCall("comctl32\ImageList_Add", "ptr", imageList,
+            "ptr", targetBitmap, "ptr", 0, "int")
+        return imageIndex >= 0 ? imageIndex + 1 : 0
+    } finally {
+        if oldSource && sourceDc
+            DllCall("gdi32\SelectObject",
+                "ptr", sourceDc, "ptr", oldSource, "ptr")
+        if oldTarget && targetDc
+            DllCall("gdi32\SelectObject",
+                "ptr", targetDc, "ptr", oldTarget, "ptr")
+        if sourceDc
+            DllCall("gdi32\DeleteDC", "ptr", sourceDc)
+        if targetDc
+            DllCall("gdi32\DeleteDC", "ptr", targetDc)
+        if sourceBitmap
+            DllCall("gdi32\DeleteObject", "ptr", sourceBitmap)
+        if targetBitmap
+            DllCall("gdi32\DeleteObject", "ptr", targetBitmap)
+        DllCall("user32\ReleaseDC", "ptr", 0, "ptr", screenDc)
     }
-    targetStride := edge * 4
-    DllCall("ntdll\RtlZeroMemory", "ptr", bits,
-        "uptr", targetStride * edge)
-    offsetX := Floor((edge - width) / 2)
-    offsetY := Floor((edge - height) / 2)
-    rowBytes := width * 4
-    Loop height
-        DllCall("ntdll\RtlMoveMemory",
-            "ptr", bits + (offsetY + A_Index - 1) * targetStride
-                + offsetX * 4,
-            "ptr", pixels.Ptr + (A_Index - 1) * stride,
-            "uptr", rowBytes)
-    imageIndex := DllCall("comctl32\ImageList_Add", "ptr", imageList,
-        "ptr", bitmap, "ptr", 0, "int")
-    DllCall("gdi32\DeleteObject", "ptr", bitmap)
-    return imageIndex >= 0 ? imageIndex + 1 : 0
 }
 
 FinishNativeThumbnailPreview() {

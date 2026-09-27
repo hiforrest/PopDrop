@@ -1,7 +1,7 @@
 # PopDrop 构建与验证
 
 PopDrop 主程序使用 AutoHotkey v2；外部内容投放和文件预览 helper 使用 Windows C++。
-当前源码版本为 v2.1.7，配置版本为 31。
+当前源码版本为 v2.1.9，配置版本为 31。
 
 ## 环境
 
@@ -32,8 +32,8 @@ powershell -ExecutionPolicy Bypass -File .\native\build.ps1
 ```
 
 输出位置及 x86/x64 打包规则见 [native/README.md](native/README.md)。源码模式按
-AutoHotkey 位数从 `native\bin\<架构>` 加载；发布包应把对应架构的
-`PopDropTransfer.exe` 放在 `PopDrop.exe` 同目录。
+AutoHotkey 位数从 `native\bin\<架构>` 加载两个 Helper；编译版优先从 `PopDrop.exe`
+同目录加载 `PopDropTransfer.exe` 与 `PopDropPreview.exe`，并保留源码目录兼容回退。
 
 ## 编译主程序
 

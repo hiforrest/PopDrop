@@ -92,8 +92,9 @@ WPS 回退不需要管理员权限，也不扫描磁盘：命令行通过目标�
   正文、来源名和路径。勾选搜索框右侧“仅标题”后，同一组关键字只匹配卡片上实际显示的
   无扩展名标题，固定项与所有来源使用相同范围；切换范围保留查询、立即更新结果并把输入
   焦点交还搜索框。`/` 或 `Ctrl+F` 聚焦搜索框并全选已有搜索文字，`Esc` 先清空搜索。
-- “仅标题”只在本次窗口显示期间有效，可在文本工作区之间继续使用，不写入配置。自动
-  隐藏、手动关闭或发送文本后，下次呼出时查询和“仅标题”都会复位，显示全部文本块。
+- “仅标题”是持久搜索范围：勾选状态写入 `[General] TextBlockSearchTitleOnly`，切换文本
+  工作区、自动隐藏、手动关闭或重启后继续保持。关闭面板仍只清空查询文字，不再重置
+  “仅标题”；取消勾选后同样会立即保存。
 - 文本块工作区显示期间可按 `Alt+T` 切换“仅标题”；从卡片区触发时继续保留卡片焦点。
 - 文件区和文本卡片区使用无修饰方向键时始终单选一个真实项目，并跳过原生分组标题的
   “整组选择”状态；Ctrl/Shift 鼠标多选仍保持原有行为。
@@ -179,9 +180,10 @@ IDE 集成终端和第三方终端不在首版承诺范围，未识别目标继�
 3. 双击 `PopDrop.ahk`
 4. 按 `F2` 试试看
 
-外部内容投放需要 `native\bin\<架构>\PopDropTransfer.exe`，文件预览需要
-对应架构的 `native\bin\<架构>\PopDropPreview.exe`。正式发布包应已包含；源码运行时可用
-Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之外不需要第三方
+源码运行时，外部内容投放需要 `native\bin\<架构>\PopDropTransfer.exe`，文件预览需要
+对应架构的 `native\bin\<架构>\PopDropPreview.exe`；正式发布包则把两个 Helper 与
+`PopDrop.exe` 放在同一目录。运行时会按源码/编译布局自动解析。源码运行时可用 Windows
+自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之外不需要第三方
 运行库。除了右键菜单中的
 “复制到…”和“移动到…”，把项目投放到来源分组也可能操作真实文件；具体安全语义见
 “按来源投放本地文件”。
@@ -192,7 +194,7 @@ Windows 自带的 MSVC Build Tools 执行 `native\build.ps1` 构建。除此之�
 
 ```ini
 [General]
-ConfigVersion=30
+ConfigVersion=31
 Hotkey=F2
 DoubleHotkeyWorkspaceId=workspace-text-default
 MainHotkeyWorkspaceMode=LastWorkspace
@@ -209,9 +211,11 @@ ThumbnailVerticalGap=4
 FileViewGroupTopSpacing=4
 FileViewGroupBottomSpacing=6
 ThumbnailTextLines=2
+TextBlockSearchTitleOnly=0
 WindowWidth=766
 WindowHeight=576
 ViewMode=Thumbnail
+FileListTitleColumnWidth=360
 ShowRecentSidebar=0
 RecentFileCount=12
 CachePath=
@@ -301,6 +305,8 @@ Path=%USERPROFILE%\Downloads
 | `WindowWidth` / `WindowHeight` | 面板打开时的尺寸；宽度允许 330–980。 |
 | `TextBlockCardWidth` / `TextBlockCardHeight` | 文本块卡片宽高，单位 DIP；范围分别为 140–640 和 48–320。增大宽度可显示更长的横向文字，增大高度会自动容纳更多行。 |
 | `ViewMode` | `Thumbnail`=缩略图，`List`=文件名+修改时间。也可以从面板右侧“显示”图标菜单切换。 |
+| `FileListTitleColumnWidth` | 列表模式“文件”标题列宽度的持久值，默认 360；用户拖拽标题分隔线后自动更新，范围 64～4096。 |
+| `TextBlockSearchTitleOnly` | 文本块搜索范围，`1`=仅匹配卡片标题，`0`=同时搜索标题、正文、来源和路径；界面勾选后自动保存。 |
 | `ShowRecentSidebar` | `1`=显示最近打开侧边栏，`0`=关闭。也可以从右侧“显示”图标菜单随时开关。 |
 | `RecentFileCount` | 侧边栏最多显示多少个近期文件，范围 1～100。 |
 | `CachePath` | 运行时索引目录。留空时优先使用软件目录下的 `cache`；目录不可写或位于网络盘时回退到 `%LOCALAPPDATA%\PopDrop\cache`。 |
@@ -319,7 +325,7 @@ Path=%USERPROFILE%\Downloads
 项。扫描异常退出或超过 120 秒会自动重试一次；仍失败时可点击“刷新”强制替换旧任务。
 
 对应配置键为 `ContentUpdateMode=Fast` 或 `ContentUpdateMode=Accuracy`；建议通过设置页面修改。
-| `ThumbnailPolicy` | `Full`（默认）首帧先显示高分辨率 Shell 图标（快捷方式/EXE 使用逐文件真实图标），再逐项增强未缓存缩略图；`Fast` 不现场生成内容缩略图，但仍保留清晰的真实文件图标。 |
+| `ThumbnailPolicy` | `Full`（默认）首帧先显示高分辨率 Shell 图标（快捷方式/EXE 使用逐文件真实图标），再逐项增强未缓存缩略图；JPG/JPEG、常见 WIC 图片和 Markdown/文本等 Helper 可直接处理的项目优先增强。`Fast` 不现场生成内容缩略图，但仍保留清晰的真实文件图标。 |
 | `WindowMode` | 窗口显示模式：`temporary`（默认，置顶，切换到其他窗口后自动隐藏）、`always_on_top`（始终置顶）、`normal`（普通窗口，不置顶）。 |
 | `OpenFileMode` | 普通文件的鼠标激活方式：`DoubleClick`（默认）或 `SingleClick`。缺失、空值或未知值都回退为双击。 |
 | `DefaultContextMenu` | 默认右键菜单：`PopDrop`（默认、推荐）或 `System`。缺失、空值或未知值都安全回退为 PopDrop 快捷菜单。 |
@@ -331,7 +337,7 @@ Path=%USERPROFILE%\Downloads
 
 主面板右侧的“显示”眼睛图标打开一个 Windows 原生菜单，结构为：
 
-- “缩略图”和“列表”是互斥视图，圆点表示当前模式；
+- “缩略图”和“列表”是互斥视图，圆点表示当前模式；列表模式手动拖拽“文件”列分隔线后会保存宽度；
 - “文件预览”和“近期栏”是独立开关，勾选表示开启；
 - 点击当前视图不会重复刷新；切换其他项目会立即生效并持久化；
 - 按钮可通过 Tab 聚焦，并可用 Space/Enter、方向键、Enter 和 Esc 操作。

@@ -768,6 +768,20 @@ PreviewHide(reason := "", invalidate := false) {
     PreviewHideWindowOnly()
 }
 
+ResolvePreviewHelper() {
+    architecture := A_PtrSize = 8 ? "x64" : "x86"
+    packagedPath := A_ScriptDir "\PopDropPreview.exe"
+    sourcePath := A_ScriptDir "\native\bin\" architecture
+        . "\PopDropPreview.exe"
+    ; Official compiled packages place the helper beside PopDrop.exe. Source
+    ; runs keep using native\bin so development and release layouts both work.
+    if A_IsCompiled && FileExist(packagedPath)
+        return packagedPath
+    if FileExist(sourcePath)
+        return sourcePath
+    return FileExist(packagedPath) ? packagedPath : ""
+}
+
 PreviewEnsureHelper() {
     global PreviewMapHandle, PreviewMapView, PreviewRequestEvent
     global PreviewResponseEvent, PreviewShutdownEvent, PreviewObjectBase
@@ -821,9 +835,8 @@ PreviewEnsureHelper() {
         NumPut("uint", 0x56504450, mapView, 0) ; PDPV
         NumPut("uint", PREVIEW_PROTOCOL_VERSION, mapView, 4)
     } finally PreviewEndMapAccess(access)
-    helperPath := A_ScriptDir "\native\bin\"
-        . (A_PtrSize = 8 ? "x64" : "x86") "\PopDropPreview.exe"
-    if !FileExist(helperPath) {
+    helperPath := ResolvePreviewHelper()
+    if helperPath = "" {
         PreviewCloseHelperObjects(false)
         return false
     }
